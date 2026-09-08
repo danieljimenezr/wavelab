@@ -109,6 +109,9 @@ class App:
         self._warm_n = 0
         self._warm_month: str | None = None
         self._feed_task = None
+        self._tareas: list = []
+        #: False mientras calienta. Una sonda tiene que poder distinguir «arrancando» de «roto».
+        self.listo = False
 
     # ------------------------------------------------------------------ arranque
 
@@ -254,18 +257,38 @@ class App:
 APP = App()
 
 
+async def _arrancar(app_: "App") -> None:
+    """Calienta en SEGUNDO PLANO y solo entonces enciende los feeds.
+
+    Antes el calentamiento estaba en el arranque del servidor, y uvicorn no acepta conexiones hasta
+    que el arranque termina. Con nueve años de histórico eso son ~120 s en los que el puerto está
+    cerrado: `curl` da «conexión rechazada», que es indistinguible de un servicio roto.
+
+    Lo descubrió el propio pipeline de despliegue continuo, y de la peor manera: la comprobación de
+    salud esperaba 120 s, el calentamiento tardó 117,8, se agotó por dos segundos, revirtió un
+    despliegue que estaba perfectamente y declaró un incidente crítico inexistente.
+
+    Subir el plazo solo habría movido la frontera. Lo correcto es que el servidor RESPONDA desde el
+    primer segundo diciendo que está calentando: así una sonda puede distinguir «arrancando» de
+    «roto», que es justo para lo que existe una sonda.
+    """
+    import anyio
+    await anyio.to_thread.run_sync(app_.warmup)
+    app_.listo = True
+    app_._tareas = [asyncio.create_task(app_.supervise_feed(), name="feed-supervisor"),
+                    asyncio.create_task(app_.run_health(), name="health")]
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    APP.warmup()
-    tareas = [asyncio.create_task(APP.supervise_feed(), name="feed-supervisor"),
-              asyncio.create_task(APP.run_health(), name="health")]
+    tareas = [asyncio.create_task(_arrancar(APP), name="arranque")]
     try:
         yield
     finally:
         APP._flush()
-        for t in tareas:
+        for t in [*tareas, *getattr(APP, "_tareas", [])]:
             t.cancel()
-        await asyncio.gather(*tareas, return_exceptions=True)
+        await asyncio.gather(*tareas, *getattr(APP, "_tareas", []), return_exceptions=True)
 
 
 app = FastAPI(title="wavelab", lifespan=lifespan)
@@ -364,6 +387,10 @@ async def _validar_csv(request: Request, tf: str) -> JSONResponse:
     if len(cuerpo) > 12_000_000:
         return JSONResponse({"error": "el fichero supera los 12 MB"}, status_code=400)
     anillo = APP.engine.state.rings.get(tf)
+    if not APP.listo:
+        return JSONResponse({"error": "el servicio está cargando nueve años de histórico "
+                             f"({APP._warm_n} meses). Vuelve a intentarlo en un minuto."},
+                            status_code=503)
     if anillo is None or len(anillo) < 400:
         return JSONResponse({"error": f"sin datos suficientes en {tf}"}, status_code=400)
     try:
@@ -424,6 +451,10 @@ async def _validar_regla(request: Request) -> JSONResponse:
     body = await request.json()
     tf = body.get("tf", "1d")
     anillo = APP.engine.state.rings.get(tf)
+    if not APP.listo:
+        return JSONResponse({"error": "el servicio está cargando nueve años de histórico "
+                             f"({APP._warm_n} meses). Vuelve a intentarlo en un minuto."},
+                            status_code=503)
     if anillo is None or len(anillo) < 400:
         return JSONResponse({"error": f"sin datos suficientes en {tf}"}, status_code=400)
     w = anillo.window(len(anillo))
@@ -468,6 +499,10 @@ async def _validar_catalogo(hyp: str, tf: str) -> JSONResponse:
     if h is None:
         return JSONResponse({"error": f"hipótesis desconocida: {hyp}"}, status_code=400)
     anillo = APP.engine.state.rings.get(tf)
+    if not APP.listo:
+        return JSONResponse({"error": "el servicio está cargando nueve años de histórico "
+                             f"({APP._warm_n} meses). Vuelve a intentarlo en un minuto."},
+                            status_code=503)
     if anillo is None or len(anillo) < 400:
         return JSONResponse({"error": f"sin datos suficientes en {tf}"}, status_code=400)
 
@@ -552,9 +587,19 @@ async def ws(socket: WebSocket) -> None:
 
 @app.get("/api/estado")
 async def estado() -> JSONResponse:
-    """Salud del servicio, para vigilarlo desde fuera."""
-    return JSONResponse({"ok": True, "publico": PUBLICO, "limites": LIMITES.stats,
-                         "modo": APP.engine.state.health.mode.value})
+    """Salud del servicio. Responde DESDE EL PRIMER SEGUNDO, también mientras calienta.
+
+    `ok` significa «el proceso vive y sirve». `listo` significa «ya puede trabajar». Separarlos es
+    lo que permite a un despliegue esperar sin confundir un arranque lento con una avería.
+    """
+    return JSONResponse({
+        "ok": True,
+        "listo": APP.listo,
+        "publico": PUBLICO,
+        "calentando": None if APP.listo else {"meses": APP._warm_n, "mes": APP._warm_month},
+        "limites": LIMITES.stats,
+        "modo": APP.engine.state.health.mode.value,
+    })
 
 
 if WEB.exists():

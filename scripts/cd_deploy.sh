@@ -16,7 +16,10 @@ DEST=/opt/wavelab
 LOCK=/var/lock/wavelab-deploy.lock
 SHA_NUEVO=${1:-}
 SALUD_URL=http://127.0.0.1:8000/api/estado
-INTENTOS=40           # ~2 min: el calentamiento de 9 años tarda unos 120 s con CPUQuota=50%
+# El calentamiento de nueve años tarda ~120 s con CPUQuota=50%. El plazo se pone MUY por encima
+# a propósito: un plazo ajustado convierte cada despliegue en una moneda al aire, y ya pasó —
+# se agotó por dos segundos, revirtió un despliegue correcto y declaró un incidente inexistente.
+INTENTOS=120          # 6 minutos
 
 log() { printf '[cd] %s\n' "$*"; }
 fail() { log "FALLO: $*"; exit 1; }
@@ -33,8 +36,20 @@ log "actual $SHA_VIEJO -> solicitado $SHA_NUEVO"
 [ "$SHA_VIEJO" = "$SHA_NUEVO" ] && { log "ya está desplegado; nada que hacer"; exit 0; }
 
 comprobar_salud() {
-    for _ in $(seq 1 $INTENTOS); do
-        if curl -sf --max-time 5 "$SALUD_URL" | grep -q '"ok":true'; then return 0; fi
+    # Se espera a `listo`, no a `ok`. `ok` solo dice que el proceso vive; `listo` dice que ya
+    # puede trabajar. Confundirlos es dar por bueno un servicio que aún no sirve para nada.
+    local visto_ok=0
+    for i in $(seq 1 $INTENTOS); do
+        local r
+        r=$(curl -sf --max-time 5 "$SALUD_URL" 2>/dev/null || true)
+        if echo "$r" | grep -q '"listo":true'; then
+            log "sano tras $((i*3))s"
+            return 0
+        fi
+        if echo "$r" | grep -q '"ok":true'; then
+            [ "$visto_ok" = 0 ] && log "responde y está calentando…"
+            visto_ok=1
+        fi
         sleep 3
     done
     return 1
