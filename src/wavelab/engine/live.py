@@ -28,6 +28,7 @@ import numpy as np
 from wavelab.core.ring import Ring
 from wavelab.core.timeframes import MIN_SOURCE_COVERAGE, TF_1M, BY_NAME, Timeframe
 from wavelab.core.types import Bar
+from wavelab.waves.pivots import ZigZag, ZigZagConfig
 
 __all__ = ["Mode", "EngineState", "LiveEngine", "Health"]
 
@@ -75,6 +76,9 @@ class EngineState:
 
     symbol: str
     rings: dict[str, Ring] = field(default_factory=dict)
+    #: Un detector por timeframe de ANÁLISIS. 1m no lleva: es la serie fuente, no un timeframe
+    #: de análisis, y detectar pivotes en 1m sería medir ruido de microestructura.
+    detectors: dict[str, ZigZag] = field(default_factory=dict)
     provisional: Bar | None = None
     health: Health = field(default_factory=Health)
     n_bars_1m: int = 0
@@ -87,15 +91,17 @@ class LiveEngine:
     """Consume velas de 1m y mantiene los anillos de todos los timeframes."""
 
     def __init__(self, symbol: str, timeframes: list[str], ring_capacity: int = 8192,
-                 trigger_tf: str = "15m") -> None:
+                 trigger_tf: str = "15m", zigzag: ZigZagConfig | None = None) -> None:
         self.symbol = symbol.upper()
         self.tfs = [BY_NAME[t] for t in timeframes]
         self.trigger = BY_NAME[trigger_tf]
+        self.zz_cfg = zigzag or ZigZagConfig()
         self.state = EngineState(symbol=self.symbol)
         self.state.rings[TF_1M.name] = Ring(self.symbol, TF_1M, ring_capacity)
         for tf in self.tfs:
             if tf is not TF_1M:
                 self.state.rings[tf.name] = Ring(self.symbol, tf, ring_capacity)
+                self.state.detectors[tf.name] = ZigZag(self.zz_cfg)
         self._last_wall = time.time()
 
     # ------------------------------------------------------------------ resampleo
@@ -155,8 +161,30 @@ class LiveEngine:
             ult = anillo.last_closed_ts_ms
             if ult is None or htf.open_time_ms > ult:
                 anillo.append(htf)
+                # El detector se alimenta con la MISMA vela que acaba de entrar al anillo, vela a
+                # vela y en orden. Nunca se le pasa un array completo: llamarlo una vez sobre todo
+                # el histórico y luego trocear el resultado infla cada entrada en ~el umbral entero
+                # (1,2-2,5 ATR), que es más que cualquier ventaja real.
+                det = self.state.detectors.get(tf.name)
+                if det is not None:
+                    det.update(htf.open_time_ms, htf.high, htf.low, htf.close)
                 cerradas.append(htf)
         return cerradas
+
+    def waves(self, tf_name: str, now_ms: int | None = None,
+              since_ms: int | None = None) -> dict:
+        """Tramos y precio de confirmación para dibujar. Nunca lanza si el timeframe no existe."""
+        det = self.state.detectors.get(tf_name)
+        if det is None:
+            return {"legs": [], "confirm_price": None, "n_confirmed": 0, "atr": None}
+        anillo = self.state.rings.get(tf_name)
+        t = now_ms if now_ms is not None else (anillo.last_closed_ts_ms if anillo else 0) or 0
+        return {
+            "legs": det.legs_as_of(t, since_ms=since_ms),
+            "confirm_price": det.confirm_price(),
+            "n_confirmed": det.n_confirmed,
+            "atr": det.atr,
+        }
 
     def warmup(self, bars_1m: list[Bar]) -> int:
         """Carga histórico. Reproduce vela a vela, igual que la ruta viva: si el calentamiento

@@ -69,8 +69,13 @@ class App:
         tfs = asset.timeframes if asset else ["15m", "1h", "4h", "1d"]
         self.tfs = ["1m"] + [t for t in tfs if t != "1m"]
         self.store = BarStore(DATA / "bars")
-        self.engine = LiveEngine(self.symbol, self.tfs,
-                                 self.cfg.engine.ring_capacity, self.cfg.trigger_tf)
+        from wavelab.waves.pivots import ZigZagConfig
+        zz = ZigZagConfig(k_atr=self.cfg.engine.zigzag_k_atr,
+                          min_pct=self.cfg.engine.zigzag_min_pct,
+                          atr_period=self.cfg.engine.atr_period,
+                          on_close=(asset.r3_on == "close") if asset else False)
+        self.engine = LiveEngine(self.symbol, self.tfs, self.cfg.engine.ring_capacity,
+                                 self.cfg.trigger_tf, zigzag=zz)
         self.feed = KlineFeed(self.symbol)
         self.hub = Hub()
         self.started_ms = int(time.time() * 1000)
@@ -119,6 +124,13 @@ class App:
 
             for htf in cerradas:
                 await self.hub.send({"type": "bar", "tf": htf.tf.name, "bar": bar_json(htf)})
+                # Los tramos se recalculan solo cuando cierra una vela de ese timeframe: el
+                # detector no avanza entre medias, así que reenviar en cada tick sería ruido.
+                anillo = self.engine.state.rings[htf.tf.name]
+                vis = anillo.window(min(1500, len(anillo)))
+                await self.hub.send({"type": "waves", "tf": htf.tf.name,
+                                     **self.engine.waves(htf.tf.name,
+                                                         since_ms=int(vis.ts[0]))})
 
     def _flush(self) -> None:
         if not self._pending:
@@ -177,7 +189,11 @@ async def history(tf: str = "15m", limit: int = 1500) -> JSONResponse:
             for t, o, h, l, c, v, g in zip(w.ts, w.open, w.high, w.low, w.close, w.volume,
                                            w.is_gap, strict=True)]
     return JSONResponse({
+        # Los tramos se acotan a la MISMA ventana que las velas. Sin esto, Lightweight Charts
+        # estira el eje temporal para abarcar todos los pivotes históricos y comprime las velas
+        # hasta hacerlas ilegibles: el gráfico se vuelve una línea de zigzag sobre nada.
         "tf": tf, "symbol": APP.symbol, "bars": bars,
+        "waves": APP.engine.waves(tf, since_ms=int(w.ts[0])),
         "gaps": w.n_gaps, "health": APP.engine.state.health.as_dict(),
         "timeframes": list(APP.engine.state.rings),
         "roles": {t: BY_NAME[t].role.value for t in APP.engine.state.rings},

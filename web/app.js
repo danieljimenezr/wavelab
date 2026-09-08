@@ -1,4 +1,4 @@
-import { createChart, CandlestickSeries, HistogramSeries }
+import { createChart, CandlestickSeries, HistogramSeries, LineSeries, LineStyle }
   from './vendor/lightweight-charts.standalone.production.mjs';
 
 const $ = (id) => document.getElementById(id);
@@ -34,6 +34,21 @@ const volume = chart.addSeries(HistogramSeries, {
   priceFormat: { type: 'volume' }, priceScaleId: 'vol',
 });
 chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+
+// Tramos CONFIRMADOS: sólidos. Son estructura que ya no puede cambiar.
+const legs = chart.addSeries(LineSeries, {
+  color: '#c9a227', lineWidth: 2, priceLineVisible: false, lastValueVisible: false,
+  crosshairMarkerVisible: false,
+});
+// Tramo PROVISIONAL: discontinuo. Cambia legítimamente según se mueve el precio, y pintarlo
+// igual que uno confirmado sería afirmar una certeza que no se tiene. La separación visual no
+// es estética: es la diferencia entre informar y mentir.
+const legProv = chart.addSeries(LineSeries, {
+  color: '#8b7500', lineWidth: 2, lineStyle: LineStyle.Dashed, priceLineVisible: false,
+  lastValueVisible: false, crosshairMarkerVisible: false,
+});
+
+let confirmLine = null;
 
 
 let tfActual = '15m';
@@ -73,6 +88,7 @@ async function cargar(tf) {
   actualizarPrecio(d.bars.at(-1));
   chart.timeScale().fitContent();
   if (!$('tfs').children.length) construirSelector(d.timeframes, d.roles);
+  pintarOndas(d.waves);
   salud(d.health, d.gaps);
 }
 
@@ -91,6 +107,41 @@ function construirSelector(tfs, roles) {
     };
     nav.appendChild(b);
   }
+}
+
+function pintarOndas(w) {
+  if (!w) return;
+  const conf = w.legs.filter((l) => !l.tentative).map((l) => ({ time: l.ts / 1000, value: l.price }));
+  legs.setData(conf);
+
+  const prov = w.legs.find((l) => l.tentative);
+  legProv.setData(
+    prov && conf.length
+      ? [conf.at(-1), { time: prov.ts / 1000, value: prov.price }]
+      : [],
+  );
+
+  // ★ La línea gris del precio de confirmación.
+  // Casi nadie la implementa, y es lo que convierte la debilidad de repintado de Elliott en la
+  // línea más accionable del gráfico: dejas de ver "esto podría ser el techo" y pasas a ver el
+  // precio EXACTO en el que deja de ser un quizá.
+  if (confirmLine) { candles.removePriceLine(confirmLine); confirmLine = null; }
+  if (w.confirm_price != null && prov) {
+    const arriba = prov.kind === 1;
+    confirmLine = candles.createPriceLine({
+      price: w.confirm_price,
+      color: '#8b949e',
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      axisLabelVisible: true,
+      title: arriba ? 'confirma por debajo' : 'confirma por encima',
+    });
+  }
+  $('s-piv').textContent =
+    `pivotes: ${w.n_confirmed} · ATR ${fmt(w.atr, 0)} · ` +
+    (w.confirm_price != null
+      ? `${prov?.kind === 1 ? 'máximo' : 'mínimo'} tentativo, confirma en $${fmt(w.confirm_price, 0)}`
+      : 'sin estructura');
 }
 
 function salud(h, gaps) {
@@ -133,6 +184,7 @@ function conectar() {
   ws.onmessage = (ev) => {
     const m = JSON.parse(ev.data);
     if (m.type === 'health') { salud(m); return; }
+    if (m.type === 'waves') { if (m.tf === tfActual) pintarOndas(m); return; }
     // Solo interesan los mensajes del timeframe visible. El servidor manda DIFFS de todos:
     // filtrar aquí es más barato que abrir un socket por timeframe.
     if (m.tf !== tfActual) return;
