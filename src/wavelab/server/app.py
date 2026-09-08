@@ -80,6 +80,8 @@ class App:
         self.hub = Hub()
         self.started_ms = int(time.time() * 1000)
         self._pending: list[Bar] = []
+        self._warm_n = 0
+        self._warm_month: str | None = None
 
     # ------------------------------------------------------------------ arranque
 
@@ -92,7 +94,14 @@ class App:
         con un generador; la segunda solo se resuelve paginando la LECTURA. Así el pico es de un
         mes: ~44.000 filas.
         """
+        # Señal de progreso: en el VPS, con CPUQuota=50%, calentar nueve años tarda ~2 minutos.
+        # Un arranque MUDO de dos minutos es indistinguible de uno colgado, y lo primero que hace
+        # cualquiera ante eso es reiniciar el servicio — con lo que nunca termina de arrancar.
         for _key, df in self.store.iter_months(self.symbol, 0, hasta_ms):
+            self._warm_month = _key
+            if self._warm_n % 20 == 0:
+                print(f"[server] calentando… {_key} ({self._warm_n + 1} meses)", flush=True)
+            self._warm_n += 1
             for ts, r in zip(df.index, df.itertuples(index=False), strict=True):
                 yield Bar(symbol=self.symbol, tf=TF_1M, open_time_ms=int(ts),
                           open=float(r.open), high=float(r.high), low=float(r.low),
@@ -119,7 +128,7 @@ class App:
         n = self.engine.warmup(self._iter_bars(hasta))
         dt = time.perf_counter() - t0
         print(f"[server] calentado con {n:,} velas de 1m desde {meses[0]} "
-              f"en {dt:.1f}s ({n/dt:,.0f}/s)", flush=True)
+              f"en {dt:.1f}s ({n/dt:,.0f}/s, {len(meses)} meses)", flush=True)
         for tf in self.tfs:
             if tf != "1m":
                 print(f"[server]   {tf}: {self.engine.waves(tf)['n_confirmed']:,} pivotes",
