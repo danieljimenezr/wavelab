@@ -1,0 +1,31 @@
+# Configuración global. Los parámetros del MOTOR están en [engine] y no se ajustan:
+# cualquier cambio aquí escribe una fila en trials.sqlite y cuenta para el N efectivo.
+
+data_dir = "data"
+
+# Separación de roles como invariante duro: 1d/4h vetan, 1h clasifica régimen,
+# 15m es el ÚNICO que dibuja entradas.
+trigger_tf = "15m"
+regime_tf  = "1h"
+gate_tfs   = ["4h", "1d"]
+
+# La interfaz solo muestra largos, pero el motor evalúa y registra también los cortos en sombra.
+directions = ["long"]
+shadow_opposite_direction = true
+
+plugin_modules = []
+
+[engine]
+zigzag_k_atr  = 1.5
+zigzag_min_pct = 0.005
+atr_period    = 14
+er_period     = 20
+er_trend_enter = 0.35
+er_trend_exit  = 0.28
+er_chop_enter  = 0.20
+er_chop_exit   = 0.26
+stop_buffer_atr = 0.25
+max_stop_atr  = 3.0
+min_stop_atr  = 0.75
+ev_min_r      = 0.15
+window_bars   = 5000

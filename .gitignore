@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.hypothesis/
+.ruff_cache/
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.parquet
+*.zip
+config/secrets.toml
+.DS_Store
+.benchmarks/

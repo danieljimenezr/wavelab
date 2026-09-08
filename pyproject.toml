@@ -1,0 +1,78 @@
+[project]
+name = "wavelab"
+version = "0.1.0"
+description = "Analizador BTC en tiempo real: ondas de Elliott causales, régimen de mercado y puntos de entrada/salida con invalidación explícita"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.13,<3.14"
+
+dependencies = [
+    # --- núcleo numérico -------------------------------------------------
+    # numpy: el límite superior real lo pone scipy (numpy<2.8). Si algún día
+    # entra numba en la ruta caliente, hay que bajar a <2.6 (numba 0.67 lo pina).
+    "numpy>=2.5,<2.8",
+    # pandas: SOLO en la frontera de E/S y el resampleo, nunca dentro de un bucle.
+    # El pin <3 es la única razón real por la que el proyecto va en 3.13 y no en 3.14.
+    "pandas>=2.3.3,<3",
+    "scipy>=1.18,<2",
+    # TA-Lib >=0.6.5 EMPAQUETA la librería C en la wheel: NO hace falta `brew install ta-lib`.
+    "ta-lib>=0.7.1,<0.8",
+    "scikit-learn>=1.9,<2",
+
+    # --- almacenamiento --------------------------------------------------
+    "duckdb>=1.5.5,<2",     # solo análisis offline, conexión por trabajo
+    "pyarrow>=21",          # frontera Parquet
+
+    # --- red -------------------------------------------------------------
+    "httpx[http2]>=0.28",
+    "websockets>=17.1",
+    # ccxt es MIT e INCLUYE la capa Pro de WebSockets gratis.
+    # El paquete `ccxtpro` y la suscripción "CCXT Pro" son legado: NO pagar.
+    "ccxt>=4.5.78",
+    # ccxt pina orjson==3.11.9 EXACTAMENTE: declarar >=3.12 hace irresoluble el lockfile.
+    "orjson>=3.11.9",
+
+    # --- servidor --------------------------------------------------------
+    "fastapi>=0.141",
+    "uvicorn[standard]>=0.52",
+    "pydantic>=2.13",
+    "pydantic-settings>=2.15",
+]
+
+[project.optional-dependencies]
+# Se instala en M6b-M7b. Fuera del núcleo para que el proceso en vivo del VPS
+# no cargue con lightgbm ni statsmodels.
+validation = [
+    "arch>=7.2",          # bootstrap.MCS, bootstrap.SPA, longitud de bloque Politis-White
+    "statsmodels>=0.14",  # ADF para la búsqueda de d en diferenciación fraccionaria
+    "lightgbm>=4.5",      # meta-etiquetador (requiere `brew install libomp` en macOS)
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=1.0",
+    "hypothesis>=6.100",
+    "pytest-benchmark>=5.1",
+    "syrupy>=4.8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wavelab"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "slow: pruebas que tardan (replays largos, hidratación)",
+    "net: pruebas que salen a internet (excluidas por defecto en CI)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
