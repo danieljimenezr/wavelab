@@ -69,14 +69,14 @@ class RateLimiter:
                 self._hist.pop(k, None)
 
     class _Ctx:
-        def __init__(self, lim: "RateLimiter", ip: str) -> None:
+        def __init__(self, lim: RateLimiter, ip: str) -> None:
             self.lim, self.ip = lim, ip
 
         async def __aenter__(self):
             self.lim._check_ip(self.ip)
             try:
                 await asyncio.wait_for(self.lim._sem.acquire(), timeout=25)
-            except (TimeoutError, asyncio.TimeoutError):
+            except TimeoutError:
                 raise TooBusy(
                     "hay demasiadas validaciones en marcha ahora mismo. Prueba en un minuto: "
                     "cada una tarda unos segundos y solo se ejecutan dos a la vez para no "
@@ -86,7 +86,7 @@ class RateLimiter:
         async def __aexit__(self, *exc):
             self.lim._sem.release()
 
-    def slot(self, ip: str) -> "_Ctx":
+    def slot(self, ip: str) -> _Ctx:
         return RateLimiter._Ctx(self, ip)
 
     @property

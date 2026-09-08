@@ -19,7 +19,7 @@ import numpy as np
 from wavelab.core.timeframes import Timeframe, close_time_for
 from wavelab.core.types import Bar
 
-__all__ = ["Window", "ProvisionalWindow", "Ring", "GapError"]
+__all__ = ["GapError", "ProvisionalWindow", "Ring", "Window"]
 
 
 class GapError(ValueError):
@@ -61,7 +61,7 @@ class Window:
     def n_gaps(self) -> int:
         return int(self.is_gap.sum())
 
-    def require_complete(self, what: str) -> "Window":
+    def require_complete(self, what: str) -> Window:
         """Para cálculos que no toleran huecos. Falla ruidosamente en vez de mentir en silencio."""
         if not self.complete:
             first = int(np.flatnonzero(self.is_gap)[0])
@@ -106,7 +106,7 @@ _FIELDS = ("open", "high", "low", "close", "volume")
 class Ring:
     """Buffer circular de velas cerradas de un símbolo y timeframe, más la vela en curso."""
 
-    __slots__ = ("symbol", "tf", "_cap", "_n", "_w", "_ts", "_cols", "_nsrc", "_gap", "_prov")
+    __slots__ = ("_cap", "_cols", "_gap", "_n", "_nsrc", "_prov", "_ts", "_w", "symbol", "tf")
 
     def __init__(self, symbol: str, tf: Timeframe, capacity: int = 8192) -> None:
         if capacity < 2:
@@ -224,7 +224,7 @@ class Ring:
             raise ValueError("no hay vela en curso: llama antes a set_provisional()")
         w = self.window(max(0, n - 1))
         p = self._prov
-        cat = lambda a, v: np.concatenate([a, np.array([v], dtype=a.dtype)])  # noqa: E731
+        cat = lambda a, v: np.concatenate([a, np.array([v], dtype=a.dtype)])
         return ProvisionalWindow(
             symbol=self.symbol, tf=self.tf,
             ts=cat(w.ts, p.open_time_ms),

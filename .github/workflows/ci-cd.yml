@@ -1,0 +1,103 @@
+# Integración y despliegue continuos.
+#
+# PILOTO para DR Solutions: las decisiones de aquí están tomadas pensando en que este fichero se
+# copie a otros repositorios, no solo en que funcione una vez.
+#
+#   · El despliegue DEPENDE de los tests. Nunca se publica código en rojo.
+#   · `concurrency` con cancel-in-progress FALSE: cancelar un despliegue a medias deja el servidor
+#     en un estado indeterminado, que es peor que hacer esperar al siguiente.
+#   · Se despliega un SHA CONCRETO, no "lo último de main", que cambia entre que el pipeline
+#     empieza y termina.
+#   · Permisos mínimos: el token solo puede leer el repositorio.
+#   · La reversión automática vive en el SERVIDOR, no aquí: si el runner se cae a mitad, la
+#     reversión tiene que ocurrir igual.
+
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  UV_VERSION: "0.12.10"
+
+jobs:
+  test:
+    name: Tests y lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Instalar Python 3.13 y dependencias
+        run: uv sync --frozen --group dev
+
+      - name: Lint
+        run: uv run ruff check src tests
+        continue-on-error: true   # el lint informa; los tests son los que mandan
+
+      - name: Tests
+        # Se excluyen los marcados `net`: dependen de que Binance responda, y un pipeline que
+        # falla por una API ajena enseña al equipo a ignorar los fallos, que es lo peor que le
+        # puede pasar a un pipeline.
+        run: uv run pytest -m "not net" --tb=short -q
+
+      - name: Comprobar que las hipótesis cargan
+        run: |
+          uv run python -c "
+          from wavelab.hypotheses import load_all
+          n = len(load_all())
+          assert n >= 90, f'solo cargan {n} hipótesis'
+          print(f'{n} hipótesis registradas')"
+
+  deploy:
+    name: Desplegar en producción
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    environment:
+      name: production
+      url: https://assay.dr-techsolutions.com
+    steps:
+      - name: Preparar la clave de despliegue
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.SSH_DEPLOY_KEY }}" > ~/.ssh/deploy
+          chmod 600 ~/.ssh/deploy
+          printf '%s\n' "${{ secrets.SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Desplegar ${{ github.sha }}
+        # La clave está restringida con command= en el servidor: aunque se filtrara, solo puede
+        # ejecutar el script de despliegue. No abre shell, no reenvía puertos, no lee ficheros.
+        run: |
+          ssh -i ~/.ssh/deploy -o BatchMode=yes -o ConnectTimeout=20 \
+              root@${{ secrets.VPS_HOST }} "${{ github.sha }}"
+
+      - name: Comprobar que responde desde fuera
+        run: |
+          for i in $(seq 1 10); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
+                   https://assay.dr-techsolutions.com/api/estado || echo 000)
+            [ "$code" = "200" ] && { echo "responde 200"; exit 0; }
+            echo "intento $i: HTTP $code"; sleep 6
+          done
+          echo "AVISO: no responde públicamente todavía (¿DNS sin configurar?)."
+          echo "El servicio interno sí está desplegado y verificado por el propio script."

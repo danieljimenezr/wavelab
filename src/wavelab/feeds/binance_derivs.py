@@ -28,7 +28,7 @@ from pathlib import Path
 from wavelab.feeds.binance_rest import BinanceREST, RateLimitCircuitOpen
 from wavelab.feeds.binance_ws import FAPI_WS, stream_json
 
-__all__ = ["LiquidationRecorder", "DerivativesPoller", "SAMPLING_CAVEAT"]
+__all__ = ["SAMPLING_CAVEAT", "DerivativesPoller", "LiquidationRecorder"]
 
 SAMPLING_CAVEAT = (
     "@forceOrder está MUESTREADO por Binance (limita la frecuencia de emisión por símbolo). "

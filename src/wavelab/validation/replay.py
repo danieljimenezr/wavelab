@@ -24,8 +24,14 @@ from typing import Any
 from wavelab.core.clock import SimClock
 from wavelab.core.types import Bar
 
-__all__ = ["replay", "assert_replay_deterministic", "ReplayDivergence", "diff_path",
-           "streaming", "EngineFactory"]
+__all__ = [
+    "EngineFactory",
+    "ReplayDivergence",
+    "assert_replay_deterministic",
+    "diff_path",
+    "replay",
+    "streaming",
+]
 
 
 class ReplayDivergence(AssertionError):
@@ -76,7 +82,7 @@ def diff_path(a: Any, b: Any, path: str = "") -> str | None:
 # --------------------------------------------------------------------------- replay
 
 def streaming(on_bar: Callable[[Any, Bar], tuple[Any, Any]],
-              initial_state: Callable[[], Any]) -> "EngineFactory":
+              initial_state: Callable[[], Any]) -> EngineFactory:
     """Fábrica para un motor correcto: ignora las velas que se le ofrecen.
 
     Un motor causal solo consume lo que ``on_bar`` le va entregando. Que esta fábrica descarte su
@@ -97,7 +103,7 @@ EngineFactory = Callable[[Sequence[Bar]], tuple[Callable[[Any, Bar], tuple[Any, 
 
 
 def replay(
-    factory: "EngineFactory",
+    factory: EngineFactory,
     bars: Sequence[Bar],
     clock: SimClock | None = None,
 ) -> list[Any]:
@@ -125,7 +131,7 @@ def replay(
 
 
 def assert_replay_deterministic(
-    factory: "EngineFactory",
+    factory: EngineFactory,
     bars: Sequence[Bar],
     checkpoints: Sequence[int] | None = None,
 ) -> None:

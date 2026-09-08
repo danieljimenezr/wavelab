@@ -33,7 +33,7 @@ from pathlib import Path
 
 import websockets
 
-__all__ = ["LiquidationRecorder", "SOURCES", "CAVEAT"]
+__all__ = ["CAVEAT", "SOURCES", "LiquidationRecorder"]
 
 CAVEAT = (
     "Liquidaciones de OKX (primaria) y Bybit (secundaria). NO incluye Binance: su WebSocket de "

@@ -12,7 +12,7 @@ import importlib
 from collections.abc import Callable
 from typing import Any
 
-__all__ = ["REGISTRY", "register", "resolve", "names", "load_plugin_modules", "SEAMS"]
+__all__ = ["REGISTRY", "SEAMS", "load_plugin_modules", "names", "register", "resolve"]
 
 #: Las cinco costuras. Añadir una sexta exige justificarlo por escrito en el README.
 SEAMS = ("feed", "feature", "production", "signal_source", "veto")

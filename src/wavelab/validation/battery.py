@@ -31,9 +31,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from wavelab.validation.reality_check import effective_n, optimal_block_length
+from wavelab.validation.reality_check import effective_n
 
-__all__ = ["Test", "BatteryResult", "run_battery"]
+__all__ = ["BatteryResult", "Test", "run_battery"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,14 +166,15 @@ def run_battery(
     base = float(fwd[val].mean()) if val.any() else 0.0
     m = val & activo
     prop = float((sig[m] * fwd[m]).mean()) if m.sum() >= 20 else float("nan")
+    hay_prop = not np.isnan(prop)      # más claro que el idiomático `prop == prop`
     tests.append(Test(
         "tasa_base", "¿Acierta más que un momento cualquiera?",
-        bool(prop > base) if prop == prop else None,
-        prop * 100 if prop == prop else 0.0, base * 100, "% por periodo",
+        bool(prop > base) if hay_prop else None,
+        prop * 100 if hay_prop else 0.0, base * 100, "% por periodo",
         "En un activo que subió un 1.748%, cualquier regla mayoritariamente larga parece acertar. "
         "Lo que cuenta es si acierta MÁS que estar dentro en un instante al azar.",
         f"estrategia {prop*100:+.3f}% vs base {base*100:+.3f}% por periodo"
-        if prop == prop else "muy pocas señales"))
+        if hay_prop else "muy pocas señales"))
 
     # ---- 3. control aleatorio de misma exposición ---------------------------------------------
     cambios_reales = int(np.abs(np.diff(np.concatenate([[0.0], sig]))).sum())

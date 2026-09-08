@@ -33,7 +33,7 @@ _FORBIDDEN = (
 class PivotStore:
     """Pivotes confirmados (append-only) más, como mucho, un pivote provisional."""
 
-    __slots__ = ("_confirmed", "_conf_ts", "_provisional")
+    __slots__ = ("_conf_ts", "_confirmed", "_provisional")
 
     def __init__(self) -> None:
         self._confirmed: list[Pivot] = []
@@ -42,7 +42,7 @@ class PivotStore:
 
     # ------------------------------------------------------------------ prohibido
 
-    def __getitem__(self, _i):  # noqa: ANN001
+    def __getitem__(self, _i):
         raise CausalityError(_FORBIDDEN)
 
     def __iter__(self):

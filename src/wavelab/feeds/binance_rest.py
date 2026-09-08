@@ -19,7 +19,7 @@ import httpx
 
 from wavelab.core.timeframes import Timeframe
 from wavelab.core.types import Bar
-from wavelab.feeds.base import FeedCaps, Market
+from wavelab.feeds.base import FeedCaps
 
 __all__ = ["BinanceREST", "RateLimitCircuitOpen", "WeightGovernor"]
 
@@ -41,7 +41,7 @@ class RateLimitCircuitOpen(RuntimeError):
 class WeightGovernor:
     """Frena antes del borde, no en él."""
 
-    __slots__ = ("budget", "brake_at", "used", "banned_until")
+    __slots__ = ("banned_until", "brake_at", "budget", "used")
 
     def __init__(self, budget: int = WEIGHT_BUDGET, brake_ratio: float = 0.70) -> None:
         self.budget = budget
@@ -49,7 +49,7 @@ class WeightGovernor:
         self.used = 0
         self.banned_until = 0.0
 
-    def observe(self, headers) -> None:  # noqa: ANN001
+    def observe(self, headers) -> None:
         v = headers.get("x-mbx-used-weight-1m") or headers.get("X-MBX-USED-WEIGHT-1M")
         if v:
             try:
@@ -98,11 +98,11 @@ class BinanceREST:
             supports_aux=frozenset({"funding", "open_interest", "long_short", "liquidation"}),
         )
 
-    async def __aenter__(self) -> "BinanceREST":
+    async def __aenter__(self) -> BinanceREST:
         self._client = httpx.AsyncClient(timeout=30.0, http2=True, follow_redirects=True)
         return self
 
-    async def __aexit__(self, *exc) -> None:  # noqa: ANN002
+    async def __aexit__(self, *exc) -> None:
         if self._client:
             await self._client.aclose()
 

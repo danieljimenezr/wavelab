@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-__all__ = ["ImportError_", "ImportedStrategy", "parse_signals_csv", "align_to_bars"]
+__all__ = ["ImportError_", "ImportedStrategy", "align_to_bars", "parse_signals_csv"]
 
 
 class ImportError_(ValueError):

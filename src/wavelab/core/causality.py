@@ -24,7 +24,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-__all__ = ["CausalityError", "AsOf", "causal", "is_causal"]
+__all__ = ["AsOf", "CausalityError", "causal", "is_causal"]
 
 
 class CausalityError(RuntimeError):

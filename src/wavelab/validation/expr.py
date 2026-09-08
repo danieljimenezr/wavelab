@@ -1,7 +1,7 @@
 """Intérprete seguro de reglas de trading escritas por el usuario.
 
 NO usa eval(). Recorre el AST de Python con lista blanca: si un nodo no está permitido, se rechaza.
-Esto no es paranoia: si el validador se ofrece como servicio, un eval() de una cadena que envía un
+Esto no es paranoia: si Assay se ofrece como servicio, un eval() de una cadena que envía un
 desconocido es ejecución remota de código.
 
 Prohibido: importaciones, acceso a atributos (`().__class__`), suscripción (`x[i]`), lambdas,
@@ -19,7 +19,7 @@ from dataclasses import dataclass
 import numpy as np
 import talib
 
-__all__ = ["ExprError", "SAFE_FUNCS", "build_series", "evaluate_rule", "FUNC_DOCS", "SERIE_DOCS"]
+__all__ = ["FUNC_DOCS", "SAFE_FUNCS", "SERIE_DOCS", "ExprError", "build_series", "evaluate_rule"]
 
 
 class ExprError(ValueError):

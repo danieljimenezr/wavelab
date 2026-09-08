@@ -25,8 +25,13 @@ from dataclasses import dataclass
 
 import numpy as np
 
-__all__ = ["stationary_bootstrap_indices", "reality_check", "RealityCheckResult",
-           "optimal_block_length", "effective_n"]
+__all__ = [
+    "RealityCheckResult",
+    "effective_n",
+    "optimal_block_length",
+    "reality_check",
+    "stationary_bootstrap_indices",
+]
 
 
 def optimal_block_length(x: np.ndarray) -> float:

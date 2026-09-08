@@ -16,7 +16,6 @@ from dataclasses import dataclass
 
 from wavelab.core.types import Direction, TradePlan
 from wavelab.waves.matcher import Hypothesis
-from wavelab.waves.rules import ImpulseState
 
 __all__ = ["PlanConfig", "PlanResult", "build_plan", "required_hit_rate"]
 

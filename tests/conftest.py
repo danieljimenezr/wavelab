@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from wavelab.core.timeframes import TF_15M, TF_1H, Timeframe
+from wavelab.core.timeframes import TF_1H, TF_15M, Timeframe
 from wavelab.core.types import Bar
 
 SYMBOL = "BTCUSDT"

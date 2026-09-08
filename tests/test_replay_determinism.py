@@ -73,7 +73,7 @@ def con_lookahead(offset: int = 1):
 
 def no_determinista():
     def on_bar(state: StubState, bar: Bar) -> tuple[StubState, Decision]:
-        ema = bar.close * (1.0 + random.random() * 1e-9)  # noqa: S311 — sin semilla, a propósito
+        ema = bar.close * (1.0 + random.random() * 1e-9)
         return StubState(ema, state.n + 1), _decision(bar, ema)
     return streaming(on_bar, StubState)
 

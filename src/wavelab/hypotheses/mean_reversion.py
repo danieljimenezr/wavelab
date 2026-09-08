@@ -138,9 +138,7 @@ def _bb_reentry(s: Series) -> np.ndarray:
             out[i] = 0
             continue
         # Salida primero: objetivo en la media móvil, que es el ancla de la hipótesis.
-        if pos == 1 and c[i] >= mid[i]:
-            pos = 0
-        elif pos == -1 and c[i] <= mid[i]:
+        if pos == 1 and c[i] >= mid[i] or pos == -1 and c[i] <= mid[i]:
             pos = 0
         # Entrada solo si estamos planos y la vela anterior cerró FUERA y esta cierra DENTRO.
         if pos == 0:

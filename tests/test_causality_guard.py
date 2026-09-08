@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import numpy as np
 import pytest
 
 from wavelab.core.causality import AsOf, CausalityError, causal, is_causal
@@ -112,7 +111,7 @@ class TestDecoradorCausal:
     def test_rechaza_ventana_provisional_siempre(self):
         """El canal provisional es estructuralmente incapaz de alimentar la ruta causal."""
         @causal
-        def f(now_ms: int, w) -> int:  # noqa: ANN001
+        def f(now_ms: int, w) -> int:
             return len(w)
 
         ring = Ring(SYMBOL, TF_15M, capacity=16)

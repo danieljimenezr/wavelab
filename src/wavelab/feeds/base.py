@@ -15,7 +15,7 @@ from typing import Protocol, runtime_checkable
 from wavelab.core.timeframes import Timeframe
 from wavelab.core.types import AuxEvent, Bar
 
-__all__ = ["FeedCaps", "FeedAdapter", "Market"]
+__all__ = ["FeedAdapter", "FeedCaps", "Market"]
 
 
 @dataclass(frozen=True, slots=True)

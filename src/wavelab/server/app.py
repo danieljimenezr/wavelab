@@ -25,10 +25,11 @@ from fastapi.staticfiles import StaticFiles
 from wavelab.config import load_config
 from wavelab.core.timeframes import BY_NAME, TF_1M
 from wavelab.core.types import Bar
-from wavelab.engine.live import LiveEngine, Mode
-from wavelab.server.limits import RateLimiter, TooBusy, TooMany
+from wavelab.engine.live import LiveEngine
 from wavelab.feeds.binance_klines import KlineFeed
+from wavelab.server.limits import RateLimiter, TooBusy, TooMany
 from wavelab.store.bars import BarStore
+
 
 def _ip(request) -> str:
     """IP real del cliente. Detrás de Caddy, la de la conexión es siempre 127.0.0.1."""
@@ -50,7 +51,7 @@ def pd_fecha(ms: int) -> str:
 
 WEB = Path(__file__).resolve().parents[3] / "web"
 
-#: En modo PÚBLICO solo se sirve el validador. El gráfico con las señales de Elliott es la
+#: En modo PÚBLICO solo se sirve Assay. El gráfico con las señales de Elliott es la
 #: herramienta privada del dueño y no tiene por qué estar en internet: menos superficie y menos
 #: dudas sobre si esto es o no una recomendación de inversión.
 PUBLICO = os.environ.get("WAVELAB_PUBLIC", "").lower() in ("1", "true", "si", "sí")
@@ -290,6 +291,7 @@ def _bateria_propia(ts_ms, close, sig, nombre: str, extra: dict | None = None):
     marcas de tiempo.
     """
     import numpy as np
+
     from wavelab.validation.battery import run_battery
 
     ts = np.asarray(ts_ms, dtype=np.int64)
@@ -319,6 +321,7 @@ def _serie_y_bateria(tf: str, sig, nombre: str, extra: dict | None = None):
     poder comparar su estrategia con las del catálogo sabiendo que se han medido igual.
     """
     import numpy as np
+
     from wavelab.validation.battery import run_battery
 
     anillo = APP.engine.state.rings[tf]
@@ -344,7 +347,6 @@ def _serie_y_bateria(tf: str, sig, nombre: str, extra: dict | None = None):
 @app.post("/api/validar_csv")
 async def validar_csv(request: Request, tf: str = "1d") -> JSONResponse:
     """Valida la estrategia del usuario a partir de su propio CSV de señales."""
-    from wavelab.validation.csv_import import ImportError_, align_to_bars, parse_signals_csv
 
     try:
         async with LIMITES.slot(_ip(request)):
@@ -408,7 +410,6 @@ async def _validar_csv(request: Request, tf: str) -> JSONResponse:
 @app.post("/api/validar_regla")
 async def validar_regla(request: Request) -> JSONResponse:
     """Valida una regla escrita por el usuario en el editor."""
-    from wavelab.validation.expr import ExprError, build_series, evaluate_rule
 
     try:
         async with LIMITES.slot(_ip(request)):
@@ -457,7 +458,7 @@ async def validar(request: Request, hyp: str, tf: str = "1d") -> JSONResponse:
 
 
 async def _validar_catalogo(hyp: str, tf: str) -> JSONResponse:
-    import numpy as np
+
     from wavelab.hypotheses import load_all
     from wavelab.hypotheses.base import Series
     from wavelab.validation.battery import run_battery
@@ -558,11 +559,11 @@ async def estado() -> JSONResponse:
 
 if WEB.exists():
     if PUBLICO:
-        # En público, el validador ES la portada. Nadie tiene que saberse una URL.
+        # En público, Assay ES la portada. Nadie tiene que saberse una URL.
         @app.get("/")
         async def portada():
             from fastapi.responses import FileResponse
-            return FileResponse(WEB / "validador.html")
+            return FileResponse(WEB / "assay.html")
 
     app.mount("/", StaticFiles(directory=str(WEB), html=True), name="web")
 

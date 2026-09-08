@@ -167,6 +167,7 @@ class TestIngestaIdempotente:
 def test_datos_reales_a_ambos_lados_del_cambio_de_formato():
     """Contra el archivo de verdad. `pytest -m net` para ejecutarlo."""
     import httpx
+
     from wavelab.feeds.binance_archive import verify_checksum as vc
 
     with httpx.Client(timeout=60.0, follow_redirects=True) as c:

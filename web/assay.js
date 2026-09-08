@@ -135,7 +135,7 @@ async function validar(ev) {
   $('descargar').onclick = () => {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([md], { type: 'text/markdown' }));
-    a.download = `validacion-${d.nombre.replace(/[^\w.-]+/g, '_')}.md`;
+    a.download = `assay-${d.nombre.replace(/[^\w.-]+/g, '_')}.md`;
     a.click();
     URL.revokeObjectURL(a.href);
   };
@@ -143,7 +143,7 @@ async function validar(ev) {
 
 function informeMarkdown(d) {
   const ICO = { pasa: '✅', falla: '❌', no_concluyente: '➖' };
-  return `# Validación: ${d.nombre}
+  return `# Assay — ${d.nombre}
 
 **${VERDICTO[d.veredicto]?.[0] ?? d.veredicto}** — ${d.resumen}
 
@@ -165,7 +165,8 @@ ${d.informe ? `\n## Lectura de los datos\n\n${d.informe.map((x) => `- ${x}`).joi
 ${d.rationale ? `\n## Razonamiento declarado antes de medir\n\n${d.rationale}\n\n**Cuándo quedaría desmentida:** ${d.prior}` : ''}
 
 ---
-Generado por wavelab. Herramienta de **validación**, no de recomendación de inversión.
+Generado por **Assay** (DR Markets). Herramienta de validación, no de recomendación
+de inversión.
 Que una estrategia sobreviva no demuestra que gane dinero: demuestra que no es ninguno de los
 cinco errores conocidos que hacen que un backtest bonito pierda dinero en real.
 `;

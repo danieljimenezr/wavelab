@@ -23,12 +23,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-import numpy as np
-
 from wavelab.core.types import Direction, RuleVerdict
 
-__all__ = ["ImpulseState", "check_impulse", "invalidation_for", "ARCHETYPES",
-           "fib_retracement", "fib_projection", "RuleSet"]
+__all__ = [
+    "ARCHETYPES",
+    "ImpulseState",
+    "RuleSet",
+    "check_impulse",
+    "fib_projection",
+    "fib_retracement",
+    "invalidation_for",
+]
 
 
 class ImpulseState(StrEnum):

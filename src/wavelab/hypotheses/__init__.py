@@ -7,6 +7,7 @@ from pathlib import Path
 
 from wavelab.hypotheses.base import REGISTRY, Hypothesis, Series, register  # noqa: F401
 
+
 def load_all() -> dict[str, Hypothesis]:
     pkg = Path(__file__).parent
     for m in pkgutil.iter_modules([str(pkg)]):

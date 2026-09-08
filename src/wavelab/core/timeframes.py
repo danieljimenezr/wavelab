@@ -22,8 +22,18 @@ if TYPE_CHECKING:  # pandas solo en la frontera de E/S; jamás dentro de un bucl
     import pandas as pd
 
 __all__ = [
-    "Timeframe", "TfRole", "TF_1M", "TF_5M", "TF_15M", "TF_1H", "TF_4H", "TF_1D",
-    "BY_NAME", "MIN_SOURCE_COVERAGE", "resample_from_1m", "close_time_for",
+    "BY_NAME",
+    "MIN_SOURCE_COVERAGE",
+    "TF_1D",
+    "TF_1H",
+    "TF_1M",
+    "TF_4H",
+    "TF_5M",
+    "TF_15M",
+    "TfRole",
+    "Timeframe",
+    "close_time_for",
+    "resample_from_1m",
 ]
 
 MINUTE_MS = 60_000
@@ -89,7 +99,7 @@ def close_time_for(open_time_ms: int, tf: Timeframe) -> int:
     return open_time_ms + tf.ms - 1
 
 
-def resample_from_1m(df_1m: "pd.DataFrame", tf: Timeframe) -> "pd.DataFrame":
+def resample_from_1m(df_1m: pd.DataFrame, tf: Timeframe) -> pd.DataFrame:
     """Resamplea 1m al timeframe pedido, contando las velas fuente reales.
 
     ``df_1m`` debe estar indexado por ``open_time_ms`` (int64, UTC), sin duplicados y ordenado.

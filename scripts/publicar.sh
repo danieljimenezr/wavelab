@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Publica el validador en validador.dr-techsolutions.com.
+# Publica Assay en assay.dr-techsolutions.com.
 #
 # Idempotente y REVERSIBLE: scripts/despublicar.sh lo deshace sin tocar nada más.
 set -euo pipefail
-DOMINIO=${1:-validador.dr-techsolutions.com}
+DOMINIO=${1:-assay.dr-techsolutions.com}
 IP_VPS=187.33.152.210
 
 echo "== 1. comprobando el DNS =="
@@ -13,7 +13,7 @@ if [ "$RES" != "$IP_VPS" ]; then
     echo
     echo "  Añade este registro en tu proveedor de DNS y vuelve a ejecutar:"
     echo "      tipo  A"
-    echo "      nombre validador        (o validador.dr-techsolutions.com)"
+    echo "      nombre assay            (o assay.dr-techsolutions.com)"
     echo "      valor $IP_VPS"
     echo "      TTL   300"
     echo
@@ -52,7 +52,7 @@ if i >= 0:
 PY
 fi
 printf '\n' >> /etc/caddy/Caddyfile
-cat /root/caddy_wavelab.conf >> /etc/caddy/Caddyfile
+cat /root/caddy_assay.conf >> /etc/caddy/Caddyfile
 
 echo "== 5. validando la configuración ANTES de recargar =="
 if ! caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1 | tail -3; then

@@ -29,9 +29,9 @@ _CLOSED = object()
 class Subscription:
     """Cola propia de un suscriptor. Se consume como iterador asíncrono."""
 
-    __slots__ = ("name", "_q", "_dropped", "_bus")
+    __slots__ = ("_bus", "_dropped", "_q", "name")
 
-    def __init__(self, bus: "Bus", name: str, maxsize: int) -> None:
+    def __init__(self, bus: Bus, name: str, maxsize: int) -> None:
         self._bus = bus
         self.name = name
         self._q: asyncio.Queue = asyncio.Queue(maxsize=maxsize)
@@ -72,7 +72,7 @@ class Subscription:
 class Bus:
     """Publicación en abanico a suscriptores independientes."""
 
-    __slots__ = ("_subs", "_maxsize", "_published")
+    __slots__ = ("_maxsize", "_published", "_subs")
 
     def __init__(self, maxsize: int = 1024) -> None:
         self._subs: list[Subscription] = []

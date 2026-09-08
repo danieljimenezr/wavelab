@@ -24,7 +24,6 @@ from __future__ import annotations
 import hashlib
 import io
 import zipfile
-from dataclasses import dataclass
 from datetime import date
 from xml.etree import ElementTree
 
@@ -36,8 +35,13 @@ from wavelab.core.timeframes import Timeframe
 from wavelab.feeds.base import Market
 
 __all__ = [
-    "BASE_URL", "KLINE_COLUMNS", "monthly_url", "list_available_months",
-    "parse_klines_zip", "verify_checksum", "MicrosecondBoundaryError",
+    "BASE_URL",
+    "KLINE_COLUMNS",
+    "MicrosecondBoundaryError",
+    "list_available_months",
+    "monthly_url",
+    "parse_klines_zip",
+    "verify_checksum",
 ]
 
 BASE_URL = "https://data.binance.vision"
@@ -94,7 +98,12 @@ def list_available_months(
             r.raise_for_status()
             root = ElementTree.fromstring(r.text)
             ns = {"s3": root.tag.split("}")[0].strip("{")} if "}" in root.tag else {}
-            find = (lambda el, t: el.findall(f"s3:{t}", ns)) if ns else (lambda el, t: el.findall(t))
+            # `ns` se reasigna en cada vuelta del bucle, así que se enlaza por VALOR con un
+            # argumento por defecto. Hoy funcionaría igual porque el lambda se usa en la misma
+            # iteración, pero capturar por referencia una variable de bucle es la clase de código
+            # que se rompe en silencio en cuanto alguien lo refactoriza.
+            find = ((lambda el, t, _ns=ns: el.findall(f"s3:{t}", _ns)) if ns
+                    else (lambda el, t: el.findall(t)))
             keys = [k.text or "" for c in find(root, "Contents") for k in find(c, "Key")]
             for k in keys:
                 if not k.endswith(".zip"):

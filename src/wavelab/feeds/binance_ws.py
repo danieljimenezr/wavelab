@@ -17,7 +17,6 @@ llega ni un solo mensaje: un fallo silencioso perfecto.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import random
 import time
@@ -25,7 +24,7 @@ from collections.abc import AsyncIterator, Callable
 
 import websockets
 
-__all__ = ["stream_json", "SPOT_WS", "FAPI_WS", "MAX_CONNECTION_SECONDS"]
+__all__ = ["FAPI_WS", "MAX_CONNECTION_SECONDS", "SPOT_WS", "stream_json"]
 
 #: Mirror de solo-datos: no expone streams de usuario, que es justo lo que queremos.
 SPOT_WS = "wss://data-stream.binance.vision"

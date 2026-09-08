@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from wavelab.core.timeframes import TF_1H, TF_15M, TF_1M, resample_from_1m
+from wavelab.core.timeframes import TF_1H, TF_1M, TF_15M, resample_from_1m
 from wavelab.engine.live import LiveEngine, Mode
 
 from .conftest import SYMBOL, make_bars
@@ -59,7 +59,7 @@ class TestResampleoEnVivo:
     def test_marca_como_hueco_la_vela_mal_cubierta(self):
         """Una vela de 1h construida con 20 minutos no es una vela de 1h."""
         e = _engine()
-        for b in make_bars(120, tf=TF_1M, drop=set(range(0, 40))):
+        for b in make_bars(120, tf=TF_1M, drop=set(range(40))):
             e.on_bar_1m(b)
         w = e.state.rings["1h"].window(1)
         assert int(w.n_source_bars[0]) == 60, "la 2ª hora está completa"

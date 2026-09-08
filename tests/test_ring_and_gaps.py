@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 
 from wavelab.core.ring import GapError, Ring
-from wavelab.core.timeframes import TF_1H, TF_15M, MIN_SOURCE_COVERAGE, resample_from_1m, TF_1M
+from wavelab.core.timeframes import MIN_SOURCE_COVERAGE, TF_1H, TF_1M, TF_15M, resample_from_1m
 from wavelab.core.types import Bar
 
 from .conftest import SYMBOL, make_bars
@@ -96,14 +96,14 @@ class TestResampleo:
 
     def test_marca_como_hueco_la_vela_mal_cubierta(self):
         """Una vela de 1h construida con 43 minutos no es una vela de 1h."""
-        faltan = set(range(0, 20))          # 40 de 60 minutos -> 0.67 < 0.9
+        faltan = set(range(20))          # 40 de 60 minutos -> 0.67 < 0.9
         out = resample_from_1m(self._df(120, drop=faltan), TF_1H)
         assert out.iloc[0]["n_source_bars"] == 40
         assert bool(out.iloc[0]["is_gap"]) is True
         assert bool(out.iloc[1]["is_gap"]) is False
 
     def test_el_umbral_de_cobertura_es_el_declarado(self):
-        justo = set(range(0, 6))            # 54/60 = 0.90 -> pasa
+        justo = set(range(6))            # 54/60 = 0.90 -> pasa
         out = resample_from_1m(self._df(60, drop=justo), TF_1H)
         assert out.iloc[0]["n_source_bars"] == 54
         assert bool(out.iloc[0]["is_gap"]) is (54 < int(MIN_SOURCE_COVERAGE * 60))

@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-__all__ = ["Hypothesis", "REGISTRY", "register", "Series"]
+__all__ = ["REGISTRY", "Hypothesis", "Series", "register"]
 
 
 @dataclass(frozen=True, slots=True)

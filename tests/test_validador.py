@@ -44,6 +44,7 @@ class TestSeguridadDelEditor:
     def test_no_existe_eval_en_el_modulo(self):
         """Regresión: el intérprete es recursivo justamente para no tener eval()."""
         from pathlib import Path
+
         import wavelab.validation.expr as m
         src = Path(m.__file__).read_text()
         assert "eval(compile" not in src and "exec(" not in src

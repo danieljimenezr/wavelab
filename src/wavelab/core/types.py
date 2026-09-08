@@ -14,9 +14,21 @@ from typing import Any
 from wavelab.core.timeframes import Timeframe, close_time_for
 
 __all__ = [
-    "Bar", "AuxEvent", "Event", "SourceKind", "Direction", "Verdict", "MaturityLevel",
-    "PivotKind", "Pivot", "RuleVerdict", "ExitTemplate", "TradePlan", "Signal", "Stat",
+    "AuxEvent",
+    "Bar",
     "Decision",
+    "Direction",
+    "Event",
+    "ExitTemplate",
+    "MaturityLevel",
+    "Pivot",
+    "PivotKind",
+    "RuleVerdict",
+    "Signal",
+    "SourceKind",
+    "Stat",
+    "TradePlan",
+    "Verdict",
 ]
 
 
@@ -195,7 +207,7 @@ class Pivot:
         return (self.price - self.thr_at_extreme if self.kind is PivotKind.HIGH
                 else self.price + self.thr_at_extreme)
 
-    def confirmed_at(self, idx: int, ts_ms: int) -> "Pivot":
+    def confirmed_at(self, idx: int, ts_ms: int) -> Pivot:
         """Devuelve la versión confirmada. Escritura ÚNICA: reconfirmar es un error de programa."""
         if self.is_confirmed:
             raise ValueError(

@@ -19,7 +19,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-__all__ = ["AssetConfig", "EngineConfig", "AppConfig", "load_config", "config_hash"]
+__all__ = ["AppConfig", "AssetConfig", "EngineConfig", "config_hash", "load_config"]
 
 
 class AssetConfig(BaseModel, frozen=True):
@@ -61,7 +61,7 @@ class AssetConfig(BaseModel, frozen=True):
     enabled: bool = True
 
     @model_validator(mode="after")
-    def _coherencia(self) -> "AssetConfig":
+    def _coherencia(self) -> AssetConfig:
         if self.instrument == "spot" and self.has_funding:
             raise ValueError(
                 f"{self.symbol}: instrument='spot' con has_funding=true. El funding es del "
@@ -104,7 +104,7 @@ class EngineConfig(BaseModel, frozen=True):
     ring_capacity: int = 8192
 
     @model_validator(mode="after")
-    def _histeresis_coherente(self) -> "EngineConfig":
+    def _histeresis_coherente(self) -> EngineConfig:
         if self.er_trend_exit >= self.er_trend_enter:
             raise ValueError("er_trend_exit debe ser < er_trend_enter (histéresis)")
         if self.er_chop_exit <= self.er_chop_enter:

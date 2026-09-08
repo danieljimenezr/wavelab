@@ -21,12 +21,12 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from wavelab.core.timeframes import BY_NAME, TF_1M, Timeframe
-from wavelab.core.types import Bar, Direction
+from wavelab.core.timeframes import BY_NAME
+from wavelab.core.types import Direction
 from wavelab.engine.live import LiveEngine
 from wavelab.labeling.barriers import Outcome, resolve_triple_barrier
 
-__all__ = ["Signal", "BacktestResult", "run_backtest"]
+__all__ = ["BacktestResult", "Signal", "run_backtest"]
 
 
 @dataclass(slots=True)

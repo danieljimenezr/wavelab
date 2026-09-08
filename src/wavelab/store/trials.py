@@ -11,7 +11,6 @@ reconstruir hacia atrás**.
 
 from __future__ import annotations
 
-import json
 import sqlite3
 import subprocess
 import time

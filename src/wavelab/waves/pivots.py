@@ -40,7 +40,7 @@ __all__ = ["WilderATR", "ZigZag", "ZigZagConfig"]
 class WilderATR:
     """ATR de Wilder incremental. Estrictamente causal: solo ve velas cerradas ya entregadas."""
 
-    __slots__ = ("period", "_atr", "_prev_close", "_n", "_sum")
+    __slots__ = ("_atr", "_n", "_prev_close", "_sum", "period")
 
     def __init__(self, period: int = 14) -> None:
         self.period = period
@@ -98,8 +98,18 @@ class ZigZag:
     backtest espléndido que opera fatal.
     """
 
-    __slots__ = ("cfg", "store", "_atr", "_i", "_up", "_ext_i", "_ext_ts", "_ext_px",
-                 "_ext_thr", "_confirmed_n")
+    __slots__ = (
+        "_atr",
+        "_confirmed_n",
+        "_ext_i",
+        "_ext_px",
+        "_ext_thr",
+        "_ext_ts",
+        "_i",
+        "_up",
+        "cfg",
+        "store",
+    )
 
     def __init__(self, cfg: ZigZagConfig | None = None, store: PivotStore | None = None) -> None:
         self.cfg = cfg or ZigZagConfig()
