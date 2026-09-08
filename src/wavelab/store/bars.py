@@ -167,6 +167,30 @@ class BarStore:
         out["is_gap"] = out["close"].isna()
         return out
 
+    def iter_months(self, symbol: str, start_ms: int = 0, end_ms: int | None = None):
+        """Transmite el histórico MES A MES, sin cargarlo entero.
+
+        Nueve años de 1m son 4,76 M de filas: leídas de golpe son ~340 MB de DataFrame más el
+        coste de concatenar 110 ficheros Parquet, y eso mata al servicio contra su tope de 768 MB
+        antes de que sirva una sola petición. Mes a mes, el pico queda en ~44.000 filas.
+
+        Se paginan los FICHEROS, que es la unidad natural del almacén: cada uno es un mes completo
+        y ya está ordenado, así que no hace falta ni ordenar ni recortar en el caso general.
+        """
+        end_ms = self._clamp(end_ms if end_ms is not None else self._MAX_MS)
+        start_ms = self._clamp(start_ms)
+        for key in self.months(symbol):
+            path = self._path(symbol, key)
+            df = pd.read_parquet(path)
+            if df.empty:
+                continue
+            if int(df.index[0]) > end_ms or int(df.index[-1]) < start_ms:
+                continue
+            if int(df.index[0]) < start_ms or int(df.index[-1]) > end_ms:
+                df = df[(df.index >= start_ms) & (df.index <= end_ms)]
+            if not df.empty:
+                yield key, df.sort_index()
+
     def coverage(self, symbol: str, start_ms: int, end_ms: int) -> tuple[int, int, float]:
         """(presentes, esperadas, fracción). La insignia de salud de datos de la interfaz."""
         df = self.read(symbol, start_ms, end_ms, fill_grid=True)

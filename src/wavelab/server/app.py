@@ -83,18 +83,21 @@ class App:
 
     # ------------------------------------------------------------------ arranque
 
-    def _iter_bars(self, df):
-        """Genera velas SIN materializar la lista.
+    def _iter_bars(self, hasta_ms: int):
+        """Genera velas leyendo el almacén MES A MES.
 
-        Nueve años de 1m son 4,76 millones de objetos Bar ≈ 950 MB, y el servicio tiene un tope
-        duro de 768 MB: construir la lista lo mata por OOM antes de arrancar. Como generador, la
-        memoria queda acotada por el ring (8.192 velas) y no por el histórico.
+        Dos fugas de memoria distintas, y las dos matan al servicio contra su tope de 768 MB:
+        materializar 4,76 M de objetos Bar (~950 MB) y cargar el histórico entero en un solo
+        DataFrame (~340 MB más la concatenación de 110 ficheros Parquet). La primera se resuelve
+        con un generador; la segunda solo se resuelve paginando la LECTURA. Así el pico es de un
+        mes: ~44.000 filas.
         """
-        for ts, r in zip(df.index, df.itertuples(index=False), strict=True):
-            yield Bar(symbol=self.symbol, tf=TF_1M, open_time_ms=int(ts),
-                      open=float(r.open), high=float(r.high), low=float(r.low),
-                      close=float(r.close), volume=float(r.volume),
-                      is_closed=True, n_source_bars=1)
+        for _key, df in self.store.iter_months(self.symbol, 0, hasta_ms):
+            for ts, r in zip(df.index, df.itertuples(index=False), strict=True):
+                yield Bar(symbol=self.symbol, tf=TF_1M, open_time_ms=int(ts),
+                          open=float(r.open), high=float(r.high), low=float(r.low),
+                          close=float(r.close), volume=float(r.volume),
+                          is_closed=True, n_source_bars=1)
 
     def warmup(self) -> int:
         """Calienta desde el PRINCIPIO del histórico, no desde una ventana móvil.
@@ -108,14 +111,14 @@ class App:
         Coste medido: ~570.000 velas/s, unos 10-15 s para nueve años. Se paga una vez al arrancar.
         """
         hasta = int(time.time() * 1000)
-        df = self.store.read(self.symbol, 0, hasta, fill_grid=False)
-        if df.empty:
+        meses = self.store.months(self.symbol)
+        if not meses:
             print("[server] almacén vacío: ejecuta `python -m wavelab.store.hydrate`", flush=True)
             return 0
         t0 = time.perf_counter()
-        n = self.engine.warmup(self._iter_bars(df))
+        n = self.engine.warmup(self._iter_bars(hasta))
         dt = time.perf_counter() - t0
-        print(f"[server] calentado con {n:,} velas de 1m desde {df.index[0]} "
+        print(f"[server] calentado con {n:,} velas de 1m desde {meses[0]} "
               f"en {dt:.1f}s ({n/dt:,.0f}/s)", flush=True)
         for tf in self.tfs:
             if tf != "1m":
