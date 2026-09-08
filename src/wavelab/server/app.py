@@ -26,8 +26,22 @@ from wavelab.config import load_config
 from wavelab.core.timeframes import BY_NAME, TF_1M
 from wavelab.core.types import Bar
 from wavelab.engine.live import LiveEngine, Mode
+from wavelab.server.limits import RateLimiter, TooBusy, TooMany
 from wavelab.feeds.binance_klines import KlineFeed
 from wavelab.store.bars import BarStore
+
+def _ip(request) -> str:
+    """IP real del cliente. Detrás de Caddy, la de la conexión es siempre 127.0.0.1."""
+    for h in ("x-forwarded-for", "x-real-ip"):
+        v = request.headers.get(h)
+        if v:
+            return v.split(",")[0].strip()
+    return request.client.host if request.client else "?"
+
+
+def _limite(e: Exception) -> JSONResponse:
+    return JSONResponse({"error": str(e)}, status_code=429)
+
 
 def pd_fecha(ms: int) -> str:
     import pandas as pd
@@ -35,6 +49,12 @@ def pd_fecha(ms: int) -> str:
 
 
 WEB = Path(__file__).resolve().parents[3] / "web"
+
+#: En modo PÚBLICO solo se sirve el validador. El gráfico con las señales de Elliott es la
+#: herramienta privada del dueño y no tiene por qué estar en internet: menos superficie y menos
+#: dudas sobre si esto es o no una recomendación de inversión.
+PUBLICO = os.environ.get("WAVELAB_PUBLIC", "").lower() in ("1", "true", "si", "sí")
+LIMITES = RateLimiter(max_concurrent=2, per_hour=30, per_minute=6)
 DATA = Path(os.environ.get("WAVELAB_DATA", "data"))
 
 
@@ -326,6 +346,16 @@ async def validar_csv(request: Request, tf: str = "1d") -> JSONResponse:
     """Valida la estrategia del usuario a partir de su propio CSV de señales."""
     from wavelab.validation.csv_import import ImportError_, align_to_bars, parse_signals_csv
 
+    try:
+        async with LIMITES.slot(_ip(request)):
+            return await _validar_csv(request, tf)
+    except (TooBusy, TooMany) as e:
+        return _limite(e)
+
+
+async def _validar_csv(request: Request, tf: str) -> JSONResponse:
+    from wavelab.validation.csv_import import ImportError_, align_to_bars, parse_signals_csv
+
     cuerpo = await request.body()
     if not cuerpo:
         return JSONResponse({"error": "fichero vacío"}, status_code=400)
@@ -380,6 +410,16 @@ async def validar_regla(request: Request) -> JSONResponse:
     """Valida una regla escrita por el usuario en el editor."""
     from wavelab.validation.expr import ExprError, build_series, evaluate_rule
 
+    try:
+        async with LIMITES.slot(_ip(request)):
+            return await _validar_regla(request)
+    except (TooBusy, TooMany) as e:
+        return _limite(e)
+
+
+async def _validar_regla(request: Request) -> JSONResponse:
+    from wavelab.validation.expr import ExprError, build_series, evaluate_rule
+
     body = await request.json()
     tf = body.get("tf", "1d")
     anillo = APP.engine.state.rings.get(tf)
@@ -407,8 +447,16 @@ async def ayuda_regla() -> JSONResponse:
 
 
 @app.get("/api/validar")
-async def validar(hyp: str, tf: str = "1d") -> JSONResponse:
+async def validar(request: Request, hyp: str, tf: str = "1d") -> JSONResponse:
     """Somete una estrategia a la batería de cinco pruebas. ESTE es el producto."""
+    try:
+        async with LIMITES.slot(_ip(request)):
+            return await _validar_catalogo(hyp, tf)
+    except (TooBusy, TooMany) as e:
+        return _limite(e)
+
+
+async def _validar_catalogo(hyp: str, tf: str) -> JSONResponse:
     import numpy as np
     from wavelab.hypotheses import load_all
     from wavelab.hypotheses.base import Series
@@ -448,6 +496,8 @@ async def validar(hyp: str, tf: str = "1d") -> JSONResponse:
 @app.get("/api/decide")
 async def decide(tf: str = "4h") -> JSONResponse:
     """Hipótesis ordenadas y su plan. Es la tarjeta de decisión."""
+    if PUBLICO:
+        return JSONResponse({"error": "no disponible"}, status_code=404)
     anillo = APP.engine.state.rings.get(tf)
     if anillo is None or not len(anillo):
         return JSONResponse({"error": f"sin datos para {tf}"}, status_code=400)
@@ -457,6 +507,8 @@ async def decide(tf: str = "4h") -> JSONResponse:
 
 @app.get("/api/history")
 async def history(tf: str = "15m", limit: int = 1500) -> JSONResponse:
+    if PUBLICO:
+        return JSONResponse({"error": "no disponible"}, status_code=404)
     if tf not in APP.engine.state.rings:
         return JSONResponse({"error": f"timeframe {tf} no configurado",
                              "available": list(APP.engine.state.rings)}, status_code=400)
@@ -482,6 +534,9 @@ async def history(tf: str = "15m", limit: int = 1500) -> JSONResponse:
 
 @app.websocket("/ws")
 async def ws(socket: WebSocket) -> None:
+    if PUBLICO:
+        await socket.close(code=1008)
+        return
     await socket.accept()
     APP.hub.clients.add(socket)
     await socket.send_text(json.dumps({"type": "health", **APP.engine.state.health.as_dict()}))
@@ -494,7 +549,21 @@ async def ws(socket: WebSocket) -> None:
         APP.hub.clients.discard(socket)
 
 
+@app.get("/api/estado")
+async def estado() -> JSONResponse:
+    """Salud del servicio, para vigilarlo desde fuera."""
+    return JSONResponse({"ok": True, "publico": PUBLICO, "limites": LIMITES.stats,
+                         "modo": APP.engine.state.health.mode.value})
+
+
 if WEB.exists():
+    if PUBLICO:
+        # En público, el validador ES la portada. Nadie tiene que saberse una URL.
+        @app.get("/")
+        async def portada():
+            from fastapi.responses import FileResponse
+            return FileResponse(WEB / "validador.html")
+
     app.mount("/", StaticFiles(directory=str(WEB), html=True), name="web")
 
 
