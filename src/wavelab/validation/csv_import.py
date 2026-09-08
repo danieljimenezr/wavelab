@@ -31,6 +31,8 @@ _COL_SENAL = ("signal", "señal", "senal", "position", "posicion", "posición", 
 _TEXTO_LARGO = {"long", "largo", "buy", "compra", "comprar", "l", "b", "1", "alcista", "up"}
 _TEXTO_CORTO = {"short", "corto", "sell", "venta", "vender", "s", "-1", "bajista", "down"}
 _TEXTO_FUERA = {"flat", "fuera", "none", "cash", "0", "neutral", "", "nan", "hold"}
+_COL_PRECIO = ("close", "cierre", "price", "precio", "adj close", "adj_close", "last", "último",
+               "ultimo", "c")
 
 
 @dataclass(slots=True)
@@ -41,6 +43,13 @@ class ImportedStrategy:
     n_largo: int = 0
     n_corto: int = 0
     n_fuera: int = 0
+    #: Precios del propio usuario, si los aporta. Es lo que convierte la herramienta en algo
+    #: utilizable por cualquiera: sin esto solo sirve a quien opere exactamente BTC en Binance.
+    precio: np.ndarray | None = None
+
+    @property
+    def tiene_precios(self) -> bool:
+        return self.precio is not None
 
 
 def _detectar(cols: list[str], candidatos: tuple[str, ...]) -> str | None:
@@ -115,7 +124,8 @@ def _a_senal(serie: pd.Series, informe: list[str]) -> np.ndarray:
 
 
 def parse_signals_csv(contenido: bytes | str, col_tiempo: str | None = None,
-                      col_senal: str | None = None) -> ImportedStrategy:
+                      col_senal: str | None = None,
+                      col_precio: str | None = None) -> ImportedStrategy:
     import io
     datos = contenido.decode("utf-8-sig", errors="replace") if isinstance(contenido, bytes) else contenido
     try:
@@ -148,8 +158,28 @@ def parse_signals_csv(contenido: bytes | str, col_tiempo: str | None = None,
         informe.append(f"{len(ts)-len(keep)} marcas de tiempo duplicadas: se conserva la última")
         ts, sig = ts[np.sort(keep)], sig[np.sort(keep)]
 
+    # --- precios propios, si los trae ---------------------------------------------------------
+    precio = None
+    cp = col_precio or _detectar(list(df.columns), _COL_PRECIO)
+    if cp is not None and cp not in (ct, cs):
+        try:
+            pr = pd.to_numeric(df[cp], errors="coerce").to_numpy(dtype=float)[orden]
+        except Exception:  # noqa: BLE001
+            pr = None
+        if pr is not None and np.isfinite(pr).sum() >= len(pr) * 0.9 and np.nanmin(pr) > 0:
+            precio = pr[np.sort(keep)] if "keep" in dir() else pr
+            if len(precio) != len(ts):
+                precio = pr[: len(ts)] if len(pr) >= len(ts) else None
+            if precio is not None:
+                informe.append(f"columna de precio: «{cp}» — se usará TU serie de precios, "
+                               f"no la nuestra ({np.nanmin(precio):,.4g} a {np.nanmax(precio):,.4g})")
+        elif pr is not None:
+            informe.append(f"columna «{cp}» descartada como precio: tiene valores no válidos o "
+                           "no positivos")
+
     return ImportedStrategy(ts, sig, informe,
-                            int((sig == 1).sum()), int((sig == -1).sum()), int((sig == 0).sum()))
+                            int((sig == 1).sum()), int((sig == -1).sum()), int((sig == 0).sum()),
+                            precio)
 
 
 def align_to_bars(imp: ImportedStrategy, bar_ts: np.ndarray, tf_ms: int) -> np.ndarray:

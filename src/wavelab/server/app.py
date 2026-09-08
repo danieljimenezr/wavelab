@@ -262,6 +262,36 @@ async def listar_hipotesis() -> JSONResponse:
         for h in sorted(hs.values(), key=lambda x: (x.family, x.name))]})
 
 
+def _bateria_propia(ts_ms, close, sig, nombre: str, extra: dict | None = None):
+    """Batería sobre la serie de precios DEL USUARIO.
+
+    Es lo que hace la herramienta utilizable por alguien que no opera BTC en Binance: sus filas
+    SON las velas, así que no hay que alinear nada. El tamaño de barra se deduce de sus propias
+    marcas de tiempo.
+    """
+    import numpy as np
+    from wavelab.validation.battery import run_battery
+
+    ts = np.asarray(ts_ms, dtype=np.int64)
+    bar_ms = int(np.median(np.diff(ts))) if ts.size > 1 else 86_400_000
+    r = run_battery(np.asarray(close, dtype=float), ts, np.asarray(sig, dtype=float),
+                    nombre=nombre, bar_ms=max(bar_ms, 1), horizon_bars=1, n_random=250)
+    paso = max(1, len(r.equity) // 600)
+    return {
+        "nombre": r.nombre, "tf": f"{bar_ms // 60000} min entre filas",
+        "veredicto": r.veredicto, "resumen": r.resumen,
+        "n_signals": r.n_signals, "n_effective": r.n_effective, "exposure": r.exposure,
+        "cagr": r.cagr, "sharpe": r.sharpe, "max_dd": r.max_dd,
+        "cagr_bh": r.cagr_bh, "sharpe_bh": r.sharpe_bh, "max_dd_bh": r.max_dd_bh,
+        "curva": [{"t": int(ts[1:][i]) // 1000, "e": float(r.equity[i]),
+                   "b": float(r.equity_bh[i])} for i in range(0, len(r.equity), paso)],
+        "tests": [{"id": t.id, "titulo": t.titulo, "estado": t.estado, "valor": t.valor,
+                   "referencia": t.referencia, "unidad": t.unidad,
+                   "explicacion": t.explicacion, "detalle": t.detalle} for t in r.tests],
+        **(extra or {}),
+    }
+
+
 def _serie_y_bateria(tf: str, sig, nombre: str, extra: dict | None = None):
     """Camino común a las tres vías de entrada (catálogo, CSV y regla escrita).
 
@@ -309,6 +339,22 @@ async def validar_csv(request: Request, tf: str = "1d") -> JSONResponse:
     except ImportError_ as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 
+    # Si el usuario trae SUS precios, se usan los suyos: puede estar operando ETH, acciones o
+    # divisas, y validarle su estrategia contra el precio de BTC daría un informe sin sentido.
+    if imp.tiene_precios:
+        if len(imp.ts_ms) < 120:
+            return JSONResponse({"error":
+                f"con precios propios hacen falta al menos 120 filas y hay {len(imp.ts_ms)}. "
+                "Con menos, ninguna de las cinco pruebas puede concluir nada."}, status_code=400)
+        informe = imp.informe + [
+            f"{imp.n_largo} largos, {imp.n_corto} cortos, {imp.n_fuera} fuera",
+            f"validado sobre TU serie de {len(imp.ts_ms):,} filas, entre "
+            f"{pd_fecha(imp.ts_ms.min())} y {pd_fecha(imp.ts_ms.max())}",
+        ]
+        return JSONResponse(_bateria_propia(imp.ts_ms, imp.precio, imp.signal,
+                                            "tu estrategia (CSV con precios)",
+                                            {"informe": informe}))
+
     w = anillo.window(len(anillo))
     sig = align_to_bars(imp, w.ts, BY_NAME[tf].ms)
     cubiertas = int((sig != 0).sum())
@@ -320,6 +366,8 @@ async def validar_csv(request: Request, tf: str = "1d") -> JSONResponse:
 
     dentro = (w.ts >= imp.ts_ms.min()) & (w.ts <= imp.ts_ms.max())
     informe = imp.informe + [
+        "tu CSV no trae columna de precio: se valida contra NUESTRA serie de BTCUSDT. "
+        "Si operas otro activo, añade una columna `precio`.",
         f"{imp.n_largo} largos, {imp.n_corto} cortos, {imp.n_fuera} fuera en tu fichero",
         f"alineado a {int(dentro.sum()):,} velas de {tf} entre "
         f"{pd_fecha(imp.ts_ms.min())} y {pd_fecha(imp.ts_ms.max())}",

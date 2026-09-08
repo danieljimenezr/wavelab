@@ -72,7 +72,17 @@ async function validar(ev) {
   const modo = ev.currentTarget.dataset.modo;
   const tf = ev.currentTarget.closest('.pane').querySelector('.tf').value;
   document.querySelectorAll('.run').forEach((b) => (b.disabled = true));
-  $('out').innerHTML = '<div class="informe">ejecutando las cinco pruebas…</div>';
+  // Progreso HONESTO: no una barra inventada que avanza sola, sino lo que de verdad está
+  // ocurriendo. Lo que tarda son los 250 filtros aleatorios de control, y decirlo evita que
+  // diez segundos de silencio parezcan un cuelgue.
+  $('out').innerHTML = `<div class="cargando">
+    <div class="paso">Calculando la señal sobre toda la serie…</div>
+    <div class="paso">Reejecutándola con un retraso de una barra (detector de fugas)…</div>
+    <div class="paso">Comparando contra la tasa base del mercado…</div>
+    <div class="paso"><b>Generando 250 filtros aleatorios de la misma exposición…</b>
+      (esto es lo que tarda)</div>
+    <div class="paso">Partiendo el histórico con purga para medir fuera de muestra…</div>
+    <div class="barra"><i></i></div></div>`;
   let d;
   try { d = await pedir(modo, tf); } catch (e) { d = { error: String(e) }; }
   document.querySelectorAll('.run').forEach((b) => (b.disabled = false));
@@ -101,6 +111,10 @@ async function validar(ev) {
     ${d.rationale ? `<div class="meta">
       <b>Por qué debería funcionar</b> (declarado antes de ver ningún resultado)<br>${d.rationale}
       <br><br><b>Cuándo quedaría desmentida</b><br>${d.prior}</div>` : ''}
+    <div class="acciones">
+      <button id="copiar">Copiar informe</button>
+      <button id="descargar">Descargar informe (.md)</button>
+    </div>
     ${d.tests.map((t) => `
       <div class="test ${t.estado}">
         <h3>${t.titulo}<span class="tag">${ETIQ[t.estado]}</span></h3>
@@ -110,6 +124,51 @@ async function validar(ev) {
 
   chart = null;
   pintarCurva(d.curva);
+
+  // Un informe que no se puede enseñar a nadie no sirve para decidir en equipo ni para vender.
+  const md = informeMarkdown(d);
+  $('copiar').onclick = async () => {
+    await navigator.clipboard.writeText(md);
+    $('copiar').textContent = 'copiado ✓';
+    setTimeout(() => ($('copiar').textContent = 'Copiar informe'), 1800);
+  };
+  $('descargar').onclick = () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([md], { type: 'text/markdown' }));
+    a.download = `validacion-${d.nombre.replace(/[^\w.-]+/g, '_')}.md`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+}
+
+function informeMarkdown(d) {
+  const ICO = { pasa: '✅', falla: '❌', no_concluyente: '➖' };
+  return `# Validación: ${d.nombre}
+
+**${VERDICTO[d.veredicto]?.[0] ?? d.veredicto}** — ${d.resumen}
+
+| | estrategia | comprar y mantener |
+|---|---|---|
+| CAGR | ${pct(d.cagr)} | ${pct(d.cagr_bh)} |
+| Sharpe | ${d.sharpe.toFixed(2)} | ${d.sharpe_bh.toFixed(2)} |
+| Peor caída | ${pct(d.max_dd, 0)} | ${pct(d.max_dd_bh, 0)} |
+| Exposición | ${pct(d.exposure, 0)} | 100% |
+| Episodios independientes | ${d.n_effective} | — |
+
+## Las cinco pruebas
+
+${d.tests.map((t) => `### ${ICO[t.estado]} ${t.titulo}
+${t.detalle}
+
+> ${t.explicacion}`).join('\n\n')}
+${d.informe ? `\n## Lectura de los datos\n\n${d.informe.map((x) => `- ${x}`).join('\n')}` : ''}
+${d.rationale ? `\n## Razonamiento declarado antes de medir\n\n${d.rationale}\n\n**Cuándo quedaría desmentida:** ${d.prior}` : ''}
+
+---
+Generado por wavelab. Herramienta de **validación**, no de recomendación de inversión.
+Que una estrategia sobreviva no demuestra que gane dinero: demuestra que no es ninguno de los
+cinco errores conocidos que hacen que un backtest bonito pierda dinero en real.
+`;
 }
 
 document.querySelectorAll('.run').forEach((b) => (b.onclick = validar));
@@ -125,6 +184,11 @@ async function cargarAyuda() {
     Object.entries(a.series).map(([k, v]) => `<div><code>${k}</code> — ${v}</div>`).join('') +
     Object.entries(a.funciones).map(([k, v]) => `<div><code>${k}</code> — ${v}</div>`).join('');
 }
+
+document.querySelectorAll('.ej').forEach((b) => (b.onclick = () => {
+  $('largo').value = b.dataset.l || '';
+  $('corto').value = b.dataset.c || '';
+}));
 
 cargarCatalogo();
 cargarAyuda();
