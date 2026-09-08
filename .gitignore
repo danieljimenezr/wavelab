@@ -13,3 +13,4 @@ data/
 config/secrets.toml
 .DS_Store
 .benchmarks/
+.claude/settings.local.json

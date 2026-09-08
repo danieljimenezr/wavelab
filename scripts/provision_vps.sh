@@ -128,6 +128,7 @@ Slice=wavelab.slice
 WorkingDirectory=/opt/wavelab
 Environment=WAVELAB_DATA=/var/lib/wavelab
 ExecStart=/opt/wavelab/.venv/bin/python -m wavelab.server
+Environment=PYTHONUNBUFFERED=1
 Restart=always
 RestartSec=10
 

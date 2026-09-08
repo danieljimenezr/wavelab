@@ -1,0 +1,6 @@
+lightweight-charts 5.2.1 — Copyright (c) 2025 TradingView, Inc. — Apache License 2.0
+https://github.com/tradingview/lightweight-charts
+
+Vendorizado a propósito, no cargado desde un CDN: la herramienta tiene que funcionar sin
+internet salvo para los datos, y una dependencia de CDN convierte un corte de red ajeno en
+una pantalla en blanco.

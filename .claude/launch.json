@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "wavelab",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "python", "-m", "wavelab.server"],
+      "port": 8000
+    }
+  ]
+}
