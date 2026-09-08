@@ -189,17 +189,22 @@ def parse_klines_zip(
     )
 
     open_ms = _normalize_epoch(df["open_time"].to_numpy(), f"{symbol} {tf.name} open_time")
+    # .to_numpy() NO es opcional. Construir un DataFrame con Series (que traen su propio índice
+    # 0..n-1) y pasar index= con otros valores hace que pandas ALINEE en vez de asignar: sin
+    # solape, el resultado son NaN en todas las columnas, con el índice correcto, la longitud
+    # correcta y el dtype correcto (NaN es float64). Renderiza sin error y pasa cualquier test
+    # que compruebe forma en vez de contenido.
     out = pd.DataFrame(
         {
-            "open": df["open"].astype("float64"),
-            "high": df["high"].astype("float64"),
-            "low": df["low"].astype("float64"),
-            "close": df["close"].astype("float64"),
-            "volume": df["volume"].astype("float64"),
-            "quote_volume": df["quote_volume"].astype("float64"),
-            "trades": df["trades"].astype("int64"),
-            "taker_buy_base": df["taker_buy_base"].astype("float64"),
-            "taker_buy_quote": df["taker_buy_quote"].astype("float64"),
+            "open": df["open"].to_numpy(dtype="float64"),
+            "high": df["high"].to_numpy(dtype="float64"),
+            "low": df["low"].to_numpy(dtype="float64"),
+            "close": df["close"].to_numpy(dtype="float64"),
+            "volume": df["volume"].to_numpy(dtype="float64"),
+            "quote_volume": df["quote_volume"].to_numpy(dtype="float64"),
+            "trades": df["trades"].to_numpy(dtype="int64"),
+            "taker_buy_base": df["taker_buy_base"].to_numpy(dtype="float64"),
+            "taker_buy_quote": df["taker_buy_quote"].to_numpy(dtype="float64"),
         },
         index=pd.Index(open_ms, name="open_time_ms"),
     ).sort_index()
@@ -210,15 +215,37 @@ def parse_klines_zip(
         # No es fatal: la deduplicación es responsabilidad del almacén. Pero se cuenta.
         out.attrs["duplicates_dropped"] = n
 
-    # La rejilla tiene que ser exacta: si open_time no cae en múltiplo del timeframe, algo se
-    # ha convertido mal y todo lo que venga después heredará el error.
-    bad = out.index.to_numpy() % tf.ms
-    if (bad != 0).any():
-        i = int(np.flatnonzero(bad != 0)[0])
-        raise ValueError(
-            f"{symbol} {tf.name}: open_time_ms={out.index[i]} no cae en la rejilla de {tf.name} "
-            f"(resto {int(bad[i])}). Casi siempre significa una conversión µs/ms equivocada."
-        )
+    # --- rejilla ---------------------------------------------------------------------
+    # Un open_time fuera de la rejilla suele delatar una conversión µs/ms equivocada, pero NO
+    # siempre. Caso real y verificado: entre el 2017-12-04 06:00:20.799 y el 2017-12-18
+    # 10:00:20.799, la rejilla de klines de Binance estuvo desplazada 20,799 s. Son 20.401 velas
+    # de BTCUSDT, de las que 20.320 tienen operaciones y suman 144.678 BTC de volumen: datos
+    # reales, no relleno. Rechazarlas costaría dos semanas de histórico; aceptarlas en silencio
+    # dejaría un índice mentiroso.
+    #
+    # Se alinean al minuto que las contiene y se CUENTA cuántas, para que el desfase quede en el
+    # registro y no en la memoria de nadie. Si el desfase fuese >= la mitad del timeframe, o si
+    # afectase a la mayoría del fichero de un año moderno, casi seguro es un error de conversión
+    # y entonces sí hay que mirar antes de tragárselo.
+    resto = out.index.to_numpy() % tf.ms
+    n_desalineadas = int((resto != 0).sum())
+    if n_desalineadas:
+        desfase_max = int(resto.max())
+        if desfase_max >= tf.ms // 2:
+            raise ValueError(
+                f"{symbol} {tf.name}: desfase de {desfase_max} ms, la mitad o más de un "
+                f"{tf.name}. Eso no es una rejilla desplazada, es una conversión mal hecha."
+            )
+        out.index = pd.Index(out.index.to_numpy() - resto, name="open_time_ms")
+        # Al alinear pueden chocar dos velas en el mismo minuto. Se conserva la que tiene
+        # operaciones: en el único choque real observado (2017-12-04 06:00) la desplazada
+        # tenía trades=0 y volumen 0, y la alineada trades=4.
+        if out.index.has_duplicates:
+            out = (out.sort_values("trades", ascending=False)
+                      .loc[~out.sort_values("trades", ascending=False).index.duplicated(keep="first")]
+                      .sort_index())
+        out.attrs["realigned"] = n_desalineadas
+        out.attrs["max_offset_ms"] = desfase_max
 
     if month is not None:
         lo = pd.Timestamp(month, tz="UTC").value // 1_000_000

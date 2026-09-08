@@ -177,3 +177,60 @@ def test_datos_reales_a_ambos_lados_del_cambio_de_formato():
             df = parse_klines_zip(raw, TF_1M, "BTCUSDT", Market.SPOT, month)
             assert len(df) == n
             assert 2024 <= pd.Timestamp(int(df.index[0]), unit="ms").year <= 2025
+
+
+class TestElContenidoExiste:
+    """Regresión de un bug que pasó por delante de cinco tests.
+
+    Construir un DataFrame con Series y un `index=` distinto hace que pandas ALINEE en vez de
+    asignar: el resultado tiene el índice correcto, la longitud correcta y el dtype correcto
+    (NaN es float64) y TODAS las columnas en NaN. Los tests que comprobaban forma pasaban.
+    Estos comprueban contenido.
+    """
+
+    def _df(self):
+        return parse_klines_zip(_zip(_csv(ENE_2025, 120, TF_1M.ms, micros=False, header=False)),
+                                TF_1M, "BTCUSDT", Market.SPOT, date(2025, 1, 1))
+
+    def test_ninguna_columna_es_nan(self):
+        df = self._df()
+        nan = df.columns[df.isna().all()].tolist()
+        assert not nan, f"columnas enteras en NaN: {nan}"
+        assert not df.isna().any().any(), "hay NaN sueltos"
+
+    def test_los_valores_son_los_del_csv(self):
+        df = self._df()
+        assert df["open"].iloc[0] == 100.0
+        assert df["high"].iloc[0] == 101.0
+        assert df["low"].iloc[0] == 99.0
+        assert df["close"].iloc[0] == 100.5
+        assert df["volume"].iloc[0] == 10.0
+        assert df["trades"].iloc[0] == 42
+
+    def test_las_sumas_no_son_cero(self):
+        df = self._df()
+        for c in ("open", "high", "low", "close", "volume", "quote_volume", "trades"):
+            assert df[c].sum() > 0, f"la columna {c} suma cero: probablemente NaN o vacía"
+
+
+class TestRejillaDesplazada:
+    """2017-12-04 06:00 → 2017-12-18 10:00: la rejilla de Binance estuvo desplazada 20,799 s.
+    Son 20.401 velas de BTCUSDT con 144.678 BTC de volumen real, no relleno."""
+
+    def test_se_alinean_y_se_cuentan(self):
+        base = 1512367200000  # 2017-12-04 06:00:00 UTC
+        filas = [f"{base + i*60000 + 20799},100.0,101.0,99.0,100.5,10.0,"
+                 f"{base + (i+1)*60000 + 20798},1005.0,7,5.0,502.5,0" for i in range(30)]
+        raw = _zip(("\n".join(filas) + "\n").encode())
+        df = parse_klines_zip(raw, TF_1M, "BTCUSDT", Market.SPOT)
+        assert (df.index.to_numpy() % TF_1M.ms == 0).all(), "quedan velas fuera de rejilla"
+        assert df.attrs["realigned"] == 30, "el realineado debe QUEDAR REGISTRADO, no ser silencioso"
+        assert df.attrs["max_offset_ms"] == 20799
+        assert df["volume"].sum() == 300.0, "se ha perdido volumen real al realinear"
+
+    def test_un_desfase_de_medio_timeframe_lanza(self):
+        """Eso ya no es rejilla desplazada, es conversión mal hecha."""
+        base = 1735689600000
+        filas = [f"{base + i*60000 + 45000},1,1,1,1,1,{base+(i+1)*60000},1,1,1,1,0" for i in range(5)]
+        with pytest.raises(ValueError, match="conversión mal hecha"):
+            parse_klines_zip(_zip(("\n".join(filas) + "\n").encode()), TF_1M, "BTCUSDT")

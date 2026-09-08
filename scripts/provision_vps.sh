@@ -162,6 +162,45 @@ LockPersonality=true
 WantedBy=multi-user.target
 EOF
 
+cat > /etc/systemd/system/wavelab-collect.service <<'EOF'
+[Unit]
+Description=wavelab — grabadores en sombra (liquidaciones y derivados)
+After=network-online.target var-lib-wavelab.mount
+Requires=var-lib-wavelab.mount
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wavelab
+Group=wavelab
+Slice=wavelab.slice
+WorkingDirectory=/opt/wavelab
+Environment=WAVELAB_DATA=/var/lib/wavelab
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/wavelab/.venv/bin/python -m wavelab.collect
+Restart=always
+RestartSec=15
+
+# Muy poco trabajo: dos WebSockets ociosos y un sondeo REST cada 5 minutos.
+CPUQuota=25%
+MemoryMax=384M
+MemorySwapMax=64M
+OOMScoreAdjust=500
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/wavelab
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 cat > /etc/systemd/system/wavelab-validate.service <<'EOF'
 [Unit]
 Description=wavelab — validación por lotes (walk-forward, CPCV, bootstrap)
