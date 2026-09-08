@@ -82,6 +82,7 @@ class App:
         self._pending: list[Bar] = []
         self._warm_n = 0
         self._warm_month: str | None = None
+        self._feed_task = None
 
     # ------------------------------------------------------------------ arranque
 
@@ -176,6 +177,45 @@ class App:
         self.store.ingest(self.symbol, df)   # idempotente: el solape del curado no duplica
         self._pending.clear()
 
+    async def supervise_feed(self) -> None:
+        """Vigila la tarea del feed y la resucita.
+
+        `Restart=always` de systemd solo actúa si muere el PROCESO. Una tarea asyncio que muere
+        dentro de un proceso vivo no lo dispara: el servidor HTTP sigue sirviendo tan ricamente
+        datos rancios, y la insignia de salud lo pinta en rojo mientras nadie hace nada.
+        Observado en vivo: 50 minutos "conectado pero MUDO" con el stream de Binance funcionando
+        perfectamente.
+
+        Dos condiciones de resurrección: la tarea termina (con o sin excepción), o lleva
+        `SILENCIO_MAX` segundos conectada sin entregar un solo mensaje — que es un modo de fallo
+        REAL y observado, no hipotético.
+        """
+        SILENCIO_MAX = 300
+        intento = 0
+        while True:
+            tarea = asyncio.create_task(self.run_feed(), name="feed")
+            self._feed_task = tarea
+            while not tarea.done():
+                await asyncio.sleep(10)
+                if self.feed.silent_seconds > SILENCIO_MAX:
+                    print(f"[server] feed MUDO {self.feed.silent_seconds:.0f}s pese a estar "
+                          "conectado: reiniciando la tarea", flush=True)
+                    tarea.cancel()
+                    break
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await tarea
+            if tarea.cancelled() or tarea.exception() is not None:
+                motivo = "cancelada" if tarea.cancelled() else f"{tarea.exception()!r}"
+            else:
+                motivo = "terminó sola"
+            intento += 1
+            espera = min(60, 2 ** min(intento, 6))
+            print(f"[server] la tarea del feed {motivo}; reintento {intento} en {espera}s",
+                  flush=True)
+            self.feed.connected = False
+            self.feed.last_msg_ms = 0
+            await asyncio.sleep(espera)
+
     async def run_health(self) -> None:
         while True:
             await asyncio.sleep(5)
@@ -191,7 +231,7 @@ APP = App()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     APP.warmup()
-    tareas = [asyncio.create_task(APP.run_feed(), name="feed"),
+    tareas = [asyncio.create_task(APP.supervise_feed(), name="feed-supervisor"),
               asyncio.create_task(APP.run_health(), name="health")]
     try:
         yield

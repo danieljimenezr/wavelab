@@ -19,6 +19,10 @@
   .brand small{color:var(--dim);font-weight:400;margin-left:6px}
   .price{font-variant-numeric:tabular-nums;font-size:19px;font-weight:600}
   .chg{font-variant-numeric:tabular-nums;font-size:12px;padding:2px 6px;border-radius:4px}
+.pages{display:flex;gap:2px}
+  .pages a{color:var(--dim);text-decoration:none;padding:5px 12px;border-radius:6px;font-size:12.5px}
+  .pages a:hover{color:var(--txt);background:rgba(255,255,255,.05)}
+  .pages a.on{color:var(--txt);background:rgba(88,166,255,.14)}
   .tfs{display:flex;gap:4px;margin-left:auto}
   .tf{background:transparent;border:1px solid var(--line);color:var(--dim);
       padding:4px 11px;border-radius:6px;cursor:pointer;font:inherit;font-size:12px}
@@ -67,6 +71,10 @@
 <body>
 <header>
   <div class="brand">wavelab <small id="sym">BTCUSDT</small></div>
+  <nav class="pages">
+    <a href="./index.html" class="on">Gráfico</a>
+    <a href="./validador.html">¿Tu estrategia es real?</a>
+  </nav>
   <div class="price" id="px">—</div>
   <div class="chg" id="chg"></div>
   <nav class="tfs" id="tfs"></nav>
