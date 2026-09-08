@@ -18,7 +18,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -28,6 +28,11 @@ from wavelab.core.types import Bar
 from wavelab.engine.live import LiveEngine, Mode
 from wavelab.feeds.binance_klines import KlineFeed
 from wavelab.store.bars import BarStore
+
+def pd_fecha(ms: int) -> str:
+    import pandas as pd
+    return str(pd.Timestamp(int(ms), unit="ms").date())
+
 
 WEB = Path(__file__).resolve().parents[3] / "web"
 DATA = Path(os.environ.get("WAVELAB_DATA", "data"))
@@ -255,6 +260,102 @@ async def listar_hipotesis() -> JSONResponse:
          "prior": h.prior.strip(), "params": {k: str(v) for k, v in h.params.items()},
          "timeframes": list(h.timeframes)}
         for h in sorted(hs.values(), key=lambda x: (x.family, x.name))]})
+
+
+def _serie_y_bateria(tf: str, sig, nombre: str, extra: dict | None = None):
+    """Camino común a las tres vías de entrada (catálogo, CSV y regla escrita).
+
+    Que las tres pasen por la MISMA batería no es economía de código: es que un usuario tiene que
+    poder comparar su estrategia con las del catálogo sabiendo que se han medido igual.
+    """
+    import numpy as np
+    from wavelab.validation.battery import run_battery
+
+    anillo = APP.engine.state.rings[tf]
+    w = anillo.window(len(anillo))
+    r = run_battery(w.close, w.ts, np.asarray(sig, dtype=float),
+                    nombre=nombre, bar_ms=BY_NAME[tf].ms, horizon_bars=1, n_random=250)
+    paso = max(1, len(r.equity) // 600)
+    return {
+        "nombre": r.nombre, "tf": tf,
+        "veredicto": r.veredicto, "resumen": r.resumen,
+        "n_signals": r.n_signals, "n_effective": r.n_effective, "exposure": r.exposure,
+        "cagr": r.cagr, "sharpe": r.sharpe, "max_dd": r.max_dd,
+        "cagr_bh": r.cagr_bh, "sharpe_bh": r.sharpe_bh, "max_dd_bh": r.max_dd_bh,
+        "curva": [{"t": int(w.ts[1:][i]) // 1000, "e": float(r.equity[i]),
+                   "b": float(r.equity_bh[i])} for i in range(0, len(r.equity), paso)],
+        "tests": [{"id": t.id, "titulo": t.titulo, "estado": t.estado, "valor": t.valor,
+                   "referencia": t.referencia, "unidad": t.unidad,
+                   "explicacion": t.explicacion, "detalle": t.detalle} for t in r.tests],
+        **(extra or {}),
+    }
+
+
+@app.post("/api/validar_csv")
+async def validar_csv(request: Request, tf: str = "1d") -> JSONResponse:
+    """Valida la estrategia del usuario a partir de su propio CSV de señales."""
+    from wavelab.validation.csv_import import ImportError_, align_to_bars, parse_signals_csv
+
+    cuerpo = await request.body()
+    if not cuerpo:
+        return JSONResponse({"error": "fichero vacío"}, status_code=400)
+    if len(cuerpo) > 12_000_000:
+        return JSONResponse({"error": "el fichero supera los 12 MB"}, status_code=400)
+    anillo = APP.engine.state.rings.get(tf)
+    if anillo is None or len(anillo) < 400:
+        return JSONResponse({"error": f"sin datos suficientes en {tf}"}, status_code=400)
+    try:
+        imp = parse_signals_csv(cuerpo)
+    except ImportError_ as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+    w = anillo.window(len(anillo))
+    sig = align_to_bars(imp, w.ts, BY_NAME[tf].ms)
+    cubiertas = int((sig != 0).sum())
+    if cubiertas < 30:
+        return JSONResponse({"error":
+            f"tras alinear tu CSV con nuestras velas de {tf} solo quedan {cubiertas} barras con "
+            "posición. Comprueba que las fechas caen dentro de 2017-2026 y que el timeframe "
+            "elegido es el tuyo."}, status_code=400)
+
+    dentro = (w.ts >= imp.ts_ms.min()) & (w.ts <= imp.ts_ms.max())
+    informe = imp.informe + [
+        f"{imp.n_largo} largos, {imp.n_corto} cortos, {imp.n_fuera} fuera en tu fichero",
+        f"alineado a {int(dentro.sum()):,} velas de {tf} entre "
+        f"{pd_fecha(imp.ts_ms.min())} y {pd_fecha(imp.ts_ms.max())}",
+    ]
+    return JSONResponse(_serie_y_bateria(tf, sig, "tu estrategia (CSV)", {"informe": informe}))
+
+
+@app.post("/api/validar_regla")
+async def validar_regla(request: Request) -> JSONResponse:
+    """Valida una regla escrita por el usuario en el editor."""
+    from wavelab.validation.expr import ExprError, build_series, evaluate_rule
+
+    body = await request.json()
+    tf = body.get("tf", "1d")
+    anillo = APP.engine.state.rings.get(tf)
+    if anillo is None or len(anillo) < 400:
+        return JSONResponse({"error": f"sin datos suficientes en {tf}"}, status_code=400)
+    w = anillo.window(len(anillo))
+    ser = build_series(w.open, w.high, w.low, w.close, w.volume)
+    try:
+        r = evaluate_rule(ser, body.get("largo", ""), body.get("corto", ""))
+    except ExprError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    if r.n_largo + r.n_corto < 30:
+        return JSONResponse({"error":
+            f"la regla solo se cumple en {r.n_largo + r.n_corto} barras de {len(w.close):,}. "
+            "Con tan pocas no se puede concluir nada."}, status_code=400)
+    return JSONResponse(_serie_y_bateria(
+        tf, r.signal, "tu regla",
+        {"informe": [f"{r.n_largo} barras largas, {r.n_corto} cortas de {len(w.close):,}"]}))
+
+
+@app.get("/api/ayuda_regla")
+async def ayuda_regla() -> JSONResponse:
+    from wavelab.validation.expr import FUNC_DOCS, SERIE_DOCS
+    return JSONResponse({"series": SERIE_DOCS, "funciones": FUNC_DOCS})
 
 
 @app.get("/api/validar")
