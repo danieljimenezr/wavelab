@@ -6,7 +6,7 @@
 |---|---|---|
 | `wavelab-collect.service` | **activo** | Liquidaciones OKX + Bybit, derivados cada 5 min. 42 MB de RAM |
 | Histórico de velas | **4.756.158 velas de 1m** | 2017-08 → 2026-09, 110 meses, 292 MB, cobertura 99,82% |
-| `wavelab.service` (motor) | pendiente | Falta el motor (M2-M4) |
+| `wavelab.service` (motor + web) | **activo** | 430.949 velas de 1m calentadas, API en `127.0.0.1:8000`. 223 MB de RAM |
 | `wavelab-validate.timer` | pendiente | Se activará en M6b |
 
 ## Contención verificada
@@ -30,7 +30,7 @@ bash /root/deprovision_vps.sh           # revertir (--purge para borrar datos)
 
 # desde el Mac
 ssh root@187.33.152.210
-ssh -L 8000:localhost:8000 root@187.33.152.210   # túnel para la interfaz (cuando exista)
+ssh -L 8000:localhost:8000 root@187.33.152.210   # túnel; luego abrir http://localhost:8000
 ```
 
 ## Datos: qué hay y dónde
