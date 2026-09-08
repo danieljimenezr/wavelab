@@ -205,6 +205,57 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="wavelab", lifespan=lifespan)
 
 
+@app.get("/api/hipotesis")
+async def listar_hipotesis() -> JSONResponse:
+    """Catálogo de estrategias registradas, con su razonamiento y su criterio de falsación."""
+    from wavelab.hypotheses import load_all
+    hs = load_all()
+    return JSONResponse({"hipotesis": [
+        {"name": h.name, "family": h.family, "rationale": h.rationale.strip(),
+         "prior": h.prior.strip(), "params": {k: str(v) for k, v in h.params.items()},
+         "timeframes": list(h.timeframes)}
+        for h in sorted(hs.values(), key=lambda x: (x.family, x.name))]})
+
+
+@app.get("/api/validar")
+async def validar(hyp: str, tf: str = "1d") -> JSONResponse:
+    """Somete una estrategia a la batería de cinco pruebas. ESTE es el producto."""
+    import numpy as np
+    from wavelab.hypotheses import load_all
+    from wavelab.hypotheses.base import Series
+    from wavelab.validation.battery import run_battery
+
+    hs = load_all()
+    h = hs.get(hyp)
+    if h is None:
+        return JSONResponse({"error": f"hipótesis desconocida: {hyp}"}, status_code=400)
+    anillo = APP.engine.state.rings.get(tf)
+    if anillo is None or len(anillo) < 400:
+        return JSONResponse({"error": f"sin datos suficientes en {tf}"}, status_code=400)
+
+    w = anillo.window(len(anillo))
+    serie = Series(tf, w.ts, w.open, w.high, w.low, w.close, w.volume)
+    sig = h.signals(serie).astype(float)
+    r = run_battery(w.close, w.ts, sig, nombre=h.name,
+                    bar_ms=BY_NAME[tf].ms, horizon_bars=1, n_random=250)
+
+    # Se submuestrea la curva para que el navegador no reciba 20.000 puntos por serie.
+    paso = max(1, len(r.equity) // 600)
+    return JSONResponse({
+        "nombre": r.nombre, "tf": tf, "family": h.family,
+        "rationale": h.rationale.strip(), "prior": h.prior.strip(),
+        "veredicto": r.veredicto, "resumen": r.resumen,
+        "n_signals": r.n_signals, "n_effective": r.n_effective, "exposure": r.exposure,
+        "cagr": r.cagr, "sharpe": r.sharpe, "max_dd": r.max_dd,
+        "cagr_bh": r.cagr_bh, "sharpe_bh": r.sharpe_bh, "max_dd_bh": r.max_dd_bh,
+        "curva": [{"t": int(w.ts[1:][i]) // 1000, "e": float(r.equity[i]),
+                   "b": float(r.equity_bh[i])} for i in range(0, len(r.equity), paso)],
+        "tests": [{"id": t.id, "titulo": t.titulo, "estado": t.estado, "valor": t.valor,
+                   "referencia": t.referencia, "unidad": t.unidad,
+                   "explicacion": t.explicacion, "detalle": t.detalle} for t in r.tests],
+    })
+
+
 @app.get("/api/decide")
 async def decide(tf: str = "4h") -> JSONResponse:
     """Hipótesis ordenadas y su plan. Es la tarjeta de decisión."""

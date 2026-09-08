@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>¿Tu estrategia es real? — wavelab</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>🔬</text></svg>">
+<style>
+  :root{--bg:#0d1117;--panel:#161b22;--line:#21262d;--txt:#e6edf3;--dim:#8b949e;
+        --ok:#3fb950;--bad:#f85149;--warn:#d29922;--accent:#58a6ff}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);
+       font:14px/1.6 ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif}
+  header{padding:20px 28px;background:var(--panel);border-bottom:1px solid var(--line)}
+  h1{margin:0;font-size:20px;font-weight:650}
+  h1 small{display:block;color:var(--dim);font-size:13px;font-weight:400;margin-top:4px}
+  main{max-width:1180px;margin:0 auto;padding:22px 28px 60px}
+  .controls{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:20px}
+  select,button{background:#0d1117;color:var(--txt);border:1px solid var(--line);
+                border-radius:7px;padding:9px 13px;font:inherit;font-size:13px}
+  select{min-width:290px} select:focus,button:focus{outline:1px solid var(--accent)}
+  button{background:var(--accent);color:#06121f;border-color:var(--accent);font-weight:600;
+         cursor:pointer} button:disabled{opacity:.5;cursor:default}
+  .verdict{padding:16px 20px;border-radius:10px;margin:18px 0;border:1px solid}
+  .v-sobrevive{background:rgba(63,185,80,.09);border-color:#238636}
+  .v-dudosa{background:rgba(210,153,34,.09);border-color:#9e6a03}
+  .v-no_sobrevive,.v-fuga{background:rgba(248,81,73,.09);border-color:#8b2c26}
+  .verdict b{font-size:16px;display:block;margin-bottom:3px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:10px;margin:16px 0}
+  .kpi{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:11px 13px}
+  .kpi .l{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.4px}
+  .kpi .v{font-size:19px;font-weight:650;font-variant-numeric:tabular-nums;margin-top:3px}
+  .kpi .c{color:var(--dim);font-size:11px;font-variant-numeric:tabular-nums}
+  #chart{height:290px;background:var(--panel);border:1px solid var(--line);
+         border-radius:9px;margin:16px 0}
+  .test{background:var(--panel);border:1px solid var(--line);border-left-width:4px;
+        border-radius:9px;padding:13px 16px;margin:9px 0}
+  .test.pasa{border-left-color:var(--ok)} .test.falla{border-left-color:var(--bad)}
+  .test.no_concluyente{border-left-color:var(--dim)}
+  .test h3{margin:0 0 4px;font-size:14px;font-weight:600;display:flex;gap:9px;align-items:baseline}
+  .tag{font-size:10.5px;padding:2px 8px;border-radius:11px;font-weight:600;letter-spacing:.3px}
+  .pasa .tag{background:rgba(63,185,80,.16);color:var(--ok)}
+  .falla .tag{background:rgba(248,81,73,.16);color:var(--bad)}
+  .no_concluyente .tag{background:rgba(139,148,158,.16);color:var(--dim)}
+  .test .det{font-variant-numeric:tabular-nums;font-size:12.5px;color:var(--txt);margin:5px 0}
+  .test .exp{color:var(--dim);font-size:12.5px}
+  .meta{background:var(--panel);border:1px solid var(--line);border-radius:9px;
+        padding:13px 16px;margin:16px 0;font-size:12.5px;color:var(--dim)}
+  .meta b{color:var(--txt)}
+  .foot{color:var(--dim);font-size:12px;margin-top:26px;border-top:1px solid var(--line);
+        padding-top:14px}
+</style>
+</head>
+<body>
+<header>
+  <h1>¿Tu estrategia es real?
+    <small>Cinco pruebas que casi ninguna estrategia publicada supera. No te dice cuándo comprar:
+      te dice si lo que crees que funciona resiste.</small></h1>
+</header>
+<main>
+  <div class="controls">
+    <select id="hyp"><option>cargando…</option></select>
+    <select id="tf"><option value="1d">diario</option><option value="4h">4 horas</option>
+      <option value="1h">1 hora</option></select>
+    <button id="run">Someter a la batería</button>
+    <span id="status" style="color:var(--dim);font-size:12.5px"></span>
+  </div>
+  <div id="out"></div>
+  <div class="foot">
+    Herramienta de <b>validación</b>, no de recomendación. Que una estrategia sobreviva a la batería
+    no demuestra que gane dinero: demuestra que no es ninguno de los cinco errores conocidos que
+    hacen que un backtest bonito pierda dinero en real.
+  </div>
+</main>
+<script type="module" src="./validador.js"></script>
+</body>
+</html>
