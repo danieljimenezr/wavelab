@@ -41,13 +41,33 @@ say "Imagen loopback de ${SIZE_GB} GB — el límite duro"
 # No es una alerta que se pueda ignorar ni una cuota que se pueda subir por descuido: wavelab
 # escribe DENTRO de un sistema de ficheros de 8 GB. Un bucle desbocado en el grabador de
 # liquidaciones se queda sin espacio dentro de su propia imagen y el host ni se entera.
+WANT_MB=$((SIZE_GB * 1024))
 if [ ! -f "$IMG" ]; then
-    fallocate -l "${SIZE_GB}G" "$IMG"
+    fallocate -l "${SIZE_GB}G" "$IMG" 2>/dev/null || truncate -s "${SIZE_GB}G" "$IMG"
     mkfs.ext4 -q -m 0 -L wavelab "$IMG"      # -m 0: sin reserva para root, es de un solo uso
     echo "  creada $IMG (${SIZE_GB} GB)"
 else
     echo "  $IMG ya existe"
 fi
+
+# VERIFICAR que está reservada de verdad, no confiar en que fallocate haya hecho su trabajo.
+# En esta máquina fallocate dejó la imagen DISPERSA (8 GB aparentes, 69 MB reales), lo que
+# significaría que el disco del host baja según wavelab escribe — justo lo contrario de una
+# reserva. Con la imagen materializada, `df /` del host queda congelado para siempre y el
+# crecimiento de wavelab es literalmente invisible desde fuera.
+REAL_MB=$(du -sm "$IMG" | cut -f1)
+if [ "$REAL_MB" -lt $((WANT_MB * 9 / 10)) ]; then
+    echo "  imagen dispersa (${REAL_MB} MB de ${WANT_MB}); materializando…"
+    # ionice idle: reservar 8 GB no puede robarle E/S a las apps que facturan.
+    ionice -c 3 nice -n 19 dd if=/dev/zero of="$IMG" bs=1M count="$WANT_MB" \
+        conv=notrunc oflag=direct status=none
+    REAL_MB=$(du -sm "$IMG" | cut -f1)
+fi
+if [ "$REAL_MB" -lt $((WANT_MB * 9 / 10)) ]; then
+    echo "  ERROR: no se pudo reservar el espacio (${REAL_MB} MB de ${WANT_MB})" >&2
+    exit 1
+fi
+echo "  reservados ${REAL_MB} MB reales en disco: el host ya no se moverá"
 
 mkdir -p "$MNT"
 if ! grep -q "^$IMG " /etc/fstab; then
@@ -59,6 +79,11 @@ fi
 mountpoint -q "$MNT" || mount "$MNT"
 mkdir -p "$MNT"/{bars,raw/liquidations,journal,logs,backup}
 chown -R "$USER_NAME:$USER_NAME" "$MNT"
+
+# Destino de despliegue, separado de los DATOS a propósito: un CI/CD puede reemplazar
+# /opt/wavelab entero sin rozar la imagen de 8 GB, donde vive lo irrecuperable.
+mkdir -p /opt/wavelab
+chown "$USER_NAME:$USER_NAME" /opt/wavelab
 df -h "$MNT" | tail -1 | sed 's/^/  /'
 
 # --------------------------------------------------------------------------- 3. contención systemd
@@ -76,6 +101,14 @@ Before=slices.target
 CPUQuota=150%
 MemoryHigh=1200M
 MemoryMax=1536M
+# MemoryMax acota la RAM pero NO el swap. Sin esta línea, un proceso desbocado se estrangula
+# en 1,2 GB de RAM y luego empuja al swap sin freno: medido en esta máquina, 1.957 MB de los
+# 2.048 MB del swapfile del host, con oom_kill=0. Es decir, no lo mata nadie, el OOMScoreAdjust
+# no llega a dispararse nunca, y la vía real de daño —agotar el swap y hacer que la máquina
+# entera se arrastre por thrashing de E/S— queda abierta.
+# Acotando el swap, al topar RAM+swap salta el OOM killer DENTRO del cgroup: mata a wavelab
+# y a nadie más, que es exactamente el comportamiento que queremos.
+MemorySwapMax=256M
 TasksMax=192
 IOWeight=50
 EOF
@@ -100,8 +133,14 @@ RestartSec=10
 
 # Consumo esperado: <1% de un núcleo en reposo, ~300 MB.
 CPUQuota=50%
-MemoryHigh=600M
+# SIN MemoryHigh a propósito. Medido en esta máquina: con MemoryHigh por debajo de MemoryMax,
+# un proceso desbocado no muere — se estrangula y se arrastra (crece 1 MB/s en vez de 500),
+# con oom_kill=0 indefinidamente. Para un lote de validación eso es aceptable: tarda más.
+# Para el servicio EN VIVO es peor que una caída, porque Restart=always no llega a dispararse
+# nunca y te quedas con un gráfico congelado sin ningún error. Solo MemoryMax => al superarlo
+# salta el OOM killer DENTRO del cgroup, systemd lo reinicia, y queda registrado.
 MemoryMax=768M
+MemorySwapMax=128M
 
 # Si el kernel llegase a disparar el OOM killer por presión del host, que elija a wavelab
 # y no a valorvenal. MemoryMax ya debería hacer que systemd mate primero al infractor;
@@ -146,6 +185,7 @@ IOSchedulingClass=idle
 CPUSchedulingPolicy=idle
 MemoryHigh=1000M
 MemoryMax=1200M
+MemorySwapMax=256M
 OOMScoreAdjust=800
 TimeoutStartSec=8h
 
