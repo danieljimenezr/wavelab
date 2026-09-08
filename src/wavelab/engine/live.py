@@ -28,7 +28,10 @@ import numpy as np
 from wavelab.core.ring import Ring
 from wavelab.core.timeframes import MIN_SOURCE_COVERAGE, TF_1M, BY_NAME, Timeframe
 from wavelab.core.types import Bar
+from wavelab.core.types import Direction, MaturityLevel, Verdict
+from wavelab.waves.matcher import MatcherConfig, match_impulses
 from wavelab.waves.pivots import ZigZag, ZigZagConfig
+from wavelab.waves.projection import PlanConfig, build_plan
 
 __all__ = ["Mode", "EngineState", "LiveEngine", "Health"]
 
@@ -96,6 +99,11 @@ class LiveEngine:
         self.tfs = [BY_NAME[t] for t in timeframes]
         self.trigger = BY_NAME[trigger_tf]
         self.zz_cfg = zigzag or ZigZagConfig()
+        self.matcher_cfg = MatcherConfig()
+        self.plan_cfg = PlanConfig()
+        #: La interfaz solo muestra largos, pero el motor evalúa AMBAS direcciones: así se acumula
+        #: el doble de evidencia desde el día 1 y activar cortos es una línea de configuración.
+        self.directions: list[Direction] = [Direction.LONG, Direction.SHORT]
         self.state = EngineState(symbol=self.symbol)
         self.state.rings[TF_1M.name] = Ring(self.symbol, TF_1M, ring_capacity)
         for tf in self.tfs:
@@ -171,6 +179,65 @@ class LiveEngine:
                 cerradas.append(htf)
         return cerradas
 
+    def decide(self, tf_name: str, price: float) -> dict:
+        """Hipótesis ordenadas y su plan. Es lo que se pinta en la tarjeta de decisión.
+
+        El verdict SIEMPRE se topa en WATCH mientras el nivel de madurez sea PRIOR: sin evidencia
+        propia no se puede marcar nada como ACCIONABLE. El constructor de `Decision` lo impone
+        además estructuralmente, así que aquí es la primera red y allí la última.
+        """
+        det = self.state.detectors.get(tf_name)
+        anillo = self.state.rings.get(tf_name)
+        if det is None or anillo is None or not len(anillo) or det.atr is None:
+            return {"verdict": Verdict.NO_TRADE.value, "maturity": int(MaturityLevel.PRIOR),
+                    "hypotheses": [], "reasons": ["sin estructura suficiente todavía"]}
+
+        pivs = det.store.as_of(anillo.last_closed_ts_ms or 0)
+        hips = match_impulses(pivs, self.matcher_cfg,
+                              directions=tuple(self.directions))
+        atr = det.atr
+        out, mejor_en_zona = [], False
+        for h in hips:
+            r = build_plan(h, price, atr, self.plan_cfg)
+            fila = {
+                "id": h.id, "state": h.state.value, "direction": h.direction.name,
+                "label": h.terminal_label, "score": round(h.score, 3),
+                "fit": {k: round(v, 3) for k, v in h.fit.items()},
+                "archetype": h.archetype, "truncated": h.truncated,
+                "points": [round(x, 2) for x in h.points],
+                "pivot_ts": [p.ts_ms for p in h.pivots],
+                "invalidation_price": round(h.invalidation_price, 2),
+                "invalidation_rule": h.invalidation_rule,
+                "viable": r.viable, "in_zone": r.in_zone,
+                "reasons": list(r.reasons),
+            }
+            if r.viable:
+                fila |= {
+                    "entry_lo": round(r.plan.entry_lo, 2), "entry_hi": round(r.plan.entry_hi, 2),
+                    "stop": round(r.plan.stop, 2),
+                    "targets": [round(t, 2) for t in r.plan.targets],
+                    "rr_t2": round(r.rr_t2, 2), "cost_r": round(r.cost_r, 4),
+                    "p_required": round(r.p_required, 4), "stop_atr": round(r.stop_atr, 2),
+                    "size_factor": round(r.size_factor, 3),
+                }
+                mejor_en_zona |= r.in_zone
+            out.append(fila)
+
+        # Nivel PRIOR: la tabla de expectativas está escrita a mano y no hay ni una operación
+        # resuelta. Se puede VIGILAR, nunca marcar como accionable.
+        verdict = Verdict.WATCH if (out and mejor_en_zona) else (
+            Verdict.WATCH if out else Verdict.NO_TRADE)
+        razones = []
+        if not out:
+            razones.append("ninguna estructura cumple las reglas duras ahora mismo")
+        elif not mejor_en_zona:
+            razones.append("hay estructura, pero el precio no está en ninguna zona de entrada")
+        razones.append("nivel PRIOR (n=0): expectativas de tabla experta, sin validar. "
+                       "El verdict no puede pasar de WATCH.")
+        return {"verdict": verdict.value, "maturity": int(MaturityLevel.PRIOR),
+                "hypotheses": out, "reasons": razones, "atr": round(atr, 2),
+                "price": round(price, 2)}
+
     def waves(self, tf_name: str, now_ms: int | None = None,
               since_ms: int | None = None) -> dict:
         """Tramos y precio de confirmación para dibujar. Nunca lanza si el timeframe no existe."""
@@ -186,7 +253,7 @@ class LiveEngine:
             "atr": det.atr,
         }
 
-    def warmup(self, bars_1m: list[Bar]) -> int:
+    def warmup(self, bars_1m) -> int:
         """Carga histórico. Reproduce vela a vela, igual que la ruta viva: si el calentamiento
         usase un camino distinto, el estado inicial diferiría del que produciría el replay y la
         promesa de «una sola función» sería falsa desde el primer segundo."""

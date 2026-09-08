@@ -25,7 +25,35 @@
   .tf:hover{border-color:var(--accent);color:var(--txt)}
   .tf.on{background:var(--accent);border-color:var(--accent);color:#06121f;font-weight:600}
   .tf .role{display:block;font-size:9px;opacity:.75;text-transform:uppercase;letter-spacing:.5px}
-  #chart{height:calc(100vh - 108px);width:100%}
+  .wrap{display:flex;height:calc(100vh - 108px)}
+  #chart{flex:1;min-width:0}
+  #panel{width:330px;flex:none;overflow-y:auto;background:var(--panel);
+         border-left:1px solid var(--line);padding:12px 14px}
+  .verdict{display:inline-block;padding:3px 10px;border-radius:5px;font-weight:650;
+           font-size:11px;letter-spacing:.4px;text-transform:uppercase}
+  .v-no{background:rgba(139,148,158,.18);color:var(--dim)}
+  .v-watch{background:rgba(210,153,34,.18);color:var(--warn)}
+  .v-act{background:rgba(38,166,154,.2);color:var(--up)}
+  .badge{display:inline-block;padding:2px 7px;border-radius:4px;font-size:10px;
+         background:rgba(248,81,73,.14);color:var(--bad);margin-left:6px}
+  .hyp{border:1px solid var(--line);border-radius:8px;padding:10px;margin:10px 0;
+       background:rgba(255,255,255,.015)}
+  .hyp.top{border-color:#3d4a5c}
+  .hyp h4{margin:0 0 6px;font-size:12px;font-weight:600}
+  .row{display:flex;justify-content:space-between;gap:8px;font-size:11.5px;padding:2px 0;
+       font-variant-numeric:tabular-nums}
+  .row b{font-weight:600}
+  .lbl{color:var(--dim)}
+  .inval{color:var(--bad);font-weight:600}
+  .zone{color:var(--accent)}
+  .why{font-size:11px;color:var(--dim);line-height:1.45;margin-top:7px;
+       border-top:1px solid var(--line);padding-top:7px}
+  .why li{margin:3px 0}
+  .why ul{margin:0;padding-left:15px}
+  h3.sec{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--dim);
+         margin:14px 0 4px;font-weight:600}
+  .arith{font-size:11px;color:var(--dim);background:rgba(0,0,0,.25);border-radius:6px;
+         padding:7px 9px;margin-top:7px;line-height:1.6;font-variant-numeric:tabular-nums}
   footer{display:flex;gap:20px;align-items:center;padding:6px 16px;background:var(--panel);
          border-top:1px solid var(--line);color:var(--dim);font-size:11.5px;flex-wrap:wrap}
   .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px}
@@ -45,7 +73,10 @@
 </header>
 
 <div class="banner" id="banner"></div>
-<div id="chart"></div>
+<div class="wrap">
+  <div id="chart"></div>
+  <aside id="panel"><div class="lbl" style="font-size:11.5px">analizando…</div></aside>
+</div>
 
 <footer>
   <span><span class="dot" id="d-feed"></span><span id="s-feed">conectando…</span></span>

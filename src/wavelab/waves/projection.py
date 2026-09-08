@@ -29,6 +29,10 @@ class PlanConfig:
     max_stop_atr: float = 3.0
     min_stop_atr: float = 0.75
     fee_bps_taker: float = 7.5
+    #: Coste máximo tolerable como fracción de R. Por encima, la operación se RECHAZA antes de
+    #: modelar nada: si las comisiones se comen un quinto del riesgo, ninguna ventaja estadística
+    #: plausible sobrevive. Con 7,5 pb por lado, un stop al 0,5% cuesta 0,30R y uno al 1,5%, 0,10R.
+    max_cost_r: float = 0.20
     ev_min_r: float = 0.15
     expected_loss_r: float = 1.10
     exit_template_id: str = "std_2r_48b"
@@ -117,6 +121,15 @@ def build_plan(h: Hypothesis, price: float, atr: float, cfg: PlanConfig | None =
                           ("la zona de entrada está al otro lado del stop.",))
 
     stop_atr = riesgo / atr if atr else float("inf")
+
+    # La aritmética se calcula ANTES de cualquier rechazo, y siempre viaja en el resultado.
+    # Un "no" sin números es una opinión; con números es un argumento que el usuario puede
+    # discutir, y que además le enseña por qué ese setup no valía.
+    # En spot no se computa funding: es del perpetuo, y aquí sería un coste inventado.
+    cost_r = (2 * cfg.fee_bps_taker / 10_000) * entrada / riesgo
+    rr_t2 = abs(objetivos[1] - entrada) / riesgo
+    p_req = required_hit_rate(rr_t2, cost_r, cfg)
+
     size = 1.0
     if stop_atr > cfg.max_stop_atr:
         # REDUCIR TAMAÑO, jamás ceñir el stop: ceñirlo rompe el vínculo con la invalidación.
@@ -124,15 +137,15 @@ def build_plan(h: Hypothesis, price: float, atr: float, cfg: PlanConfig | None =
         razones.append(f"stop a {stop_atr:.1f} ATR (>{cfg.max_stop_atr}): tamaño reducido a "
                        f"{size:.0%}, el stop NO se ciñe")
     if stop_atr < cfg.min_stop_atr:
-        return PlanResult(None, False, 0, 0, 0, stop_atr, 1.0,
+        return PlanResult(None, False, rr_t2, cost_r, p_req, stop_atr, 1.0,
                           (f"stop a {stop_atr:.2f} ATR: está dentro del suelo de ruido "
                            f"(<{cfg.min_stop_atr} ATR) y lo barrería cualquier mecha.",))
 
-    # --- costes y umbral de acierto -----------------------------------------------------------
-    # En spot no hay funding: el funding es del perpetuo, y aquí sería un coste inventado.
-    cost_r = (2 * cfg.fee_bps_taker / 10_000) * entrada / riesgo
-    rr_t2 = abs(objetivos[1] - entrada) / riesgo
-    p_req = required_hit_rate(rr_t2, cost_r, cfg)
+    if cost_r > cfg.max_cost_r:
+        return PlanResult(None, False, rr_t2, cost_r, p_req, stop_atr, size,
+                          (f"el coste de ida y vuelta se lleva el {cost_r:.0%} de la R "
+                           f"(máximo {cfg.max_cost_r:.0%}): el stop está demasiado cerca para que "
+                           "ninguna ventaja plausible sobreviva a las comisiones.",))
 
     en_zona = lo <= price <= hi
     if not en_zona:

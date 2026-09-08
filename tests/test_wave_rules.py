@@ -164,3 +164,48 @@ class TestGuardas:
     def test_numero_de_vertices_invalido(self, n):
         with pytest.raises(ValueError):
             check_impulse([100.0 + i for i in range(n)])
+
+
+class TestFiltroDeCoste:
+    """Una señal cuyo stop está demasiado cerca se rechaza ANTES de modelar nada: si las
+    comisiones se llevan un quinto del riesgo, ninguna ventaja estadística plausible sobrevive."""
+
+    def _hyp(self, puntos):
+        from wavelab.core.types import Pivot, PivotKind
+        from wavelab.waves.matcher import Hypothesis
+        from wavelab.waves.rules import ImpulseState, check_impulse
+        r = check_impulse(list(puntos), Direction.LONG)
+        pivs = tuple(Pivot(i, 1_600_000_000_000 + i * 14_400_000, p,
+                           PivotKind.LOW if i % 2 == 0 else PivotKind.HIGH, 1.0)
+                     .confirmed_at(i + 1, 1_600_000_000_000 + (i + 1) * 14_400_000)
+                     for i, p in enumerate(puntos))
+        return Hypothesis(ImpulseState.AT_2, Direction.LONG, pivs, tuple(puntos), 0.8, {},
+                          r.invalidation_price, r.invalidation_rule, "w2")
+
+    def test_rechaza_un_stop_demasiado_cerca(self):
+        from wavelab.waves.projection import PlanConfig, build_plan
+        # Volatilidad baja (ATR 100 sobre 79.000 = 0,13%): el stop es holgado en ATR —2,2—
+        # pero en términos absolutos está tan cerca que las comisiones se llevan media R.
+        h = self._hyp([79000.0, 79400.0, 79200.0])
+        r = build_plan(h, 79150.0, 100.0, PlanConfig())
+        assert not r.viable
+        assert "comisiones" in r.reasons[0]
+        assert r.cost_r > 0.20
+
+    def test_acepta_un_stop_holgado(self):
+        from wavelab.waves.projection import PlanConfig, build_plan
+        h = self._hyp([70000.0, 80000.0, 74000.0])
+        r = build_plan(h, 75000.0, 900.0, PlanConfig())
+        assert r.viable, r.reasons
+        assert r.cost_r < 0.05
+
+    def test_el_coste_se_muestra_aunque_se_rechace(self):
+        """Un 'no' sin números es una opinión; con números es un argumento discutible."""
+        from wavelab.waves.projection import PlanConfig, build_plan
+        # Rechazo por SUELO DE RUIDO, no por coste: la aritmética debe venir igualmente.
+        h = self._hyp([79000.0, 79300.0, 79100.0])
+        r = build_plan(h, 79150.0, 400.0, PlanConfig())
+        assert not r.viable and "suelo de ruido" in r.reasons[0]
+        assert r.cost_r > 0 and r.rr_t2 > 0 and r.p_required > 0, (
+            "un rechazo también tiene que traer sus números"
+        )

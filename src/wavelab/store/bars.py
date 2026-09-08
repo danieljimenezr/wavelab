@@ -74,6 +74,16 @@ class BarStore:
         d = self._dir(symbol)
         return sorted(p.stem for p in d.glob("*.parquet")) if d.exists() else []
 
+    #: pandas indexa en nanosegundos, así que su rango acaba en 2262. Un centinela como 10**14 ms
+    #: (año 5138) revienta con OutOfBoundsDatetime en vez de significar "todo". Se acota aquí, en
+    #: la frontera, para que ningún llamante tenga que conocer el detalle.
+    _MAX_MS = 4_102_444_800_000   # 2100-01-01
+    _MIN_MS = 1_262_304_000_000   # 2010-01-01
+
+    @classmethod
+    def _clamp(cls, ms: int) -> int:
+        return int(min(max(int(ms), cls._MIN_MS), cls._MAX_MS))
+
     @staticmethod
     def _month_keys(index: np.ndarray) -> np.ndarray:
         return pd.to_datetime(index, unit="ms", utc=True).strftime("%Y-%m").to_numpy()
@@ -134,6 +144,10 @@ class BarStore:
         filas consecutivas del DataFrame pueden abarcar tres horas de reloj y cualquier ventana de
         N velas mentiría sobre qué periodo cubre.
         """
+        start_ms, end_ms = self._clamp(start_ms), self._clamp(end_ms)
+        if end_ms < start_ms:
+            return pd.DataFrame(columns=_COLUMNS,
+                                index=pd.Index([], name="open_time_ms", dtype="int64"))
         keys = set(self._month_keys(np.array([start_ms, end_ms], dtype=np.int64)))
         keys |= set(pd.date_range(pd.Timestamp(start_ms, unit="ms", tz="UTC"),
                                   pd.Timestamp(end_ms, unit="ms", tz="UTC"),

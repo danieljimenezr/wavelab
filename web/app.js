@@ -49,6 +49,7 @@ const legProv = chart.addSeries(LineSeries, {
 });
 
 let confirmLine = null;
+let planLines = [];
 
 
 let tfActual = '15m';
@@ -90,6 +91,7 @@ async function cargar(tf) {
   if (!$('tfs').children.length) construirSelector(d.timeframes, d.roles);
   pintarOndas(d.waves);
   salud(d.health, d.gaps);
+  decidir();
 }
 
 function construirSelector(tfs, roles) {
@@ -184,7 +186,7 @@ function conectar() {
   ws.onmessage = (ev) => {
     const m = JSON.parse(ev.data);
     if (m.type === 'health') { salud(m); return; }
-    if (m.type === 'waves') { if (m.tf === tfActual) pintarOndas(m); return; }
+    if (m.type === 'waves') { if (m.tf === tfActual) { pintarOndas(m); decidir(); } return; }
     // Solo interesan los mensajes del timeframe visible. El servidor manda DIFFS de todos:
     // filtrar aquí es más barato que abrir un socket por timeframe.
     if (m.tf !== tfActual) return;
@@ -203,3 +205,86 @@ function conectar() {
 
 // El timeframe de disparo es 15m: el único que puede dibujar entradas.
 cargar('15m').then(conectar);
+
+
+// ---------------------------------------------------------------------------- decisión
+const VERDICT = {
+  no_trade: ['v-no', 'NO OPERAR'],
+  watch:    ['v-watch', 'VIGILAR'],
+  actionable: ['v-act', 'ACCIONABLE'],
+};
+
+function limpiarPlan() {
+  planLines.forEach((l) => candles.removePriceLine(l));
+  planLines = [];
+}
+
+function dibujarPlan(h) {
+  limpiarPlan();
+  if (!h || !h.viable) return;
+  const linea = (price, color, title, style = LineStyle.Solid, w = 1) =>
+    planLines.push(candles.createPriceLine({
+      price, color, lineWidth: w, lineStyle: style, axisLabelVisible: true, title,
+    }));
+  // La invalidación es EL producto: la línea más gruesa y la única en rojo.
+  linea(h.invalidation_price, '#f85149', h.invalidation_rule.split(' ')[0], LineStyle.Solid, 2);
+  linea(h.entry_lo, '#58a6ff', 'zona', LineStyle.Dotted);
+  linea(h.entry_hi, '#58a6ff', 'zona', LineStyle.Dotted);
+  h.targets.forEach((t, i) => linea(t, '#26a69a', `T${i + 1}`, LineStyle.Dashed));
+}
+
+function filaHipotesis(h, top) {
+  const money = (v) => '$' + fmt(v, 0);
+  const cab = `<h4>${h.label} <span class="lbl">· ${h.direction === 'LONG' ? 'largo' : 'corto'}
+    · ajuste ${h.score}</span>${h.truncated ? '<span class="badge">truncada</span>' : ''}</h4>`;
+
+  if (!h.viable) {
+    return `<div class="hyp${top ? ' top' : ''}">${cab}
+      <div class="row"><span class="lbl">invalidación</span>
+        <b class="inval">${money(h.invalidation_price)}</b></div>
+      <div class="why">${h.reasons.map((r) => `<div>· ${r}</div>`).join('')}</div></div>`;
+  }
+
+  // La aritmética del RECHAZO se muestra igual que la de la aceptación. Un "no" sin números
+  // es una opinión; con números es un argumento que puedes discutir.
+  return `<div class="hyp${top ? ' top' : ''}">${cab}
+    <div class="row"><span class="lbl">zona de entrada</span>
+      <b class="zone">${money(h.entry_lo)} – ${money(h.entry_hi)}</b></div>
+    <div class="row"><span class="lbl">stop</span><b>${money(h.stop)}</b></div>
+    <div class="row"><span class="lbl">invalidación · ${h.invalidation_rule.split(' ')[0]}</span>
+      <b class="inval">${money(h.invalidation_price)}</b></div>
+    <div class="row"><span class="lbl">objetivos</span>
+      <b>${h.targets.map(money).join(' · ')}</b></div>
+    <div class="arith">
+      R:R a T2 <b>${h.rr_t2}</b> · stop a <b>${h.stop_atr} ATR</b><br>
+      coste <b>${(h.cost_r * 100).toFixed(1)}%</b> de R · tamaño <b>${(h.size_factor * 100).toFixed(0)}%</b><br>
+      este R:R exige acertar el <b>${(h.p_required * 100).toFixed(1)}%</b> de las veces
+    </div>
+    ${h.reasons.length ? `<div class="why">${h.reasons.map((r) => `<div>· ${r}</div>`).join('')}</div>` : ''}
+  </div>`;
+}
+
+async function decidir() {
+  const r = await fetch(`/api/decide?tf=${tfActual}`);
+  const d = await r.json();
+  const panel = $('panel');
+  if (d.error) { panel.innerHTML = `<div class="lbl">${d.error}</div>`; limpiarPlan(); return; }
+
+  const [cls, txt] = VERDICT[d.verdict] ?? ['v-no', d.verdict];
+  const hs = d.hypotheses ?? [];
+  const top = hs.find((h) => h.viable && h.in_zone) ?? hs.find((h) => h.viable) ?? hs[0];
+  dibujarPlan(top);
+
+  panel.innerHTML = `
+    <div><span class="verdict ${cls}">${txt}</span>
+      <span class="badge" style="background:rgba(88,166,255,.14);color:#58a6ff">
+        nivel ${d.maturity} · prior</span></div>
+    <div class="why">${(d.reasons ?? []).map((x) => `<div>· ${x}</div>`).join('')}</div>
+    ${hs.length ? '<h3 class="sec">hipótesis ordenadas</h3>' : ''}
+    ${hs.map((h, i) => filaHipotesis(h, i === 0)).join('')}
+    <div class="why" style="margin-top:14px">
+      Herramienta <b>visual</b>. No ejecuta órdenes.<br>
+      El precio de invalidación es lo único que este marco produce de forma objetiva:
+      es dónde tu idea es falsa.
+    </div>`;
+}

@@ -83,26 +83,44 @@ class App:
 
     # ------------------------------------------------------------------ arranque
 
+    def _iter_bars(self, df):
+        """Genera velas SIN materializar la lista.
+
+        Nueve años de 1m son 4,76 millones de objetos Bar ≈ 950 MB, y el servicio tiene un tope
+        duro de 768 MB: construir la lista lo mata por OOM antes de arrancar. Como generador, la
+        memoria queda acotada por el ring (8.192 velas) y no por el histórico.
+        """
+        for ts, r in zip(df.index, df.itertuples(index=False), strict=True):
+            yield Bar(symbol=self.symbol, tf=TF_1M, open_time_ms=int(ts),
+                      open=float(r.open), high=float(r.high), low=float(r.low),
+                      close=float(r.close), volume=float(r.volume),
+                      is_closed=True, n_source_bars=1)
+
     def warmup(self) -> int:
-        """Carga desde el almacén. Sin suficiente historia el motor no arranca: prefiere no
-        mostrar nada a mostrar indicadores calculados sobre una ventana incompleta."""
-        tf_max = max((BY_NAME[t] for t in self.tfs), key=lambda t: t.ms)
-        necesarias = max(self.cfg.engine.window_bars, tf_max.expected_source_bars * 300)
+        """Calienta desde el PRINCIPIO del histórico, no desde una ventana móvil.
+
+        Es una decisión de correctitud, no de exhaustividad. El detector de pivotes es dependiente
+        del camino: arrancar desde un punto distinto produce pivotes distintos. Con una ventana
+        móvil, cada reinicio del servicio cambiaría la estructura mostrada al usuario sin ningún
+        evento de invalidación, y además el estado en vivo dejaría de coincidir con el que produce
+        un replay completo — que es la promesa central del diseño.
+
+        Coste medido: ~570.000 velas/s, unos 10-15 s para nueve años. Se paga una vez al arrancar.
+        """
         hasta = int(time.time() * 1000)
-        desde = hasta - necesarias * TF_1M.ms
-        df = self.store.read(self.symbol, desde, hasta, fill_grid=False)
+        df = self.store.read(self.symbol, 0, hasta, fill_grid=False)
         if df.empty:
             print("[server] almacén vacío: ejecuta `python -m wavelab.store.hydrate`", flush=True)
             return 0
-        bars = [
-            Bar(symbol=self.symbol, tf=TF_1M, open_time_ms=int(ts),
-                open=float(r.open), high=float(r.high), low=float(r.low), close=float(r.close),
-                volume=float(r.volume), is_closed=True, n_source_bars=1)
-            for ts, r in zip(df.index, df.itertuples(index=False), strict=True)
-        ]
-        n = self.engine.warmup(bars)
-        print(f"[server] calentado con {n:,} velas de 1m "
-              f"(desde {df.index[0]} hasta {df.index[-1]})", flush=True)
+        t0 = time.perf_counter()
+        n = self.engine.warmup(self._iter_bars(df))
+        dt = time.perf_counter() - t0
+        print(f"[server] calentado con {n:,} velas de 1m desde {df.index[0]} "
+              f"en {dt:.1f}s ({n/dt:,.0f}/s)", flush=True)
+        for tf in self.tfs:
+            if tf != "1m":
+                print(f"[server]   {tf}: {self.engine.waves(tf)['n_confirmed']:,} pivotes",
+                      flush=True)
         return n
 
     # ------------------------------------------------------------------ bucle vivo
@@ -173,6 +191,16 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="wavelab", lifespan=lifespan)
+
+
+@app.get("/api/decide")
+async def decide(tf: str = "4h") -> JSONResponse:
+    """Hipótesis ordenadas y su plan. Es la tarjeta de decisión."""
+    anillo = APP.engine.state.rings.get(tf)
+    if anillo is None or not len(anillo):
+        return JSONResponse({"error": f"sin datos para {tf}"}, status_code=400)
+    precio = float(anillo.window(1).close[0])
+    return JSONResponse(APP.engine.decide(tf, precio))
 
 
 @app.get("/api/history")
