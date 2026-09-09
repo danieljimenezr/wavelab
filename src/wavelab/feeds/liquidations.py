@@ -1,26 +1,26 @@
-"""Grabador de liquidaciones, con OKX como fuente primaria.
+"""Liquidation recorder, with OKX as the primary source.
 
-POR QUÉ NO BINANCE, que era el plan original. Verificado el 2026-09-08 desde DOS máquinas
-independientes (residencial de Telefónica en Sitges y datacenter de Clouding en Barcelona):
+WHY NOT BINANCE, which was the original plan. Verified on 2026-09-08 from TWO independent machines
+(a Telefónica residential line in Sitges and a Clouding datacenter in Barcelona):
 
-    wss://fstream.binance.com  handshake 101 OK, SUBSCRIBE respondido con {"result":null,"id":1},
-                               y CERO frames de datos en 90 s — incluidos markPrice@1s y aggTrade,
-                               que empujan varias veces por segundo.
-    wss://data-stream.binance.vision (spot)   44-64 frames en 10 s. Funciona.
-    https://fapi.binance.com (REST de futuros) funciona: funding, open interest, ratios.
+    wss://fstream.binance.com  handshake 101 OK, SUBSCRIBE answered with {"result":null,"id":1},
+                               and ZERO data frames in 90 s — including markPrice@1s and aggTrade,
+                               which push several times per second.
+    wss://data-stream.binance.vision (spot)   44-64 frames in 10 s. Works.
+    https://fapi.binance.com (futures REST) works: funding, open interest, ratios.
 
-Es decir: Binance acepta la conexión y la suscripción al stream de futuros, y luego no envía nada.
-El fallo silencioso perfecto — nada lanza, nada avisa, y un grabador ingenuo escribiría un fichero
-vacío durante meses convencido de estar funcionando. Si algún día se reabre, este módulo lo detecta
-por el contador de mensajes, no por el estado de la conexión.
+That is: Binance accepts the connection and accepts the subscription to the futures stream, and then
+sends nothing. The perfect silent failure — nothing raises, nothing warns, and a naive recorder would
+write an empty file for months convinced it was working. If it ever reopens, this module notices it
+through the message counter, not through the state of the connection.
 
-ALTERNATIVA ELEGIDA: OKX `liquidation-orders` sobre instType=SWAP (todos los swaps), verificado
-entregando datos reales. Bybit `allLiquidation` queda como secundaria.
+CHOSEN ALTERNATIVE: OKX `liquidation-orders` over instType=SWAP (every swap), verified delivering
+real data. Bybit `allLiquidation` stays as the backup.
 
-CAVEAT, escrito ahora que se entiende: cualquier feed de liquidaciones de un solo exchange es una
-muestra parcial del mercado. Ni OKX ni Bybit ven las liquidaciones de Binance, que es el mayor
-mercado de perpetuos. Sirve como señal de estrés y de cascada, no como censo. Y las cascadas
-agrupadas están infrarrepresentadas en cualquier feed con limitación de frecuencia.
+CAVEAT, written now that the reason is understood: any single-exchange liquidation feed is a partial
+sample of the market. Neither OKX nor Bybit see Binance's liquidations, and Binance is the largest
+perpetuals venue. It serves as a stress and cascade signal, not as a census. And clustered cascades
+are under-represented in any rate-limited feed.
 """
 
 from __future__ import annotations
@@ -36,10 +36,10 @@ import websockets
 __all__ = ["CAVEAT", "SOURCES", "LiquidationRecorder"]
 
 CAVEAT = (
-    "Liquidaciones de OKX (primaria) y Bybit (secundaria). NO incluye Binance: su WebSocket de "
-    "futuros acepta la suscripción y no envía datos desde España (verificado 2026-09-08 desde IP "
-    "residencial y de datacenter). Cualquier feed de un solo exchange es una muestra parcial del "
-    "mercado, no un censo: úsalo como señal de estrés, no como magnitud absoluta."
+    "Liquidations from OKX (primary) and Bybit (secondary). Binance is NOT included: its futures "
+    "WebSocket accepts the subscription and sends no data from Spain (verified 2026-09-08 from a "
+    "residential and a datacenter IP). Any single-exchange feed is a partial sample of the market, "
+    "not a census: use it as a stress signal, not as an absolute magnitude."
 )
 
 SOURCES = {
@@ -58,16 +58,16 @@ SOURCES = {
 
 
 class LiquidationRecorder:
-    """Un fichero JSONL por día y fuente. Append-only: esto NUNCA se borra ni se reescribe."""
+    """One JSONL file per day and source. Append-only: this is NEVER deleted or rewritten."""
 
     def __init__(self, root: Path | str, source: str = "okx") -> None:
         if source not in SOURCES:
-            raise ValueError(f"fuente desconocida {source!r}; opciones: {list(SOURCES)}")
+            raise ValueError(f"unknown source {source!r}; options: {list(SOURCES)}")
         self.root = Path(root)
         self.source = source
         self.cfg = SOURCES[source]
         self.root.mkdir(parents=True, exist_ok=True)
-        (self.root / "LEEME.txt").write_text(CAVEAT + "\n", encoding="utf-8")
+        (self.root / "README.txt").write_text(CAVEAT + "\n", encoding="utf-8")
         self.n = 0
         self.reconnects = 0
         self.last_msg_ms = 0
@@ -85,19 +85,20 @@ class LiquidationRecorder:
 
     @property
     def silent_seconds(self) -> float:
-        """Segundos sin un solo mensaje. Es la métrica que importa: una conexión ABIERTA que no
-        entrega nada es exactamente el fallo de Binance, y el estado del socket no lo delata."""
+        """Seconds without a single message. This is the metric that matters: an OPEN connection
+        that delivers nothing is exactly the Binance failure, and the socket state does not show
+        it."""
         return (time.time() * 1000 - self.last_msg_ms) / 1000 if self.last_msg_ms else float("inf")
 
     async def run(self) -> None:
-        intento = 0
+        attempt = 0
         while True:
             try:
                 async with websockets.connect(self.cfg["url"], ping_interval=20,
                                               ping_timeout=20, close_timeout=5) as ws:
                     await ws.send(json.dumps(self.cfg["subscribe"]))
-                    intento = 0
-                    print(f"[liq:{self.source}] conectado", flush=True)
+                    attempt = 0
+                    print(f"[liq:{self.source}] connected", flush=True)
                     while True:
                         raw = await asyncio.wait_for(ws.recv(), timeout=3600)
                         d = json.loads(raw)
@@ -109,12 +110,12 @@ class LiquidationRecorder:
                         self.last_msg_ms = ts
                         fh = self._file(ts)
                         fh.write(json.dumps(d, separators=(",", ":")) + "\n")
-                        fh.flush()      # las liquidaciones son escasas: durabilidad > rendimiento
+                        fh.flush()      # liquidations are sparse: durability > throughput
                         self.n += 1
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
                 self.reconnects += 1
-                print(f"[liq:{self.source}] caído ({type(e).__name__}); reconectando", flush=True)
-            intento += 1
-            await asyncio.sleep(min(60.0, 1.5 ** min(intento, 10)))
+                print(f"[liq:{self.source}] down ({type(e).__name__}); reconnecting", flush=True)
+            attempt += 1
+            await asyncio.sleep(min(60.0, 1.5 ** min(attempt, 10)))

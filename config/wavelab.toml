@@ -1,15 +1,15 @@
-# Configuración global. Los parámetros del MOTOR están en [engine] y no se ajustan:
-# cualquier cambio aquí escribe una fila en trials.sqlite y cuenta para el N efectivo.
+# Global configuration. The ENGINE parameters live in [engine] and are not tuned:
+# any change here writes a row into trials.sqlite and counts toward the effective N.
 
 data_dir = "data"
 
-# Separación de roles como invariante duro: 1d/4h vetan, 1h clasifica régimen,
-# 15m es el ÚNICO que dibuja entradas.
+# Role separation as a hard invariant: 1d/4h veto, 1h classifies the regime,
+# 15m is the ONLY one that draws entries.
 trigger_tf = "15m"
 regime_tf  = "1h"
 gate_tfs   = ["4h", "1d"]
 
-# La interfaz solo muestra largos, pero el motor evalúa y registra también los cortos en sombra.
+# The interface only shows longs, but the engine also evaluates and records shorts in shadow.
 directions = ["long"]
 shadow_opposite_direction = true
 

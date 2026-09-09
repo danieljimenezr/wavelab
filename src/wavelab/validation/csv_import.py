@@ -1,13 +1,13 @@
-"""Importa la estrategia del usuario desde un CSV y la alinea con nuestras velas.
+"""Imports the user's strategy from a CSV and aligns it with our bars.
 
-Filosofía: ser MUY tolerante con el formato de entrada y MUY explícito sobre lo que se ha
-entendido. Nadie tiene sus señales en el formato que a nosotros nos convenga, y rechazar un fichero
-por el nombre de una columna es la forma más tonta de perder un usuario. Pero adivinar en silencio
-es peor: si interpretamos "1" como largo cuando el usuario quería decir "operación número 1",
-produciríamos un informe precioso sobre una estrategia que no existe.
+Philosophy: be VERY tolerant about the input format and VERY explicit about what was understood.
+Nobody keeps their signals in whatever format happens to suit us, and turning a file away over the
+name of a column is the dumbest possible way to lose a user. But guessing in silence is worse: if
+we read "1" as long when the user meant "trade number 1", we would produce a beautiful report
+about a strategy that does not exist.
 
-Por eso siempre se devuelve un `informe` con lo que se detectó, y la interfaz lo enseña antes de
-validar nada.
+That is why a `report` of everything that was detected is always returned, and the interface shows
+it before validating anything.
 """
 
 from __future__ import annotations
@@ -21,176 +21,186 @@ __all__ = ["ImportError_", "ImportedStrategy", "align_to_bars", "parse_signals_c
 
 
 class ImportError_(ValueError):
-    """El CSV no se pudo interpretar. El mensaje va directo al usuario."""
+    """The CSV could not be interpreted. The message goes straight to the user."""
 
 
-_COL_TIEMPO = ("time", "timestamp", "date", "datetime", "fecha", "ts", "open_time", "día", "dia")
-_COL_SENAL = ("signal", "señal", "senal", "position", "posicion", "posición", "side", "lado",
-              "direction", "direccion", "dirección", "pos")
+# The vocabulary below is USER DATA, not code, and that is why it is the one thing here that is
+# not in English. A Spanish spreadsheet says «fecha» and a Catalan one says «data»; the moment we
+# accept English headers only, we stop working for exactly the people this was built for. Note
+# that «data» is deliberately last among the time candidates: matching is exact-first and then by
+# substring, so the unambiguous names get their turn before it does.
+_TIME_COLS = ("time", "timestamp", "date", "datetime", "fecha", "ts", "open_time", "día", "dia",
+              "data")
+_SIGNAL_COLS = ("signal", "señal", "senal", "senyal", "position", "posicion", "posición",
+                "posicio", "posició", "side", "lado", "direction", "direccion", "dirección",
+                "direccio", "direcció", "pos")
 
-_TEXTO_LARGO = {"long", "largo", "buy", "compra", "comprar", "l", "b", "1", "alcista", "up"}
-_TEXTO_CORTO = {"short", "corto", "sell", "venta", "vender", "s", "-1", "bajista", "down"}
-_TEXTO_FUERA = {"flat", "fuera", "none", "cash", "0", "neutral", "", "nan", "hold"}
-_COL_PRECIO = ("close", "cierre", "price", "precio", "adj close", "adj_close", "last", "último",
-               "ultimo", "c")
+_LONG_WORDS = {"long", "largo", "llarg", "buy", "compra", "comprar", "l", "b", "1", "alcista",
+               "up"}
+_SHORT_WORDS = {"short", "corto", "curt", "sell", "venta", "venda", "vender", "vendre", "s", "-1",
+                "bajista", "baixista", "down"}
+_FLAT_WORDS = {"flat", "fuera", "fora", "none", "cash", "0", "neutral", "", "nan", "hold"}
+_PRICE_COLS = ("close", "cierre", "tancament", "price", "precio", "preu", "adj close", "adj_close",
+               "last", "último", "ultimo", "c")
 
 
 @dataclass(slots=True)
 class ImportedStrategy:
     ts_ms: np.ndarray
     signal: np.ndarray
-    informe: list[str] = field(default_factory=list)
-    n_largo: int = 0
-    n_corto: int = 0
-    n_fuera: int = 0
-    #: Precios del propio usuario, si los aporta. Es lo que convierte la herramienta en algo
-    #: utilizable por cualquiera: sin esto solo sirve a quien opere exactamente BTC en Binance.
-    precio: np.ndarray | None = None
+    report: list[str] = field(default_factory=list)
+    n_long: int = 0
+    n_short: int = 0
+    n_flat: int = 0
+    #: The user's own prices, when they supply them. This is what turns the tool into something
+    #: anyone can use: without it, it only serves people trading exactly BTC on Binance.
+    price: np.ndarray | None = None
 
     @property
-    def tiene_precios(self) -> bool:
-        return self.precio is not None
+    def has_prices(self) -> bool:
+        return self.price is not None
 
 
-def _detectar(cols: list[str], candidatos: tuple[str, ...]) -> str | None:
-    bajas = {c.strip().lower(): c for c in cols}
-    for cand in candidatos:
-        if cand in bajas:
-            return bajas[cand]
-    for baja, orig in bajas.items():
-        if any(cand in baja for cand in candidatos):
-            return orig
+def _detect(cols: list[str], candidates: tuple[str, ...]) -> str | None:
+    lowered = {c.strip().lower(): c for c in cols}
+    for cand in candidates:
+        if cand in lowered:
+            return lowered[cand]
+    for low, original in lowered.items():
+        if any(cand in low for cand in candidates):
+            return original
     return None
 
 
-def _a_ms(serie: pd.Series, informe: list[str]) -> np.ndarray:
-    """Interpreta la columna de tiempo. Acepta epoch en s/ms y cualquier fecha legible."""
-    if pd.api.types.is_numeric_dtype(serie):
-        v = serie.astype("int64").to_numpy()
+def _to_ms(col: pd.Series, report: list[str]) -> np.ndarray:
+    """Interprets the time column. Accepts epochs in s/ms and any readable date."""
+    if pd.api.types.is_numeric_dtype(col):
+        v = col.astype("int64").to_numpy()
         med = float(np.median(np.abs(v)))
         if med > 1e17:
-            informe.append("tiempo interpretado como epoch en NANOsegundos")
+            report.append("time read as an epoch in NANOseconds")
             return v // 1_000_000
         if med > 1e14:
-            informe.append("tiempo interpretado como epoch en MICROsegundos")
+            report.append("time read as an epoch in MICROseconds")
             return v // 1000
         if med > 1e11:
-            informe.append("tiempo interpretado como epoch en milisegundos")
+            report.append("time read as an epoch in milliseconds")
             return v
         if med > 1e8:
-            informe.append("tiempo interpretado como epoch en SEGUNDOS")
+            report.append("time read as an epoch in SECONDS")
             return v * 1000
         raise ImportError_(
-            f"la columna de tiempo tiene valores en torno a {med:.0f}, que no parecen ni una "
-            "marca de tiempo ni una fecha. ¿Es la columna correcta?")
+            f"the time column holds values around {med:.0f}, which look like neither a timestamp "
+            "nor a date. Is this the right column?")
     try:
-        dt = pd.to_datetime(serie, utc=True, format="mixed")
+        dt = pd.to_datetime(col, utc=True, format="mixed")
     except Exception as e:  # noqa: BLE001
-        raise ImportError_(f"no se pudieron interpretar las fechas: {e}") from None
-    informe.append(f"fechas interpretadas como texto (ej. «{serie.iloc[0]}»)")
+        raise ImportError_(f"the dates could not be interpreted: {e}") from None
+    report.append(f"dates read as text (e.g. «{col.iloc[0]}»)")
     return (dt.astype("int64") // 1_000_000).to_numpy()
 
 
-def _a_senal(serie: pd.Series, informe: list[str]) -> np.ndarray:
-    if pd.api.types.is_numeric_dtype(serie):
-        v = serie.fillna(0).to_numpy(dtype=float)
-        distintos = np.unique(v[~np.isnan(v)])
-        if len(distintos) > 12 or np.abs(v).max() > 1.0001:
-            # No son -1/0/1: se interpreta como tamaño de posición y se normaliza al signo,
-            # avisando, porque cambiar la magnitud del usuario sin decirlo sería falsear su idea.
-            informe.append(f"la columna de señal tiene {len(distintos)} valores distintos "
-                           f"(máximo {np.abs(v).max():.4g}): se usa solo el SIGNO de la posición")
+def _to_signal(col: pd.Series, report: list[str]) -> np.ndarray:
+    if pd.api.types.is_numeric_dtype(col):
+        v = col.fillna(0).to_numpy(dtype=float)
+        distinct = np.unique(v[~np.isnan(v)])
+        if len(distinct) > 12 or np.abs(v).max() > 1.0001:
+            # These are not -1/0/1: read them as position size and normalise to the sign, saying
+            # so, because changing the user's magnitude without a word would misstate their idea.
+            report.append(f"the signal column has {len(distinct)} distinct values "
+                          f"(max {np.abs(v).max():.4g}): only the SIGN of the position is used")
             return np.sign(v).astype(np.int8)
-        informe.append(f"señal numérica con valores {sorted(distintos.tolist())[:6]}")
+        report.append(f"numeric signal with values {sorted(distinct.tolist())[:6]}")
         return np.sign(v).astype(np.int8)
 
-    txt = serie.fillna("").astype(str).str.strip().str.lower()
+    txt = col.fillna("").astype(str).str.strip().str.lower()
     out = np.zeros(len(txt), dtype=np.int8)
-    desconocidos: set[str] = set()
+    unknown: set[str] = set()
     for i, t in enumerate(txt):
-        if t in _TEXTO_LARGO:
+        if t in _LONG_WORDS:
             out[i] = 1
-        elif t in _TEXTO_CORTO:
+        elif t in _SHORT_WORDS:
             out[i] = -1
-        elif t not in _TEXTO_FUERA:
-            desconocidos.add(t)
-    if desconocidos:
+        elif t not in _FLAT_WORDS:
+            unknown.add(t)
+    if unknown:
         raise ImportError_(
-            f"no entiendo estos valores de señal: {sorted(desconocidos)[:8]}. "
-            f"Usa números (-1/0/1) o palabras: {sorted(_TEXTO_LARGO)[:5]} / "
-            f"{sorted(_TEXTO_CORTO)[:5]} / {sorted(_TEXTO_FUERA)[:4]}")
-    informe.append("señal interpretada desde texto (largo/corto/fuera)")
+            f"I don't understand these signal values: {sorted(unknown)[:8]}. "
+            f"Use numbers (-1/0/1) or words: {sorted(_LONG_WORDS)[:5]} / "
+            f"{sorted(_SHORT_WORDS)[:5]} / {sorted(_FLAT_WORDS)[:4]}")
+    report.append("signal read from text (long/short/flat)")
     return out
 
 
-def parse_signals_csv(contenido: bytes | str, col_tiempo: str | None = None,
-                      col_senal: str | None = None,
-                      col_precio: str | None = None) -> ImportedStrategy:
+def parse_signals_csv(content: bytes | str, time_col: str | None = None,
+                      signal_col: str | None = None,
+                      price_col: str | None = None) -> ImportedStrategy:
     import io
-    datos = contenido.decode("utf-8-sig", errors="replace") if isinstance(contenido, bytes) else contenido
+    text = content.decode("utf-8-sig", errors="replace") if isinstance(content, bytes) else content
     try:
-        df = pd.read_csv(io.StringIO(datos), sep=None, engine="python")
+        df = pd.read_csv(io.StringIO(text), sep=None, engine="python")
     except Exception as e:  # noqa: BLE001
-        raise ImportError_(f"no se pudo leer el CSV: {e}") from None
+        raise ImportError_(f"could not read the CSV: {e}") from None
     if df.empty:
-        raise ImportError_("el fichero no tiene filas")
+        raise ImportError_("the file has no rows")
 
-    informe = [f"{len(df):,} filas y {len(df.columns)} columnas: {', '.join(map(str, df.columns[:8]))}"]
-    ct = col_tiempo or _detectar(list(df.columns), _COL_TIEMPO)
-    cs = col_senal or _detectar(list(df.columns), _COL_SENAL)
+    report = [(f"{len(df):,} rows and {len(df.columns)} columns: "
+               f"{', '.join(map(str, df.columns[:8]))}")]
+    ct = time_col or _detect(list(df.columns), _TIME_COLS)
+    cs = signal_col or _detect(list(df.columns), _SIGNAL_COLS)
     if ct is None:
         raise ImportError_(
-            f"no encuentro la columna de tiempo. Columnas: {list(df.columns)}. "
-            f"Debería llamarse algo como: {', '.join(_COL_TIEMPO[:6])}")
+            f"I can't find the time column. Columns: {list(df.columns)}. "
+            f"It should be called something like: {', '.join(_TIME_COLS[:6])}")
     if cs is None:
         raise ImportError_(
-            f"no encuentro la columna de señal. Columnas: {list(df.columns)}. "
-            f"Debería llamarse algo como: {', '.join(_COL_SENAL[:6])}")
-    informe.append(f"columna de tiempo: «{ct}» · columna de señal: «{cs}»")
+            f"I can't find the signal column. Columns: {list(df.columns)}. "
+            f"It should be called something like: {', '.join(_SIGNAL_COLS[:6])}")
+    report.append(f"time column: «{ct}» · signal column: «{cs}»")
 
-    ts = _a_ms(df[ct], informe)
-    sig = _a_senal(df[cs], informe)
-    orden = np.argsort(ts, kind="stable")
-    ts, sig = ts[orden], sig[orden]
+    ts = _to_ms(df[ct], report)
+    sig = _to_signal(df[cs], report)
+    order = np.argsort(ts, kind="stable")
+    ts, sig = ts[order], sig[order]
     if len(np.unique(ts)) != len(ts):
         _, keep = np.unique(ts[::-1], return_index=True)
         keep = len(ts) - 1 - keep
-        informe.append(f"{len(ts)-len(keep)} marcas de tiempo duplicadas: se conserva la última")
+        report.append(f"{len(ts)-len(keep)} duplicate timestamps: the last one is kept")
         ts, sig = ts[np.sort(keep)], sig[np.sort(keep)]
 
-    # --- precios propios, si los trae ---------------------------------------------------------
-    precio = None
-    cp = col_precio or _detectar(list(df.columns), _COL_PRECIO)
+    # --- the user's own prices, if the file carries them ---------------------------------------
+    price = None
+    cp = price_col or _detect(list(df.columns), _PRICE_COLS)
     if cp is not None and cp not in (ct, cs):
         try:
-            pr = pd.to_numeric(df[cp], errors="coerce").to_numpy(dtype=float)[orden]
+            pr = pd.to_numeric(df[cp], errors="coerce").to_numpy(dtype=float)[order]
         except Exception:  # noqa: BLE001
             pr = None
         if pr is not None and np.isfinite(pr).sum() >= len(pr) * 0.9 and np.nanmin(pr) > 0:
-            precio = pr[np.sort(keep)] if "keep" in dir() else pr
-            if len(precio) != len(ts):
-                precio = pr[: len(ts)] if len(pr) >= len(ts) else None
-            if precio is not None:
-                informe.append(f"columna de precio: «{cp}» — se usará TU serie de precios, "
-                               f"no la nuestra ({np.nanmin(precio):,.4g} a {np.nanmax(precio):,.4g})")
+            price = pr[np.sort(keep)] if "keep" in dir() else pr
+            if len(price) != len(ts):
+                price = pr[: len(ts)] if len(pr) >= len(ts) else None
+            if price is not None:
+                report.append(f"price column: «{cp}» — YOUR price series will be used, "
+                              f"not ours ({np.nanmin(price):,.4g} to {np.nanmax(price):,.4g})")
         elif pr is not None:
-            informe.append(f"columna «{cp}» descartada como precio: tiene valores no válidos o "
-                           "no positivos")
+            report.append(f"column «{cp}» discarded as a price: it has invalid or non-positive "
+                          "values")
 
-    return ImportedStrategy(ts, sig, informe,
+    return ImportedStrategy(ts, sig, report,
                             int((sig == 1).sum()), int((sig == -1).sum()), int((sig == 0).sum()),
-                            precio)
+                            price)
 
 
 def align_to_bars(imp: ImportedStrategy, bar_ts: np.ndarray, tf_ms: int) -> np.ndarray:
-    """Alinea la señal del usuario a nuestra rejilla de velas.
+    """Aligns the user's signal onto our grid of bars.
 
-    Semántica: una posición PERSISTE hasta que el usuario la cambia. Es lo que casi todo el mundo
-    quiere decir con "el día 3 estaba largo", y es lo que hace un `ffill`. La alternativa —posición
-    solo en las barras listadas— convertiría una estrategia de tenencia en una de un solo día y
-    daría un resultado absurdo sin que nadie lo notara.
+    Semantics: a position PERSISTS until the user changes it. That is what nearly everyone means
+    by "on the 3rd I was long", and it is what a `ffill` does. The alternative — a position only
+    on the bars actually listed — would turn a hold-for-weeks strategy into a one-day one and give
+    an absurd result without anybody noticing.
     """
     grid = (imp.ts_ms // tf_ms) * tf_ms
     s = pd.Series(imp.signal, index=grid).groupby(level=0).last()
-    alineada = s.reindex(pd.Index(bar_ts)).ffill().fillna(0).to_numpy()
-    return alineada.astype(np.int8)
+    aligned = s.reindex(pd.Index(bar_ts)).ffill().fillna(0).to_numpy()
+    return aligned.astype(np.int8)

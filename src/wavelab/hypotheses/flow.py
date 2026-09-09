@@ -1,22 +1,22 @@
-"""Familia `flow`: volumen y flujo de órdenes.
+"""Family `flow`: volume and order flow.
 
-REGISTRO PREVIO. Todo lo de este fichero se escribió ANTES de ejecutar un solo backtest y sin mirar
-un solo resultado. Los parámetros son los valores convencionales de la literatura, fijados de una
-vez; ninguno se eligió comparando rendimientos.
+PRE-REGISTERED. Everything in this file was written BEFORE running a single backtest and without
+looking at a single result. The parameters are the conventional values from the literature, fixed
+once and for all; not one of them was chosen by comparing returns.
 
-Tesis de la familia: el precio dice qué pasó, el volumen dice cuánta convicción había detrás. Un
-avance que mueve el doble de contratos de lo normal deja inventario en manos que tendrán que
-defenderlo o cerrarlo; un avance en volumen fino no deja nada y no obliga a nadie a hacer nada
-después. Todas las hipótesis de abajo son variaciones de esa idea, y varias se contradicen entre sí
-a propósito: si el mercado premiara a la vez la continuación por volumen y el desvanecimiento por
-volumen, la familia entera estaría midiendo ruido.
+The family's thesis: price says what happened, volume says how much conviction was behind it. An
+advance that moves twice the usual number of contracts leaves inventory in hands that will have to
+defend it or close it; an advance on thin volume leaves nothing and obliges nobody to do anything
+afterwards. Every hypothesis below is a variation on that idea, and several of them contradict each
+other on purpose: if the market rewarded continuation on volume and fading on volume at the same
+time, the whole family would be measuring noise.
 
-Limitación asumida y declarada: `Series` solo expone o/h/l/c/v, así que NO hay `taker_buy_base` ni
-delta de volumen real. Donde hace falta el signo de la agresión se usa el Close Location Value
-(dónde cierra la vela dentro de su propio rango), que es el mejor proxy construible con OHLCV y es
-exactamente lo que asume la línea de Acumulación/Distribución. Es un proxy sesgado: en una vela con
-mecha larga por liquidaciones atribuye compra agresiva donde solo hubo un barrido de stops. Esa
-debilidad es parte de lo que se está poniendo a prueba, no un descuido.
+Limitation accepted and declared: `Series` only exposes o/h/l/c/v, so there is NO `taker_buy_base`
+and no real volume delta. Where the sign of the aggression is needed we use the Close Location
+Value (where the candle closes inside its own range), which is the best proxy that can be built
+from OHLCV and is exactly what the Accumulation/Distribution line assumes. It is a biased proxy: on
+a candle with a long wick caused by liquidations it attributes aggressive buying where there was
+only a stop run. That weakness is part of what is being put to the test, not an oversight.
 """
 
 from __future__ import annotations
@@ -26,26 +26,26 @@ import talib
 
 from wavelab.hypotheses.base import Hypothesis, Series, register
 
-# Convención del repo (`Bar.open_time_ms`, `Timeframe.ms`): los timestamps son epoch en
-# MILISEGUNDOS sobre la rejilla UTC. El anclaje de sesión del VWAP depende de eso.
-_DIA_MS = 86_400_000
+# Repo convention (`Bar.open_time_ms`, `Timeframe.ms`): timestamps are epoch in MILLISECONDS on the
+# UTC grid. The VWAP's session anchor depends on that.
+_DAY_MS = 86_400_000
 
 
 # --------------------------------------------------------------------------------------------
-# Utilidades. Todas estrictamente causales: la posición i solo mira posiciones j <= i.
+# Utilities. All strictly causal: position i only looks at positions j <= i.
 # --------------------------------------------------------------------------------------------
 
 def _f(a: np.ndarray) -> np.ndarray:
-    """talib exige float64 contiguo."""
+    """talib demands contiguous float64."""
     return np.ascontiguousarray(a, dtype=np.float64)
 
 
-def _finito(*arrays: np.ndarray) -> np.ndarray:
-    """True donde TODOS los arrays tienen un número real.
+def _finite(*arrays: np.ndarray) -> np.ndarray:
+    """True where ALL the arrays hold a real number.
 
-    talib devuelve NaN durante el calentamiento y las divisiones por rango cero producen inf.
-    Se comprueba explícitamente en vez de confiar en que `NaN > x` dé False, y sobre todo en vez
-    de usar nan_to_num, que convertiría el calentamiento en señales inventadas.
+    talib returns NaN during warm-up, and divisions by a zero range produce inf. It is checked
+    explicitly instead of trusting that `NaN > x` yields False, and above all instead of using
+    nan_to_num, which would turn the warm-up into invented signals.
     """
     ok = np.ones(arrays[0].shape, dtype=bool)
     for a in arrays:
@@ -55,72 +55,72 @@ def _finito(*arrays: np.ndarray) -> np.ndarray:
 
 
 def _clv(s: Series) -> np.ndarray:
-    """Close Location Value en [-1, +1]: proxy del signo de la agresión.
+    """Close Location Value in [-1, +1]: a proxy for the sign of the aggression.
 
-    +1 = cierra en el máximo (el comprador se llevó la vela), -1 = cierra en el mínimo.
-    Las velas de rango cero quedan en 0, no en NaN ni en inf.
+    +1 = closes at the high (the buyer took the candle), -1 = closes at the low.
+    Zero-range candles end up at 0, not at NaN and not at inf.
     """
     h, l, c = _f(s.high), _f(s.low), _f(s.close)
-    rango = h - l
-    clv = np.zeros(rango.shape, dtype=np.float64)
-    np.divide((c - l) - (h - c), rango, out=clv, where=rango > 0)
+    rng = h - l
+    clv = np.zeros(rng.shape, dtype=np.float64)
+    np.divide((c - l) - (h - c), rng, out=clv, where=rng > 0)
     return clv
 
 
-def _mantener(ev: np.ndarray, k: int) -> np.ndarray:
-    """Propaga cada evento no nulo durante k barras.
+def _hold(ev: np.ndarray, k: int) -> np.ndarray:
+    """Propagates each non-zero event over k bars.
 
-    Causal por construcción: en la posición i solo puede aparecer un evento cuyo índice j cumple
-    j <= i. `np.maximum.accumulate` es un barrido hacia adelante, nunca hacia atrás.
+    Causal by construction: at position i only an event whose index j satisfies j <= i can appear.
+    `np.maximum.accumulate` is a forward sweep, never a backward one.
     """
     n = ev.size
     i = np.arange(n)
     idx = np.where(ev != 0, i, -1)
-    ultimo = np.maximum.accumulate(idx)
-    vivo = (ultimo >= 0) & ((i - ultimo) < k)
+    last = np.maximum.accumulate(idx)
+    alive = (last >= 0) & ((i - last) < k)
     out = np.zeros(n, dtype=np.int8)
-    out[vivo] = ev[ultimo[vivo]]
+    out[alive] = ev[last[alive]]
     return out
 
 
-def _vwap_sesion(s: Series) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """VWAP anclado al día UTC, su desviación típica ponderada por volumen, y cuántas velas
-    llevamos desde el ancla.
+def _session_vwap(s: Series) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """VWAP anchored to the UTC day, its volume-weighted standard deviation, and how many candles
+    we are into the anchor.
 
-    Acumula SOLO desde el inicio del día en curso hasta i incluido. La resta de sumas acumuladas
-    usa el índice previo al ancla saturado en 0, de modo que nunca se indexa con -1 (que en numpy
-    devolvería el ÚLTIMO elemento del array, es decir, el futuro entero).
+    Accumulates ONLY from the start of the current day up to and including i. The subtraction of
+    cumulative sums uses the index before the anchor, clamped at 0, so that we never index with -1
+    (which in numpy would return the LAST element of the array, that is, the entire future).
     """
     n = len(s)
     tp = talib.TYPPRICE(_f(s.high), _f(s.low), _f(s.close))
     v = _f(s.volume)
-    dia = np.asarray(s.ts, dtype=np.int64) // _DIA_MS
+    day = np.asarray(s.ts, dtype=np.int64) // _DAY_MS
 
-    nuevo = np.ones(n, dtype=bool)
-    nuevo[1:] = dia[1:] != dia[:-1]
+    is_new = np.ones(n, dtype=bool)
+    is_new[1:] = day[1:] != day[:-1]
     i = np.arange(n)
-    inicio = np.maximum.accumulate(np.where(nuevo, i, 0))
-    hay_previo = inicio > 0
-    previo = np.maximum(inicio - 1, 0)
+    start = np.maximum.accumulate(np.where(is_new, i, 0))
+    has_prev = start > 0
+    prev = np.maximum(start - 1, 0)
 
     acc_v = np.cumsum(v)
     acc_pv = np.cumsum(tp * v)
     acc_pv2 = np.cumsum(tp * tp * v)
-    vol = acc_v - np.where(hay_previo, acc_v[previo], 0.0)
-    pv = acc_pv - np.where(hay_previo, acc_pv[previo], 0.0)
-    pv2 = acc_pv2 - np.where(hay_previo, acc_pv2[previo], 0.0)
+    vol = acc_v - np.where(has_prev, acc_v[prev], 0.0)
+    pv = acc_pv - np.where(has_prev, acc_pv[prev], 0.0)
+    pv2 = acc_pv2 - np.where(has_prev, acc_pv2[prev], 0.0)
 
     vwap = np.full(n, np.nan)
     np.divide(pv, vol, out=vwap, where=vol > 0)
     m2 = np.full(n, np.nan)
     np.divide(pv2, vol, out=m2, where=vol > 0)
     var = m2 - vwap * vwap
-    var[~np.isnan(var) & (var < 0.0)] = 0.0   # ruido de coma flotante, no varianza negativa
-    return vwap, np.sqrt(var), (i - inicio + 1)
+    var[~np.isnan(var) & (var < 0.0)] = 0.0   # floating-point noise, not negative variance
+    return vwap, np.sqrt(var), (i - start + 1)
 
 
 # --------------------------------------------------------------------------------------------
-# 1. OBV contra su propia media
+# 1. OBV against its own average
 # --------------------------------------------------------------------------------------------
 
 def _obv_ema21(s: Series) -> np.ndarray:
@@ -130,7 +130,7 @@ def _obv_ema21(s: Series) -> np.ndarray:
         return out
     obv = talib.OBV(_f(s.close), _f(s.volume))
     ema = talib.EMA(obv, 21)
-    ok = _finito(obv, ema)
+    ok = _finite(obv, ema)
     out[ok & (obv > ema)] = 1
     out[ok & (obv < ema)] = -1
     return out
@@ -139,20 +139,19 @@ def _obv_ema21(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="flow.obv_ema21",
     family="flow",
-    rationale="OBV suma el volumen entero de cada vela con el signo de su cierre, así que su "
-              "pendiente mide si los contratos recientes se han movido más en velas alcistas o "
-              "bajistas. El mecanismo concreto: quien compra en la subida queda con inventario "
-              "que solo puede deshacer vendiendo, y mientras no lo deshaga sostiene el bid; quien "
-              "vendió tiene que recomprar. Cuando la línea acumulada supera su propia media de 21 "
-              "hay más inventario nuevo en manos largas del que se ha soltado, y ese desequilibrio "
-              "de posicionamiento debería empujar el precio antes de resolverse.",
-    prior="Esperamos ventaja positiva pequeña en régimen tendencial (4h/1d) y ventaja nula o "
-          "negativa en lateral, donde OBV cruza su media constantemente sin que haya movimiento "
-          "real de inventario. Falsación fuerte: si la ventaja es la MISMA en tendencia y en "
-          "lateral, el mecanismo declarado es falso y esto no es más que un seguidor de tendencia "
-          "lento disfrazado de volumen. También esperamos que falle en periodos dominados por "
-          "cascadas de liquidación, donde OBV atribuye acumulación a lo que fue liquidación "
-          "forzada.",
+    rationale="OBV adds up each candle's entire volume with the sign of its close, so its slope "
+              "measures whether the recent contracts have moved more on up candles or on down "
+              "ones. The concrete mechanism: whoever buys into the rise ends up with inventory that "
+              "can only be unwound by selling, and until it is unwound they hold up the bid; "
+              "whoever sold has to buy back. When the cumulative line rises above its own 21-period "
+              "average there is more new inventory in long hands than has been let go, and that "
+              "imbalance in positioning should push the price before it resolves.",
+    prior="We expect a small positive edge in a trending regime (4h/1d) and no edge or a negative "
+          "one in a range, where OBV crosses its average constantly without any real movement of "
+          "inventory. Strong falsification: if the edge is the SAME in a trend and in a range, the "
+          "declared mechanism is false and this is nothing more than a slow trend follower dressed "
+          "up as volume. We also expect it to fail in periods dominated by liquidation cascades, "
+          "where OBV attributes accumulation to what was forced liquidation.",
     fn=_obv_ema21,
     params={"ema": 21},
     timeframes=("1h", "4h", "1d"),
@@ -161,10 +160,10 @@ register(Hypothesis(
 
 
 # --------------------------------------------------------------------------------------------
-# 2. Divergencia precio-OBV: el precio hace extremo nuevo y el volumen no acompaña
+# 2. Price-OBV divergence: price makes a new extreme and volume does not follow
 # --------------------------------------------------------------------------------------------
 
-def _obv_divergencia(s: Series) -> np.ndarray:
+def _obv_divergence(s: Series) -> np.ndarray:
     n = len(s)
     out = np.zeros(n, dtype=np.int8)
     if n < 60:
@@ -173,41 +172,41 @@ def _obv_divergencia(s: Series) -> np.ndarray:
     obv = talib.OBV(c, _f(s.volume))
     max_c, min_c = talib.MAX(c, 20), talib.MIN(c, 20)
     max_o, min_o = talib.MAX(obv, 20), talib.MIN(obv, 20)
-    ok = _finito(c, obv, max_c, min_c, max_o, min_o)
+    ok = _finite(c, obv, max_c, min_c, max_o, min_o)
     ev = np.zeros(n, dtype=np.int8)
-    # MAX/MIN de talib incluyen la vela actual: `c >= max_c` es exactamente "máximo de 20 nuevo".
+    # talib's MAX/MIN include the current candle: `c >= max_c` is exactly "new 20-bar high".
     ev[ok & (c >= max_c) & (obv < max_o)] = -1
     ev[ok & (c <= min_c) & (obv > min_o)] = 1
-    return _mantener(ev, 5)
+    return _hold(ev, 5)
 
 
 register(Hypothesis(
-    name="flow.obv_divergencia20",
+    name="flow.obv_divergence20",
     family="flow",
-    rationale="Un máximo de precio que NO va acompañado de máximo de OBV significa que el último "
-              "tramo lo firmaron menos contratos que el anterior: el precio sube porque se ha "
-              "retirado oferta, no porque haya entrado demanda nueva. Un libro que sube por "
-              "ausencia de vendedores es fino, y basta una orden de tamaño para atravesarlo en "
-              "sentido contrario. La lectura simétrica vale en mínimos: precio más bajo con OBV "
-              "que ya no lo acompaña indica que la venta se ha quedado sin munición.",
-    prior="Esperamos ventaja positiva a horizonte corto (el evento se mantiene 5 velas) y que se "
-          "concentre en extremos de rango, no en tendencias establecidas. Esperamos que FALLE, y "
-          "que pierda dinero, en tendencias fuertes y persistentes: ahí la divergencia aparece "
-          "decenas de veces seguidas mientras el precio sigue subiendo, y este es precisamente el "
-          "indicador que arruina a quien intenta poner techos. Si la ventaja resultara igual de "
-          "buena en tendencia que en rango, sospecharíamos del proxy antes que del mercado.",
-    fn=_obv_divergencia,
-    params={"ventana": 20, "barras_mantenidas": 5},
+    rationale="A price high NOT accompanied by an OBV high means the last leg was signed by fewer "
+              "contracts than the one before: price rises because supply has withdrawn, not because "
+              "new demand has come in. A book that rises through the absence of sellers is thin, "
+              "and one order of size is enough to go through it the other way. The symmetric "
+              "reading holds at lows: a lower price with an OBV that no longer follows it indicates "
+              "that the selling has run out of ammunition.",
+    prior="We expect a positive edge at a short horizon (the event is held for 5 candles) and that "
+          "it concentrates at range extremes, not in established trends. We expect it to FAIL, and "
+          "to lose money, in strong and persistent trends: there the divergence shows up dozens of "
+          "times in a row while price goes on rising, and this is precisely the indicator that "
+          "ruins whoever tries to call tops. If the edge turned out to be as good in a trend as in "
+          "a range, we would suspect the proxy before we suspected the market.",
+    fn=_obv_divergence,
+    params={"window": 20, "hold_bars": 5},
     timeframes=("1h", "4h", "1d"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 3. La otra diagonal: OBV hace extremo nuevo y el precio todavía no
+# 3. The other diagonal: OBV makes a new extreme and price has not yet
 # --------------------------------------------------------------------------------------------
 
-def _obv_anticipa(s: Series) -> np.ndarray:
+def _obv_leads(s: Series) -> np.ndarray:
     n = len(s)
     out = np.zeros(n, dtype=np.int8)
     if n < 60:
@@ -216,39 +215,40 @@ def _obv_anticipa(s: Series) -> np.ndarray:
     obv = talib.OBV(c, _f(s.volume))
     max_c, min_c = talib.MAX(c, 20), talib.MIN(c, 20)
     max_o, min_o = talib.MAX(obv, 20), talib.MIN(obv, 20)
-    ok = _finito(c, obv, max_c, min_c, max_o, min_o)
+    ok = _finite(c, obv, max_c, min_c, max_o, min_o)
     ev = np.zeros(n, dtype=np.int8)
     ev[ok & (obv >= max_o) & (c < max_c)] = 1
     ev[ok & (obv <= min_o) & (c > min_c)] = -1
-    return _mantener(ev, 5)
+    return _hold(ev, 5)
 
 
 register(Hypothesis(
-    name="flow.obv_anticipa20",
+    name="flow.obv_leads20",
     family="flow",
-    rationale="Es la casilla contraria de la misma tabla 2x2 que `obv_divergencia20`, y se registra "
-              "aparte porque afirma un mecanismo distinto y opera en dirección opuesta: aquí el "
-              "volumen acumulado marca máximo nuevo mientras el precio aún no. Eso es la firma de "
-              "un comprador grande troceando su orden contra la oferta disponible: absorbe todo lo "
-              "que sale sin permitir que el precio suba, porque subirlo encarecería su propia "
-              "ejecución. Cuando agota esa oferta, el precio salta sin resistencia. Registrar las "
-              "dos casillas por separado es lo que permite que una funcione y la otra no; unirlas "
-              "en una sola hipótesis escondería ese resultado.",
-    prior="Esperamos ventaja positiva pequeña y menos frecuente que la divergencia clásica. "
-          "Esperamos que falle en mercados donde el volumen está dominado por market makers que "
-          "reciclan inventario en segundos: ahí el OBV se dispara sin que exista ningún "
-          "acumulador direccional. Si `obv_anticipa20` y `obv_divergencia20` salieran AMBAS "
-          "positivas con magnitud parecida, no lo interpretaríamos como dos hallazgos sino como "
-          "prueba de que lo que gana es el simple evento 'extremo de 20 velas' y no el volumen.",
-    fn=_obv_anticipa,
-    params={"ventana": 20, "barras_mantenidas": 5},
+    rationale="It is the opposite cell of the same 2x2 table as `obv_divergence20`, and it is "
+              "registered separately because it asserts a different mechanism and trades in the "
+              "opposite direction: here the cumulative volume marks a new high while price has not "
+              "yet. That is the signature of a large buyer slicing their order against the "
+              "available supply: they absorb everything that comes out without letting the price "
+              "rise, because pushing it up would make their own execution more expensive. When they "
+              "exhaust that supply, the price jumps with no resistance. Registering the two cells "
+              "separately is what allows one to work and the other not; merging them into a single "
+              "hypothesis would hide that result.",
+    prior="We expect a small positive edge, less frequent than the classic divergence. We expect it "
+          "to fail in markets where volume is dominated by market makers recycling inventory in "
+          "seconds: there the OBV shoots up without any directional accumulator existing at all. If "
+          "`obv_leads20` and `obv_divergence20` both came out positive with a similar "
+          "magnitude, we would read that not as two findings but as evidence that what wins is the "
+          "plain '20-candle extreme' event and not the volume.",
+    fn=_obv_leads,
+    params={"window": 20, "hold_bars": 5},
     timeframes=("1h", "4h", "1d"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 4. Índice de flujo de dinero en extremos de Wilder
+# 4. Money flow index at Wilder's extremes
 # --------------------------------------------------------------------------------------------
 
 def _mfi14(s: Series) -> np.ndarray:
@@ -257,215 +257,217 @@ def _mfi14(s: Series) -> np.ndarray:
     if n < 40:
         return out
     mfi = talib.MFI(_f(s.high), _f(s.low), _f(s.close), _f(s.volume), 14)
-    ok = _finito(mfi)
+    ok = _finite(mfi)
     out[ok & (mfi < 20.0)] = 1
     out[ok & (mfi > 80.0)] = -1
     return out
 
 
 register(Hypothesis(
-    name="flow.mfi14_extremos",
+    name="flow.mfi14_extremes",
     family="flow",
-    rationale="El MFI es un RSI en el que cada vela pesa por su volumen en dinero, de modo que "
-              "solo llega a 80 cuando la subida se ha hecho con volumen creciente. Ese estado es "
-              "el de un mercado en el que casi todo el que quería comprar ya ha comprado y encima "
-              "lo ha hecho con tamaño: el flujo entrante se agota por falta de participantes "
-              "nuevos, y la posición marginal es apalancada y reciente, o sea, frágil. Bajo 20 "
-              "ocurre lo simétrico con la venta forzada.",
-    prior="Esperamos ventaja positiva en régimen lateral y NEGATIVA en tendencia fuerte, porque "
-          "comprar bajo 20 durante una caída en cascada es comprar delante de un tren. Como la "
-          "señal es un estado y no un evento, esperamos también series largas de pérdidas "
-          "consecutivas en las capitulaciones de marzo-2020 o mayo-2021. Si la ventaja global "
-          "saliera positiva pero solo gracias a un puñado de rebotes enormes, lo contaremos como "
-          "no concluyente y no como éxito.",
+    rationale="The MFI is an RSI in which each candle is weighted by its volume in money terms, so "
+              "it only reaches 80 when the rise has been made on growing volume. That state is one "
+              "in which almost everybody who wanted to buy has already bought, and has done so with "
+              "size on top of that: the incoming flow runs out for want of new participants, and "
+              "the marginal position is leveraged and recent, which is to say fragile. Below 20 the "
+              "symmetric thing happens with forced selling.",
+    prior="We expect a positive edge in a ranging regime and a NEGATIVE one in a strong trend, "
+          "because buying below 20 during a cascading fall is buying in front of a train. As the "
+          "signal is a state and not an event, we also expect long runs of consecutive losses in "
+          "the capitulations of March 2020 or May 2021. If the overall edge came out positive but "
+          "only thanks to a handful of enormous bounces, we will count it as inconclusive and not "
+          "as a success.",
     fn=_mfi14,
-    params={"periodo": 14, "sobreventa": 20, "sobrecompra": 80},
+    params={"period": 14, "oversold": 20, "overbought": 80},
     timeframes=("15m", "1h", "4h", "1d"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 5. Lado del VWAP de sesión
+# 5. Side of the session VWAP
 # --------------------------------------------------------------------------------------------
 
-def _vwap_lado(s: Series) -> np.ndarray:
+def _vwap_side(s: Series) -> np.ndarray:
     n = len(s)
     out = np.zeros(n, dtype=np.int8)
     if n < 10:
         return out
-    vwap, _sd, _k = _vwap_sesion(s)
+    vwap, _sd, _k = _session_vwap(s)
     c = _f(s.close)
-    ok = _finito(vwap, c)
+    ok = _finite(vwap, c)
     out[ok & (c > vwap)] = 1
     out[ok & (c < vwap)] = -1
     return out
 
 
 register(Hypothesis(
-    name="flow.vwap_sesion_lado",
+    name="flow.vwap_session_side",
     family="flow",
-    rationale="El VWAP de sesión no es un indicador más: es el precio contra el que se mide y se "
-              "liquida la ejecución institucional, así que hay órdenes reales condicionadas a él. "
-              "Un algoritmo de ejecución con orden de compra frena si el precio está por encima "
-              "del VWAP y acelera si está por debajo, y las mesas evalúan al trader por esa "
-              "diferencia. La consecuencia mecánica es que el lado del VWAP separa dos regímenes "
-              "de oferta y demanda distintos dentro del mismo día, no solo dos rangos de precio.",
-    prior="Esperamos ventaja positiva pequeña en 15m y 1h, y que se degrade al subir de "
-          "timeframe, porque el ancla diaria pierde sentido cuando cada vela es un tercio de la "
-          "sesión. Esperamos que falle en días sin dirección, donde el precio cruza el VWAP diez "
-          "veces y solo genera coste. Falsación específica de BTC: el cripto cotiza 24/7 y no "
-          "tiene una sesión institucional real, así que si el mecanismo es cierto la ventaja "
-          "debería ser MENOR que la que este mismo indicador muestra en renta variable; si "
-          "saliera enorme, sospecharíamos de que solo estamos midiendo momento intradía.",
-    fn=_vwap_lado,
-    params={"ancla": "dia_utc"},
+    rationale="The session VWAP is not just one more indicator: it is the price against which "
+              "institutional execution is measured and settled, so there are real orders "
+              "conditioned on it. An execution algorithm with a buy order slows down if the price "
+              "is above the VWAP and speeds up if it is below, and the desks judge the trader by "
+              "that difference. The mechanical consequence is that the side of the VWAP separates "
+              "two different regimes of supply and demand within the same day, not merely two price "
+              "ranges.",
+    prior="We expect a small positive edge on 15m and 1h, degrading as the timeframe rises, because "
+          "the daily anchor stops meaning anything once each candle is a third of the session. We "
+          "expect it to fail on days with no direction, where the price crosses the VWAP ten times "
+          "and only generates cost. BTC-specific falsification: crypto trades 24/7 and has no real "
+          "institutional session, so if the mechanism is true the edge ought to be SMALLER than the "
+          "one this same indicator shows in equities; if it came out enormous, we would suspect we "
+          "are only measuring intraday momentum.",
+    fn=_vwap_side,
+    params={"anchor": "utc_day"},
     timeframes=("15m", "1h", "4h"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 6. Banda de 2 sigma del VWAP: estiramiento contra el precio medio ponderado
+# 6. The VWAP's 2-sigma band: stretch against the volume-weighted average price
 # --------------------------------------------------------------------------------------------
 
-def _vwap_banda(s: Series) -> np.ndarray:
+def _vwap_band(s: Series) -> np.ndarray:
     n = len(s)
     out = np.zeros(n, dtype=np.int8)
     if n < 40:
         return out
-    vwap, sd, k = _vwap_sesion(s)
+    vwap, sd, k = _session_vwap(s)
     c = _f(s.close)
-    ok = _finito(vwap, sd, c) & (sd > 0.0) & (k >= 12)
+    ok = _finite(vwap, sd, c) & (sd > 0.0) & (k >= 12)
     out[ok & (c > vwap + 2.0 * sd)] = -1
     out[ok & (c < vwap - 2.0 * sd)] = 1
     return out
 
 
 register(Hypothesis(
-    name="flow.vwap_banda2sigma",
+    name="flow.vwap_band2sigma",
     family="flow",
-    rationale="Usa el mismo indicador que `vwap_sesion_lado` pero afirma el mecanismo CONTRARIO, y "
-              "por eso es una hipótesis separada y no una variante: aquí no importa de qué lado "
-              "está el precio sino cuánto se ha alejado, medido en desviaciones típicas del propio "
-              "reparto de volumen de la sesión. Dos sigmas por encima significa que el precio "
-              "actual lo ha pagado una fracción minúscula del volumen del día: casi nadie tiene "
-              "posición ahí, y el inventario del creador de mercado que ha absorbido esa subida "
-              "está corto y necesita que el precio vuelva a la zona donde se cruzó el grueso del "
-              "papel. El umbral de 2 sigmas es el convencional de Bollinger, no un valor buscado.",
-    prior="Esperamos ventaja positiva en 15m y 1h dentro de sesiones sin noticia, y pérdidas "
-          "claras los días de ruptura, en los que el precio pasa la banda por la mañana y no "
-          "vuelve. Como el desvanecimiento gana muchas veces poco y pierde pocas veces mucho, "
-          "exigimos que la ventaja sobreviva al examen de la cola: si el resultado depende de no "
-          "haber sufrido un 12 de marzo de 2020, es un fracaso, no un éxito. Exigimos al menos 12 "
-          "velas de sesión antes de emitir señal porque con menos la sigma es una estimación de "
-          "tres puntos; es un mínimo estadístico, no un umbral ajustado.",
-    fn=_vwap_banda,
-    params={"ancla": "dia_utc", "sigmas": 2.0, "min_barras_sesion": 12},
+    rationale="It uses the same indicator as `vwap_session_side` but asserts the OPPOSITE mechanism, "
+              "and that is why it is a separate hypothesis and not a variant: here what matters is "
+              "not which side the price is on but how far away it has moved, measured in standard "
+              "deviations of the session's own volume distribution. Two sigma above means the "
+              "current price has been paid by a minuscule fraction of the day's volume: almost "
+              "nobody holds a position there, and the inventory of the market maker who absorbed "
+              "that rise is short and needs the price back in the zone where the bulk of the paper "
+              "changed hands. The 2-sigma threshold is Bollinger's conventional one, not a searched "
+              "value.",
+    prior="We expect a positive edge on 15m and 1h within sessions with no news, and clear losses "
+          "on breakout days, on which the price crosses the band in the morning and never comes "
+          "back. Since fading wins a little many times and loses a lot a few times, we require the "
+          "edge to survive scrutiny of the tail: if the result depends on not having lived through "
+          "a 12 March 2020, it is a failure, not a success. We require at least 12 session candles "
+          "before emitting a signal because with fewer the sigma is a three-point estimate; it is a "
+          "statistical minimum, not a tuned threshold.",
+    fn=_vwap_band,
+    params={"anchor": "utc_day", "sigmas": 2.0, "min_session_bars": 12},
     timeframes=("15m", "1h"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 7. Impulso: esfuerzo alto CON resultado (volumen doble y rango expansivo)
+# 7. Thrust: high effort WITH result (double volume and an expanding range)
 # --------------------------------------------------------------------------------------------
 
-def _impulso_volumen(s: Series) -> np.ndarray:
+def _volume_thrust(s: Series) -> np.ndarray:
     n = len(s)
     out = np.zeros(n, dtype=np.int8)
     if n < 60:
         return out
     h, l, c, v = _f(s.high), _f(s.low), _f(s.close), _f(s.volume)
-    media_v = talib.SMA(v, 20)
+    v_mean = talib.SMA(v, 20)
     atr = talib.ATR(h, l, c, 14)
     tr = talib.TRANGE(h, l, c)
     clv = _clv(s)
     rel = np.full(n, np.nan)
-    np.divide(v, media_v, out=rel, where=~np.isnan(media_v) & (media_v > 0.0))
-    ok = _finito(rel, atr, tr) & (atr > 0.0)
-    fuerte = ok & (rel > 2.0) & (tr > atr)
+    np.divide(v, v_mean, out=rel, where=~np.isnan(v_mean) & (v_mean > 0.0))
+    ok = _finite(rel, atr, tr) & (atr > 0.0)
+    strong = ok & (rel > 2.0) & (tr > atr)
     ev = np.zeros(n, dtype=np.int8)
-    ev[fuerte & (clv > 0.5)] = 1
-    ev[fuerte & (clv < -0.5)] = -1
-    return _mantener(ev, 5)
+    ev[strong & (clv > 0.5)] = 1
+    ev[strong & (clv < -0.5)] = -1
+    return _hold(ev, 5)
 
 
 register(Hypothesis(
-    name="flow.impulso_volumen",
+    name="flow.volume_thrust",
     family="flow",
-    rationale="Una vela con el doble del volumen medio, rango mayor que el ATR y cierre en el "
-              "cuarto superior de ese rango solo se produce cuando alguien cruza el spread "
-              "repetidamente y se lleva por delante varios niveles del libro. Quien hace eso está "
-              "pagando por inmediatez, lo que revela que su información o su urgencia valen más "
-              "que el coste, y además deja el libro vaciado por ese lado: los siguientes niveles "
-              "hay que reponerlos más arriba. Los stops de los cortos atrapados en el recorrido "
-              "aportan compra forzada añadida durante las velas siguientes.",
-    prior="Esperamos ventaja positiva a 5 velas y que sea MAYOR en 15m que en 4h, porque el "
-          "vaciado de libro se repone en minutos u horas, no en días. Esperamos que falle, o se "
-          "invierta, cuando la vela de impulso es la última de un tramo largo (agotamiento) y en "
-          "los minutos posteriores a una publicación macro, donde el rango expansivo es "
-          "reprecio instantáneo sin continuación. Si la ventaja fuera igual en 4h y en 15m, el "
-          "mecanismo de reposición de libro que afirmamos sería falso.",
-    fn=_impulso_volumen,
-    params={"volumen_relativo": 2.0, "media_volumen": 20, "atr": 14, "clv": 0.5,
-            "barras_mantenidas": 5},
+    rationale="A candle with twice the average volume, a range greater than the ATR and a close in "
+              "the top quarter of that range only happens when somebody crosses the spread over and "
+              "over and takes out several levels of the book. Whoever does that is paying for "
+              "immediacy, which reveals that their information or their urgency is worth more than "
+              "the cost, and on top of that it leaves the book emptied on that side: the next "
+              "levels have to be replenished higher up. The stops of the shorts trapped along the "
+              "way supply additional forced buying over the following candles.",
+    prior="We expect a positive edge over 5 candles and expect it to be LARGER on 15m than on 4h, "
+          "because an emptied book is replenished in minutes or hours, not days. We expect it to "
+          "fail, or to invert, when the thrust candle is the last of a long leg (exhaustion) and in "
+          "the minutes after a macro release, where the expanded range is instantaneous repricing "
+          "with no continuation. If the edge were the same on 4h and on 15m, the "
+          "book-replenishment mechanism we assert would be false.",
+    fn=_volume_thrust,
+    params={"relative_volume": 2.0, "volume_mean": 20, "atr": 14, "clv": 0.5,
+            "hold_bars": 5},
     timeframes=("15m", "1h", "4h"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 8. Clímax: volumen a 3 sigmas en un extremo de 20 velas, a contrapelo
+# 8. Climax: 3-sigma volume at a 20-candle extreme, traded against the grain
 # --------------------------------------------------------------------------------------------
 
-def _climax_volumen(s: Series) -> np.ndarray:
+def _volume_climax(s: Series) -> np.ndarray:
     n = len(s)
     out = np.zeros(n, dtype=np.int8)
     if n < 140:
         return out
     c, v = _f(s.close), _f(s.volume)
-    lv = np.log1p(v)   # log1p y no log: el volumen puede ser exactamente cero
-    media = talib.SMA(lv, 100)
+    lv = np.log1p(v)   # log1p and not log: volume can be exactly zero
+    mean = talib.SMA(lv, 100)
     sigma = talib.STDDEV(lv, 100)
     z = np.full(n, np.nan)
-    np.divide(lv - media, sigma, out=z, where=~np.isnan(sigma) & (sigma > 0.0))
+    np.divide(lv - mean, sigma, out=z, where=~np.isnan(sigma) & (sigma > 0.0))
     max_c, min_c = talib.MAX(c, 20), talib.MIN(c, 20)
-    ok = _finito(z, max_c, min_c, c)
-    extremo = ok & (z > 3.0)
+    ok = _finite(z, max_c, min_c, c)
+    extreme = ok & (z > 3.0)
     ev = np.zeros(n, dtype=np.int8)
-    ev[extremo & (c >= max_c)] = -1
-    ev[extremo & (c <= min_c)] = 1
-    return _mantener(ev, 5)
+    ev[extreme & (c >= max_c)] = -1
+    ev[extreme & (c <= min_c)] = 1
+    return _hold(ev, 5)
 
 
 register(Hypothesis(
-    name="flow.climax_volumen",
+    name="flow.volume_climax",
     family="flow",
-    rationale="Un volumen a más de tres sigmas de su media móvil de 100, ocurriendo justo en el "
-              "extremo de 20 velas, no es participación: es transferencia. En cripto ese pico "
-              "casi siempre es una cascada de liquidaciones, en la que el motor del exchange "
-              "envía órdenes a mercado que no representan a nadie que quiera operar a ese precio. "
-              "Cuando la cola de liquidaciones se vacía desaparece de golpe toda esa oferta "
-              "involuntaria, y el precio vuelve al nivel donde estaba el libro real. La media y la "
-              "sigma son móviles a 100 velas, nunca del histórico completo.",
-    prior="Esperamos ventaja positiva a 5 velas, concentrada en un número muy pequeño de eventos "
-          "(quizá 30-80 en todo el histórico por timeframe), lo que de entrada limita la potencia "
-          "estadística: si sale positiva pero con n < 30 la declararemos no concluyente. "
-          "Esperamos que falle cuando el pico de volumen es el ARRANQUE de una expansión de "
-          "régimen y no su final —una ruptura de rango con noticia detrás—, donde desvanecer es "
-          "ponerse delante del movimiento entero. También esperamos que empeore a partir de 2021, "
-          "según los exchanges han ido introduciendo motores de liquidación parcial que suavizan "
-          "las cascadas.",
-    fn=_climax_volumen,
-    params={"z_volumen": 3.0, "ventana_z": 100, "ventana_extremo": 20, "barras_mantenidas": 5},
+    rationale="Volume more than three sigma from its 100-period moving average, happening right at "
+              "a 20-candle extreme, is not participation: it is transfer. In crypto that spike is "
+              "almost always a liquidation cascade, in which the exchange's engine sends market "
+              "orders that represent nobody who wants to trade at that price. When the liquidation "
+              "queue empties, all that involuntary supply disappears at once, and the price goes "
+              "back to the level where the real book was. The mean and the sigma are rolling over "
+              "100 candles, never over the full history.",
+    prior="We expect a positive edge over 5 candles, concentrated in a very small number of events "
+          "(perhaps 30-80 across the whole history per timeframe), which caps the statistical power "
+          "from the outset: if it comes out positive but with n < 30 we will declare it "
+          "inconclusive. We expect it to fail when the volume spike is the START of a regime "
+          "expansion and not its end —a range break with news behind it— where fading means "
+          "stepping in front of the entire move. We also expect it to get worse from 2021 onwards, "
+          "as the exchanges have gradually introduced partial-liquidation engines that smooth the "
+          "cascades.",
+    fn=_volume_climax,
+    params={"volume_z": 3.0, "z_window": 100, "extreme_window": 20, "hold_bars": 5},
     timeframes=("15m", "1h", "4h", "1d"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 9. Oscilador de Chaikin: momento del delta de volumen aproximado
+# 9. Chaikin oscillator: momentum of the approximated volume delta
 # --------------------------------------------------------------------------------------------
 
 def _chaikin(s: Series) -> np.ndarray:
@@ -475,7 +477,7 @@ def _chaikin(s: Series) -> np.ndarray:
         return out
     osc = talib.ADOSC(_f(s.high), _f(s.low), _f(s.close), _f(s.volume),
                       fastperiod=3, slowperiod=10)
-    ok = _finito(osc)
+    ok = _finite(osc)
     out[ok & (osc > 0.0)] = 1
     out[ok & (osc < 0.0)] = -1
     return out
@@ -484,32 +486,33 @@ def _chaikin(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="flow.chaikin_osc_3_10",
     family="flow",
-    rationale="La línea de Acumulación/Distribución es el delta de volumen acumulado que se puede "
-              "aproximar sin datos de agresor: reparte el volumen de cada vela entre compra y "
-              "venta según dónde cierra dentro del rango, que es justo lo que mediría "
-              "`taker_buy_base` si `Series` lo expusiera. El oscilador de Chaikin es su momento "
-              "(EMA 3 menos EMA 10), o sea, si el delta acumulado se está acelerando. Un delta "
-              "acelerando significa que el desequilibrio entre agresión compradora y vendedora "
-              "está creciendo, y ese desequilibrio es lo que mueve el precio a corto plazo.",
-    prior="Esperamos ventaja positiva pequeña, y menor que la de `obv_ema21`, porque el reparto "
-          "por posición del cierre penaliza precisamente las velas con mecha, que en BTC son las "
-          "informativas. Esperamos que falle sistemáticamente en velas de mecha larga por barrido "
-          "de stops, donde el cierre vuelve al centro del rango y el indicador registra "
-          "'indecisión' en el momento en que más flujo direccional ha habido. Si saliera mejor "
-          "que OBV, el proxy de agresión por CLV sería más informativo de lo que creemos y habría "
-          "que revisar toda la familia.",
+    rationale="The Accumulation/Distribution line is the cumulative volume delta that can be "
+              "approximated without aggressor data: it splits each candle's volume between buying "
+              "and selling according to where it closes inside the range, which is exactly what "
+              "`taker_buy_base` would measure if `Series` exposed it. The Chaikin oscillator is its "
+              "momentum (EMA 3 minus EMA 10), that is, whether the cumulative delta is "
+              "accelerating. An accelerating delta means the imbalance between buy-side and "
+              "sell-side aggression is growing, and that imbalance is what moves the price in the "
+              "short run.",
+    prior="We expect a small positive edge, smaller than `obv_ema21`'s, because splitting by the "
+          "position of the close penalises exactly the candles with wicks, which in BTC are the "
+          "informative ones. We expect it to fail systematically on candles with long wicks caused "
+          "by stop runs, where the close comes back to the middle of the range and the indicator "
+          "records 'indecision' at the very moment of maximum directional flow. If it came out "
+          "better than OBV, the CLV aggression proxy would be more informative than we think and "
+          "the whole family would need revisiting.",
     fn=_chaikin,
-    params={"rapida": 3, "lenta": 10},
+    params={"fast": 3, "slow": 10},
     timeframes=("1h", "4h", "1d"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 10. Tendencia SOLO cuando la participación se expande
+# 10. Trend ONLY when participation expands
 # --------------------------------------------------------------------------------------------
 
-def _tendencia_con_participacion(s: Series) -> np.ndarray:
+def _trend_with_participation(s: Series) -> np.ndarray:
     n = len(s)
     out = np.zeros(n, dtype=np.int8)
     if n < 140:
@@ -517,45 +520,43 @@ def _tendencia_con_participacion(s: Series) -> np.ndarray:
     c, v = _f(s.close), _f(s.volume)
     roc = talib.ROC(c, 20)
     v20, v100 = talib.SMA(v, 20), talib.SMA(v, 100)
-    ok = _finito(roc, v20, v100)
-    expande = ok & (v20 > v100)
-    out[expande & (roc > 0.0)] = 1
-    out[expande & (roc < 0.0)] = -1
+    ok = _finite(roc, v20, v100)
+    expanding = ok & (v20 > v100)
+    out[expanding & (roc > 0.0)] = 1
+    out[expanding & (roc < 0.0)] = -1
     return out
 
 
 register(Hypothesis(
-    name="flow.tendencia_con_participacion",
+    name="flow.trend_with_participation",
     family="flow",
-    rationale="Afirma que el volumen no da dirección pero sí da permiso. Una tendencia sostenida "
-              "necesita un flujo continuo de participantes nuevos que compren más caro de lo que "
-              "compró el anterior; si el volumen medio de 20 cae por debajo del de 100, los que "
-              "quedan operando son los que ya están dentro, rotando entre ellos, y no hay quien "
-              "absorba la primera oleada de tomas de beneficio. La señal es el signo del "
-              "rendimiento de 20 velas condicionado a que la participación se expanda, y cero "
-              "cuando no.",
-    prior="Esperamos ventaja positiva, pero la prueba real NO es que sea positiva: es que sea "
-          "MAYOR que la del momento simple a 20 velas sin filtro. NOTA DE AUDITORÍA (2026-09-08): "
-          "ese control no estaba registrado en ninguna familia —la familia `trend` no registra un "
-          "ROC de 20— así que este criterio de falsación no se podía ejecutar; se ha registrado "
-          "como `flow.roc20_sin_filtro` y es contra él contra quien debe medirse. "
-          "Si el filtro de volumen no aporta nada sobre ese control, esta hipótesis queda "
-          "refutada aunque gane dinero, porque lo que estaría ganando es el momento y no el "
-          "flujo. Esperamos además que el filtro perjudique en los suelos de mercado bajista, "
-          "donde el volumen se seca durante meses y el filtro deja fuera precisamente el inicio "
-          "del siguiente ciclo alcista.",
-    fn=_tendencia_con_participacion,
-    params={"roc": 20, "volumen_corto": 20, "volumen_largo": 100},
+    rationale="It asserts that volume does not give direction but does give permission. A sustained "
+              "trend needs a continuous flow of new participants buying higher than the previous "
+              "one did; if the 20-period average volume falls below the 100-period one, those still "
+              "trading are the ones already inside, rotating among themselves, and there is nobody "
+              "left to absorb the first wave of profit taking. The signal is the sign of the "
+              "20-candle return conditioned on participation expanding, and zero when it does not.",
+    prior="We expect a positive edge, but the real test is NOT that it be positive: it is that it "
+          "be LARGER than plain 20-candle momentum with no filter. AUDIT NOTE (2026-09-08): that "
+          "control was not registered in any family —the `trend` family does not register a 20-bar "
+          "ROC— so this falsification criterion could not be executed; it has been registered as "
+          "`flow.roc20_unfiltered` and that is what this must be measured against. "
+          "If the volume filter adds nothing over that control, this hypothesis is refuted even if "
+          "it makes money, because what it would be earning is the momentum and not the flow. We "
+          "further expect the filter to hurt at bear-market bottoms, where volume dries up for "
+          "months and the filter leaves out precisely the start of the next bull cycle.",
+    fn=_trend_with_participation,
+    params={"roc": 20, "volume_short": 20, "volume_long": 100},
     timeframes=("4h", "1d"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 11. Movimiento en volumen fino: desvanecer
+# 11. A move on thin volume: fade it
 # --------------------------------------------------------------------------------------------
 
-def _movimiento_sin_volumen(s: Series) -> np.ndarray:
+def _move_without_volume(s: Series) -> np.ndarray:
     n = len(s)
     out = np.zeros(n, dtype=np.int8)
     if n < 40:
@@ -563,89 +564,88 @@ def _movimiento_sin_volumen(s: Series) -> np.ndarray:
     c, v = _f(s.close), _f(s.volume)
     v5, v20 = talib.SMA(v, 5), talib.SMA(v, 20)
     roc = talib.ROC(c, 5)
-    ok = _finito(v5, v20, roc) & (v20 > 0.0)
-    seco = ok & (v5 < v20)
-    out[seco & (roc > 0.0)] = -1
-    out[seco & (roc < 0.0)] = 1
+    ok = _finite(v5, v20, roc) & (v20 > 0.0)
+    dry = ok & (v5 < v20)
+    out[dry & (roc > 0.0)] = -1
+    out[dry & (roc < 0.0)] = 1
     return out
 
 
 register(Hypothesis(
-    name="flow.movimiento_sin_volumen",
+    name="flow.move_without_volume",
     family="flow",
-    rationale="El reverso exacto de `tendencia_con_participacion`, y por eso se registra: un "
-              "movimiento de cinco velas hecho con volumen por debajo de su propia media de 20 no "
-              "ha transferido inventario, solo ha desplazado el precio a través de un libro "
-              "vacío. Nadie ha tenido que aceptar una posición grande en el lado equivocado, así "
-              "que no hay ningún participante obligado a defender el nivel nuevo, y la primera "
-              "orden de tamaño que aparezca lo devolverá al sitio. El umbral es 'por debajo de la "
-              "media', sin constante libre que ajustar.",
-    prior="Esperamos ventaja positiva pequeña en 15m/1h, sobre todo en fines de semana y en las "
-          "horas asiáticas, cuando el libro de BTC es más fino. Esperamos que falle en los "
-          "arranques lentos de tendencia, en los que el precio sube semanas con volumen "
-          "decreciente y desvanecer es perder de forma continuada; ese es el modo de fallo que "
-          "más nos preocupa porque es persistente y no ruidoso. Si esta hipótesis y "
-          "`tendencia_con_participacion` salieran ambas positivas en el mismo régimen, "
-          "concluiríamos que el filtro de volumen no separa nada y que ganan por el signo del "
-          "momento, no por el flujo.",
-    fn=_movimiento_sin_volumen,
-    params={"volumen_corto": 5, "volumen_largo": 20, "roc": 5},
+    rationale="The exact reverse of `trend_with_participation`, and that is why it is "
+              "registered: a five-candle move made on volume below its own 20-period average has "
+              "transferred no inventory, it has only walked the price through an empty book. Nobody "
+              "has had to accept a large position on the wrong side, so there is no participant "
+              "obliged to defend the new level, and the first order of size that turns up will put "
+              "it back where it was. The threshold is 'below the average', with no free constant to "
+              "tune.",
+    prior="We expect a small positive edge on 15m/1h, above all at weekends and during the Asian "
+          "hours, when BTC's book is thinnest. We expect it to fail during the slow starts of a "
+          "trend, in which the price rises for weeks on decreasing volume and fading loses "
+          "continuously; that is the failure mode that worries us most because it is persistent and "
+          "not noisy. If this hypothesis and `trend_with_participation` both came out positive "
+          "in the same regime, we would conclude that the volume filter separates nothing and that "
+          "they win on the sign of the momentum, not on the flow.",
+    fn=_move_without_volume,
+    params={"volume_short": 5, "volume_long": 20, "roc": 5},
     timeframes=("15m", "1h", "4h"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 12. Absorción: esfuerzo alto SIN resultado (volumen doble y rango estrecho)
+# 12. Absorption: high effort WITHOUT result (double volume and a narrow range)
 # --------------------------------------------------------------------------------------------
 
-def _absorcion(s: Series) -> np.ndarray:
+def _absorption(s: Series) -> np.ndarray:
     n = len(s)
     out = np.zeros(n, dtype=np.int8)
     if n < 60:
         return out
     h, l, c, v = _f(s.high), _f(s.low), _f(s.close), _f(s.volume)
-    media_v = talib.SMA(v, 20)
+    v_mean = talib.SMA(v, 20)
     atr = talib.ATR(h, l, c, 14)
     tr = talib.TRANGE(h, l, c)
     clv = _clv(s)
     rel = np.full(n, np.nan)
-    np.divide(v, media_v, out=rel, where=~np.isnan(media_v) & (media_v > 0.0))
-    ok = _finito(rel, atr, tr) & (atr > 0.0)
-    absorbe = ok & (rel > 2.0) & (tr < atr)
+    np.divide(v, v_mean, out=rel, where=~np.isnan(v_mean) & (v_mean > 0.0))
+    ok = _finite(rel, atr, tr) & (atr > 0.0)
+    absorbing = ok & (rel > 2.0) & (tr < atr)
     ev = np.zeros(n, dtype=np.int8)
-    ev[absorbe & (clv > 0.0)] = 1
-    ev[absorbe & (clv < 0.0)] = -1
-    return _mantener(ev, 5)
+    ev[absorbing & (clv > 0.0)] = 1
+    ev[absorbing & (clv < 0.0)] = -1
+    return _hold(ev, 5)
 
 
 register(Hypothesis(
-    name="flow.absorcion_rango_estrecho",
+    name="flow.absorption_narrow_range",
     family="flow",
-    rationale="Es la casilla complementaria y disjunta de `impulso_volumen` en la tabla "
-              "esfuerzo/resultado de Wyckoff: mismo volumen doble, pero rango MENOR que el ATR. "
-              "Que se crucen el doble de contratos de lo normal y el precio no se mueva solo tiene "
-              "una explicación mecánica: hay una orden pasiva grande a un lado del libro "
-              "reponiéndose tan rápido como se la comen. Quien tiene tamaño para hacer eso conoce "
-              "su precio objetivo y no ha terminado; cuando el agresor se cansa, el precio se "
-              "desplaza hacia el lado del absorbedor, que es el lado donde ha cerrado la vela. La "
-              "dirección la da el signo del cierre dentro del rango, sin umbral libre.",
-    prior="Esperamos ventaja positiva pequeña a 5 velas, y menor frecuencia que el impulso. "
-          "Esperamos que falle en zonas de valor aceptado —el centro de un rango largo—, donde "
-          "volumen alto y rango estrecho es simplemente el equilibrio normal del mercado y no hay "
-          "ningún absorbedor. Al ser disjunta de `impulso_volumen` por construcción, la "
-          "comparación entre ambas es limpia: si las dos salen positivas, el volumen relativo "
-          "alto vale por sí solo y el rango no aporta; si solo una, el eje esfuerzo/resultado es "
-          "real.",
-    fn=_absorcion,
-    params={"volumen_relativo": 2.0, "media_volumen": 20, "atr": 14, "barras_mantenidas": 5},
+    rationale="It is the complementary, disjoint cell to `volume_thrust` in Wyckoff's "
+              "effort/result table: the same double volume, but a range SMALLER than the ATR. Twice "
+              "the usual number of contracts changing hands while the price does not move has only "
+              "one mechanical explanation: there is a large passive order on one side of the book "
+              "replenishing itself as fast as it is eaten. Whoever has the size to do that knows "
+              "their target price and is not finished; when the aggressor tires, the price moves "
+              "towards the absorber's side, which is the side the candle closed on. The direction "
+              "is given by the sign of the close within the range, with no free threshold.",
+    prior="We expect a small positive edge over 5 candles, and a lower frequency than the thrust. "
+          "We expect it to fail in areas of accepted value —the middle of a long range— where high "
+          "volume and a narrow range is simply the market's normal equilibrium and there is no "
+          "absorber at all. Being disjoint from `volume_thrust` by construction, the comparison "
+          "between the two is clean: if both come out positive, high relative volume is worth "
+          "something on its own and the range adds nothing; if only one does, the effort/result "
+          "axis is real.",
+    fn=_absorption,
+    params={"relative_volume": 2.0, "volume_mean": 20, "atr": 14, "hold_bars": 5},
     timeframes=("15m", "1h", "4h"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 13. Índice de Volumen Negativo (Fosback): qué hace el precio los días de volumen fino
+# 13. Negative Volume Index (Fosback): what price does on the thin-volume days
 # --------------------------------------------------------------------------------------------
 
 def _nvi_fosback(s: Series) -> np.ndarray:
@@ -655,15 +655,15 @@ def _nvi_fosback(s: Series) -> np.ndarray:
         return out
     c, v = _f(s.close), _f(s.volume)
     ret = np.zeros(n, dtype=np.float64)
-    anterior = c[:-1]
-    np.divide(c[1:] - anterior, anterior, out=ret[1:], where=anterior > 0.0)
-    baja_volumen = np.zeros(n, dtype=bool)
-    baja_volumen[1:] = v[1:] < v[:-1]
-    factor = np.where(baja_volumen, 1.0 + ret, 1.0)
-    factor = np.clip(factor, 0.01, None)   # ninguna vela puede llevar el índice a cero o negativo
+    prev = c[:-1]
+    np.divide(c[1:] - prev, prev, out=ret[1:], where=prev > 0.0)
+    lower_volume = np.zeros(n, dtype=bool)
+    lower_volume[1:] = v[1:] < v[:-1]
+    factor = np.where(lower_volume, 1.0 + ret, 1.0)
+    factor = np.clip(factor, 0.01, None)   # no candle may drive the index to zero or below
     nvi = 1000.0 * np.cumprod(factor)
     ema = talib.EMA(nvi, 255)
-    ok = _finito(nvi, ema)
+    ok = _finite(nvi, ema)
     out[ok & (nvi > ema)] = 1
     return out
 
@@ -671,22 +671,22 @@ def _nvi_fosback(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="flow.nvi_fosback",
     family="flow",
-    rationale="El NVI acumula el rendimiento SOLO de las velas cuyo volumen baja respecto a la "
-              "anterior, aislando lo que hace el precio cuando el público no está operando. La "
-              "premisa de Fosback es que el minorista aparece con el volumen y el dinero informado "
-              "no lo necesita: si el precio sube en los días tranquilos, alguien está construyendo "
-              "posición sin querer llamar la atención. La señal es asimétrica a propósito, como en "
-              "el original: +1 cuando el NVI está por encima de su EMA de 255 (un año de sesiones) "
-              "y 0 —no corto— por debajo, porque Fosback nunca afirmó que lo contrario indicase "
-              "mercado bajista, solo ausencia de información.",
-    prior="Esperamos ventaja positiva modesta en 1d y una tasa de exposición alta (debería estar "
-          "dentro la mayor parte del mercado alcista). El modo de fallo esperado es doble: la "
-          "distinción minorista/informado se construyó sobre bolsas con horario y ruedas de "
-          "prensa, y BTC cotiza 24/7 con un volumen dominado por market makers y arbitraje entre "
-          "exchanges, así que puede que la partición por volumen no separe a nadie. Además, con "
-          "solo 1d y ~600 velas de calentamiento quedan del orden de 2.500 observaciones y "
-          "poquísimos ciclos completos: si la ventaja sale positiva pero depende de haber estado "
-          "dentro en 2020-2021, es una observación, no evidencia.",
+    rationale="The NVI accumulates the return ONLY of the candles whose volume falls relative to "
+              "the previous one, isolating what price does when the public is not trading. "
+              "Fosback's premise is that the retail crowd turns up with the volume and informed "
+              "money does not need it: if the price rises on the quiet days, somebody is building a "
+              "position without wanting to draw attention. The signal is asymmetric on purpose, as "
+              "in the original: +1 when the NVI is above its 255-period EMA (a year of sessions) "
+              "and 0 —not short— below it, because Fosback never claimed that the opposite "
+              "indicated a bear market, only an absence of information.",
+    prior="We expect a modest positive edge on 1d and a high exposure rate (it should be in the "
+          "market for most of the bull run). The expected failure mode is twofold: the "
+          "retail/informed distinction was built on exchanges with opening hours and press "
+          "conferences, and BTC trades 24/7 with volume dominated by market makers and "
+          "inter-exchange arbitrage, so the partition by volume may separate nobody. Besides, with "
+          "only 1d and ~600 warm-up candles we are left with on the order of 2,500 observations and "
+          "very few complete cycles: if the edge comes out positive but depends on having been in "
+          "the market in 2020-2021, that is an observation, not evidence.",
     fn=_nvi_fosback,
     params={"ema": 255},
     timeframes=("1d",),
@@ -695,63 +695,64 @@ register(Hypothesis(
 
 
 # --------------------------------------------------------------------------------------------
-# 14. CONTROL AÑADIDO EN AUDITORÍA (2026-09-08).
+# 14. CONTROL ADDED DURING THE AUDIT (2026-09-08).
 #
-# Qué estaba mal. Dos hipótesis declaraban su criterio de falsación contra un control inexistente:
-# `flow.tendencia_con_participacion` dice que "la prueba real NO es que sea positiva: es que sea
-# MAYOR que la del momento simple a 20 velas sin filtro que registra la familia `trend`", y
-# `momentum.momento_con_volumen` dice que "queda falsada si el filtro de volumen no mejora al ROC
-# de 20 sin filtrar". Ni `trend` ni `momentum` registraban un ROC de 20 sin filtrar: `momentum`
-# registra `roc10`, que es otro horizonte y por tanto otro ensayo.
+# What was wrong. Two hypotheses declared their falsification criterion against a control that did
+# not exist: `flow.trend_with_participation` says that "the real test is NOT that it be positive:
+# it is that it be LARGER than plain 20-candle momentum with no filter, which the `trend` family
+# registers", and `momentum.momentum_with_volume` says that it "is falsified if the volume filter
+# does not improve on the unfiltered 20-bar ROC". Neither `trend` nor `momentum` registered an
+# unfiltered 20-bar ROC: `momentum` registers `roc10`, which is a different horizon and therefore a
+# different trial.
 #
-# Por qué importaba. Las dos hipótesis afirman lo mismo —que el volumen da PERMISO aunque no dé
-# dirección— y las dos condicionan el mismo estadístico (el signo del rendimiento de 20 velas) a
-# una expansión de participación. Esa es una afirmación sobre un incremento, y sin el brazo sin
-# filtrar solo se podía juzgar la rentabilidad absoluta, que en un activo con deriva secular
-# positiva confirma casi cualquier regla mayoritariamente larga. Con el control registrado, las dos
-# pasan a ser comprobables y las tres cuentan en la corrección por contraste múltiple.
+# Why it mattered. The two hypotheses assert the same thing —that volume gives PERMISSION even
+# though it gives no direction— and both condition the same statistic (the sign of the 20-candle
+# return) on an expansion of participation. That is a claim about an increment, and without the
+# unfiltered arm all that could be judged was absolute profitability, which in an asset with a
+# positive secular drift confirms almost any mostly-long rule. With the control registered, the two
+# become testable and all three count towards the multiple-comparisons correction.
 #
-# Además queda declarado aquí, para quien haga la corrección: `flow.tendencia_con_participacion`
-# (ROC-20 con SMA-20 > SMA-100 de volumen) y `momentum.momento_con_volumen` (ROC-20 con SMA-5 >
-# SMA-20 de volumen) son la MISMA construcción con distinta pareja de medias de volumen. Medidas
-# sobre datos comparten poco (índice de Jaccard ≈ 0,15 en los eventos), así que no son duplicados y
-# no se elimina ninguna, pero tampoco son ensayos independientes: son dos lecturas del mismo
-# mecanismo y deben contarse como ensayos dependientes, no como dos confirmaciones cruzadas entre
-# familias si ambas salen positivas.
+# It is also declared here, for whoever runs the correction: `flow.trend_with_participation`
+# (ROC-20 with volume SMA-20 > SMA-100) and `momentum.momentum_with_volume` (ROC-20 with volume
+# SMA-5 > SMA-20) are the SAME construction with a different pair of volume averages. Measured on
+# data they share little (Jaccard index ≈ 0.15 over the events), so they are not duplicates and
+# neither is removed, but they are not independent trials either: they are two readings of the same
+# mechanism and must be counted as dependent trials, not as two cross-family confirmations if both
+# come out positive.
 # --------------------------------------------------------------------------------------------
 
-def _roc20_sin_filtro(s: Series) -> np.ndarray:
+def _roc20_unfiltered(s: Series) -> np.ndarray:
     n = len(s)
     out = np.zeros(n, dtype=np.int8)
     if n < 40:
         return out
     roc = talib.ROC(_f(s.close), 20)
-    ok = _finito(roc)
+    ok = _finite(roc)
     out[ok & (roc > 0.0)] = 1
     out[ok & (roc < 0.0)] = -1
     return out
 
 
 register(Hypothesis(
-    name="flow.roc20_sin_filtro",
+    name="flow.roc20_unfiltered",
     family="flow",
-    rationale="Control incondicional de `tendencia_con_participacion` y de "
-              "`momentum.momento_con_volumen`: el signo del rendimiento de 20 velas, sin ninguna "
-              "condición sobre el volumen. No afirma un mecanismo de flujo —no puede, porque no "
-              "mira el volumen— y ese es exactamente su papel. Las dos hipótesis que controla no "
-              "apuestan a que el momento de 20 velas gane, sino a que gane MÁS cuando la "
-              "participación se expande; esa es una afirmación sobre una diferencia, y una "
-              "diferencia necesita los dos brazos. Se registra en `flow` porque su única razón de "
-              "existir es servir de denominador al filtro de volumen de esta familia.",
-    prior="Esperamos ventaja positiva pequeña, y esperamos que sea MENOR que la de "
-          "`tendencia_con_participacion` en 4h y 1d. Toda la información está en la comparación: si "
-          "este control iguala o supera a las versiones filtradas, el volumen no da permiso, las "
-          "dos hipótesis filtradas quedan refutadas aunque ganen dinero, y la tesis de esta familia "
-          "—que el volumen mide convicción— pierde su apoyo principal. Por sí solo, un resultado "
-          "positivo de este control NO es un hallazgo: es la deriva secular de BTC leída por el "
-          "signo de un rendimiento pasado, y así debe publicarse.",
-    fn=_roc20_sin_filtro,
-    params={"roc": 20, "filtro_volumen": "ninguno"},
+    rationale="Unconditional control for `trend_with_participation` and for "
+              "`momentum.momentum_with_volume`: the sign of the 20-candle return, with no condition "
+              "on volume whatsoever. It asserts no flow mechanism —it cannot, because it does not "
+              "look at volume— and that is exactly its role. The two hypotheses it controls do not "
+              "bet that 20-candle momentum wins, but that it wins MORE when participation expands; "
+              "that is a claim about a difference, and a difference needs both arms. It is "
+              "registered in `flow` because its only reason to exist is to serve as the denominator "
+              "for this family's volume filter.",
+    prior="We expect a small positive edge, and we expect it to be SMALLER than "
+          "`trend_with_participation`'s on 4h and 1d. All the information is in the comparison: "
+          "if this control matches or beats the filtered versions, volume gives no permission, the "
+          "two filtered hypotheses are refuted even if they make money, and this family's thesis "
+          "—that volume measures conviction— loses its main support. On its own, a positive result "
+          "from this control is NOT a finding: it is BTC's secular drift read through the sign of a "
+          "past return, and it must be published as such.",
+    fn=_roc20_unfiltered,
+    params={"roc": 20, "volume_filter": "none"},
     timeframes=("1h", "4h", "1d"),
     min_warmup=200,
 ))

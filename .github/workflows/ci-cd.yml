@@ -1,16 +1,16 @@
-# Integración y despliegue continuos.
+# Continuous integration and deployment.
 #
-# PILOTO para DR Solutions: las decisiones de aquí están tomadas pensando en que este fichero se
-# copie a otros repositorios, no solo en que funcione una vez.
+# PILOT for DR Solutions: the decisions here are made on the assumption that this file gets copied
+# into other repositories, not merely that it works once.
 #
-#   · El despliegue DEPENDE de los tests. Nunca se publica código en rojo.
-#   · `concurrency` con cancel-in-progress FALSE: cancelar un despliegue a medias deja el servidor
-#     en un estado indeterminado, que es peor que hacer esperar al siguiente.
-#   · Se despliega un SHA CONCRETO, no "lo último de main", que cambia entre que el pipeline
-#     empieza y termina.
-#   · Permisos mínimos: el token solo puede leer el repositorio.
-#   · La reversión automática vive en el SERVIDOR, no aquí: si el runner se cae a mitad, la
-#     reversión tiene que ocurrir igual.
+#   · Deployment DEPENDS on the tests. Red code is never shipped.
+#   · `concurrency` with cancel-in-progress FALSE: cancelling a deployment halfway leaves the server
+#     in an indeterminate state, which is worse than making the next one wait.
+#   · It deploys a SPECIFIC SHA, not "the latest on main", which changes between the pipeline
+#     starting and finishing.
+#   · Least privilege: the token can only read the repository.
+#   · Automatic rollback lives on the SERVER, not here: if the runner dies halfway, the rollback
+#     has to happen anyway.
 
 name: CI/CD
 
@@ -33,41 +33,41 @@ env:
 
 jobs:
   test:
-    name: Tests y lint
+    name: Tests and lint
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
-      - name: Instalar uv
+      - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
 
-      - name: Instalar Python 3.13 y dependencias
+      - name: Install Python 3.13 and dependencies
         run: uv sync --frozen --group dev
 
       - name: Lint
         run: uv run ruff check src tests
-        continue-on-error: true   # el lint informa; los tests son los que mandan
+        continue-on-error: true   # lint reports; the tests are what decide
 
       - name: Tests
-        # Se excluyen los marcados `net`: dependen de que Binance responda, y un pipeline que
-        # falla por una API ajena enseña al equipo a ignorar los fallos, que es lo peor que le
-        # puede pasar a un pipeline.
+        # The ones marked `net` are excluded: they depend on Binance answering, and a pipeline that
+        # fails because of someone else's API teaches the team to ignore failures, which is the
+        # worst thing that can happen to a pipeline.
         run: uv run pytest -m "not net" --tb=short -q
 
-      - name: Comprobar que las hipótesis cargan
+      - name: Check that the hypotheses load
         run: |
           uv run python -c "
           from wavelab.hypotheses import load_all
           n = len(load_all())
-          assert n >= 90, f'solo cargan {n} hipótesis'
-          print(f'{n} hipótesis registradas')"
+          assert n >= 90, f'only {n} hypotheses load'
+          print(f'{n} hypotheses registered')"
 
   deploy:
-    name: Desplegar en producción
+    name: Deploy to production
     needs: test
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
@@ -76,7 +76,7 @@ jobs:
       name: production
       url: https://assay.dr-techsolutions.com
     steps:
-      - name: Preparar la clave de despliegue
+      - name: Prepare the deploy key
         run: |
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           printf '%s\n' "${{ secrets.SSH_DEPLOY_KEY }}" > ~/.ssh/deploy
@@ -84,20 +84,20 @@ jobs:
           printf '%s\n' "${{ secrets.SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
 
-      - name: Desplegar ${{ github.sha }}
-        # La clave está restringida con command= en el servidor: aunque se filtrara, solo puede
-        # ejecutar el script de despliegue. No abre shell, no reenvía puertos, no lee ficheros.
+      - name: Deploy ${{ github.sha }}
+        # The key is restricted with command= on the server: even if it leaked, all it can do is
+        # run the deploy script. It opens no shell, forwards no ports, reads no files.
         run: |
           ssh -i ~/.ssh/deploy -o BatchMode=yes -o ConnectTimeout=20 \
               root@${{ secrets.VPS_HOST }} "${{ github.sha }}"
 
-      - name: Comprobar que responde desde fuera
+      - name: Check that it answers from outside
         run: |
           for i in $(seq 1 10); do
             code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
-                   https://assay.dr-techsolutions.com/api/estado || echo 000)
-            [ "$code" = "200" ] && { echo "responde 200"; exit 0; }
-            echo "intento $i: HTTP $code"; sleep 6
+                   https://assay.dr-techsolutions.com/api/status || echo 000)
+            [ "$code" = "200" ] && { echo "answers 200"; exit 0; }
+            echo "attempt $i: HTTP $code"; sleep 6
           done
-          echo "AVISO: no responde públicamente todavía (¿DNS sin configurar?)."
-          echo "El servicio interno sí está desplegado y verificado por el propio script."
+          echo "WARNING: not answering publicly yet (DNS not configured?)."
+          echo "The internal service is deployed and verified by the deploy script itself."

@@ -1,40 +1,41 @@
-"""Familia `candles`: microestructura de vela. REGISTRO PREVIO, escrito sin mirar un solo número.
+"""Family `candles`: candle microstructure. PRE-REGISTERED, written without looking at one number.
 
-Postura de partida: escéptica. La mayoría de los patrones de vela del canon no tienen ventaja
-demostrada fuera de la muestra, y buena parte de su semántica ("indecisión", "rechazo") importa
-supuestos de un mercado con apertura y cierre de sesión que en BTC, que cotiza 24/7, no existen.
-Varias hipótesis de este fichero predicen CERO a propósito: un prior de "cero" es falsable por
-cualquier efecto significativo en cualquiera de los dos sentidos, y una familia en la que todo
-predice éxito no es una familia de hipótesis, es un folleto.
+Starting stance: sceptical. Most of the canonical candlestick patterns have no demonstrated
+out-of-sample edge, and much of their semantics ("indecision", "rejection") imports the assumptions
+of a market with a session open and a session close, which BTC — trading 24/7 — does not have.
+Several hypotheses in this file predict ZERO on purpose: a prior of "zero" is falsifiable by any
+significant effect in either direction, and a family in which everything predicts success is not a
+family of hypotheses, it is a brochure.
 
-Convenciones, fijadas ANTES de ejecutar nada:
+Conventions, fixed BEFORE running anything:
 
-- PULSO frente a ESTADO. Un patrón es un evento: emite ±1 en la vela en la que se completa y
-  vuelve a 0. La gestión de salida la impone el motor, no la hipótesis. Solo dos hipótesis
-  extienden la señal varias velas, y lo hacen porque su mecanismo declarado dura varias velas
-  (una orden institucional troceada, la deriva posterior a un shock); está dicho en su rationale.
-  Dos hipótesis son de estado y no de evento (`cierre_en_rango`, `flujo_cuerpos_20`): describen
-  una condición sostenida de la vela o de la ventana, no un suceso puntual.
+- PULSE versus STATE. A pattern is an event: it emits ±1 on the candle where it completes and goes
+  back to 0. Exit management is imposed by the engine, not by the hypothesis. Only two hypotheses
+  extend the signal over several candles, and they do so because their declared mechanism lasts
+  several candles (an institutional order worked in slices, the drift after a shock); it is said so
+  in their rationale. Two hypotheses are state and not event (`close_in_range`, `body_flow_20`):
+  they describe a sustained condition of the candle or of the window, not a one-off occurrence.
 
-- PARÁMETROS. Un valor por parámetro, elegido por convención de la literatura (RSI 14 con umbrales
-  30/70, ADX 14 con umbral 25, ATR 14, EMA 200, ventana 20) o, donde la literatura no ofrece uno,
-  un número redondo fijado de antemano (0.8/0.2 de posición del cierre, 2x cuerpo y 0.6 de rango
-  para la mecha, 2x ATR para el shock, 0.30 de flujo de cuerpos). Ninguno se ha elegido mirando
-  datos, y ninguno se reajustará después. Cambiar uno sería otra hipótesis y otro ensayo.
+- PARAMETERS. One value per parameter, taken by convention from the literature (RSI 14 with 30/70
+  thresholds, ADX 14 with a threshold of 25, ATR 14, EMA 200, window 20) or, where the literature
+  offers none, a round number fixed in advance (0.8/0.2 for the close's position in the range, 2x
+  the body and 0.6 of the range for the wick, 2x ATR for the shock, 0.30 of body flow). None was
+  chosen by looking at data, and none will be re-tuned afterwards. Changing one would be a
+  different hypothesis and a different trial.
 
-- CAUSALIDAD. Todo lo que se lee en la posición i es de i o anterior. Los retardos van con
-  `_retardo` (rellena NaN al arranque, nunca envuelve), la propagación de pulsos usa
-  `np.maximum.accumulate`, que solo mira el prefijo, y no se usa nada que se defina contra el
-  array entero (find_peaks con prominence, mínimos globales, normalizaciones por el total).
-  Las funciones CDL* de TA-Lib son causales: sus umbrales internos son medias móviles hacia atrás.
+- CAUSALITY. Everything read at position i comes from i or earlier. Lags go through `_lag` (fills
+  NaN at the start, never wraps), pulse propagation uses `np.maximum.accumulate`, which only looks
+  at the prefix, and nothing is used that is defined against the whole array (find_peaks with
+  prominence, global minima, normalisations by the total). TA-Lib's CDL* functions are causal:
+  their internal thresholds are backward-looking moving averages.
 
-- NaN. TA-Lib devuelve NaN durante el calentamiento. Se comprueba explícitamente con np.isnan
-  (`_sin_nan`) en vez de confiar en que la comparación con NaN dé False, porque esa protección
-  implícita se pierde en cuanto una condición aparece negada.
+- NaN. TA-Lib returns NaN during warm-up. It is checked explicitly with np.isnan (`_no_nan`)
+  instead of trusting that a comparison against NaN yields False, because that implicit protection
+  is lost the moment a condition appears negated.
 
-- COSTES. Los patrones de vela son señales de una vela y disparan mucho. La ventaja bruta no
-  significa nada aquí: lo que se registra como éxito es el delta contra el brazo nulo NETO de
-  comisiones, y para varias de estas hipótesis el prior es precisamente que el coste se la come.
+- COSTS. Candle patterns are one-candle signals and they fire a lot. Gross edge means nothing here:
+  what gets recorded as success is the delta against the null arm NET of fees, and for several of
+  these hypotheses the prior is precisely that costs eat it.
 """
 
 from __future__ import annotations
@@ -44,22 +45,22 @@ import talib
 
 from wavelab.hypotheses.base import Hypothesis, Series, register
 
-# Ninguna hipótesis de esta familia emite señal con menos historia que esto: cubre el calentamiento
-# más largo (EMA 200) con margen y evita pedirle a TA-Lib series más cortas que su lookback.
-_MIN_VELAS = 320
+# No hypothesis in this family emits a signal on less history than this: it covers the longest
+# warm-up (EMA 200) with room to spare and avoids handing TA-Lib series shorter than its lookback.
+_MIN_BARS = 320
 
 
 def _f(a: np.ndarray) -> np.ndarray:
-    """TA-Lib exige float64 contiguo. No copia si ya lo es."""
+    """TA-Lib demands contiguous float64. No copy if it already is."""
     return np.ascontiguousarray(a, dtype=np.float64)
 
 
-def _sin_nan(*arrays: np.ndarray) -> np.ndarray:
-    """Máscara True donde NINGUNO de los arrays es NaN.
+def _no_nan(*arrays: np.ndarray) -> np.ndarray:
+    """Mask that is True where NONE of the arrays is NaN.
 
-    Se hace explícito y no se delega en que `NaN > x` sea False: esa protección desaparece en
-    cuanto la condición aparece negada (`~(x > y)` sí es True con NaN) y reaparecería como señal
-    inventada justo en el calentamiento, que es donde menos se mira.
+    Made explicit rather than delegated to `NaN > x` being False: that protection disappears the
+    moment the condition appears negated (`~(x > y)` IS True with NaN) and would come back as an
+    invented signal right in the warm-up, which is where nobody is looking.
     """
     m = np.ones(np.shape(arrays[0]), dtype=bool)
     for a in arrays:
@@ -67,8 +68,8 @@ def _sin_nan(*arrays: np.ndarray) -> np.ndarray:
     return m
 
 
-def _retardo(a: np.ndarray, k: int = 1) -> np.ndarray:
-    """El valor de la posición i-k, colocado en i. NaN en el arranque. Solo mira hacia atrás."""
+def _lag(a: np.ndarray, k: int = 1) -> np.ndarray:
+    """The value at position i-k, placed at i. NaN at the start. Only ever looks backwards."""
     x = np.asarray(a, dtype=np.float64)
     if k <= 0:
         return x.copy()
@@ -78,16 +79,16 @@ def _retardo(a: np.ndarray, k: int = 1) -> np.ndarray:
     return out
 
 
-def _mantener(pulso: np.ndarray, n: int) -> np.ndarray:
-    """Extiende cada pulso ±1 durante n velas contando la de la señal.
+def _hold(pulse: np.ndarray, n: int) -> np.ndarray:
+    """Extends each ±1 pulse over n candles, counting the signal candle itself.
 
-    Causal: `maximum.accumulate` solo depende del prefijo, así que la posición i solo sabe de la
-    última señal ocurrida en i o antes. Un pulso nuevo sustituye al anterior.
+    Causal: `maximum.accumulate` only depends on the prefix, so position i knows nothing beyond the
+    last signal that occurred at i or before. A new pulse replaces the previous one.
     """
-    idx = np.arange(pulso.size)
-    ultimo = np.maximum.accumulate(np.where(pulso != 0, idx, -1))
-    vivo = (ultimo >= 0) & ((idx - ultimo) < n)
-    return np.where(vivo, pulso[np.maximum(ultimo, 0)], 0).astype(np.int8)
+    idx = np.arange(pulse.size)
+    last = np.maximum.accumulate(np.where(pulse != 0, idx, -1))
+    alive = (last >= 0) & ((idx - last) < n)
+    return np.where(alive, pulse[np.maximum(last, 0)], 0).astype(np.int8)
 
 
 def _ohlc(s: Series) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -95,549 +96,548 @@ def _ohlc(s: Series) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
 
 
 # ---------------------------------------------------------------------------
-# 1. Envolvente sin filtrar: la versión del folclore, registrada para poder refutarla.
+# 1. Unfiltered engulfing: the folklore version, registered so that it can be refuted.
 # ---------------------------------------------------------------------------
-def _envolvente_cruda(s: Series) -> np.ndarray:
+def _engulfing_raw(s: Series) -> np.ndarray:
     out = np.zeros(len(s), dtype=np.int8)
-    if len(s) < _MIN_VELAS:
+    if len(s) < _MIN_BARS:
         return out
     o, h, l, c = _ohlc(s)
     p = np.asarray(talib.CDLENGULFING(o, h, l, c), dtype=np.float64)
-    ok = _sin_nan(p)
+    ok = _no_nan(p)
     out[ok & (p > 0)] = 1
     out[ok & (p < 0)] = -1
     return out
 
 
 register(Hypothesis(
-    name="candles.envolvente_cruda",
+    name="candles.engulfing_raw",
     family="candles",
-    rationale="Una vela envolvente significa que todo el rango de precios que la vela anterior "
-              "consideró aceptable se ha recorrido entero y el cierre ha quedado al otro lado de "
-              "su apertura: quien tomó posición durante la vela envuelta está en pérdidas como "
-              "bloque, y sus stops quedan justo al otro lado del extremo de la envolvente, lo que "
-              "aporta flujo forzado en la misma dirección. Ese es el mecanismo que se le atribuye "
-              "y se registra sin ningún filtro, tal como lo enuncia el canon, para que la versión "
-              "condicionada (candles.envolvente_tendencia) tenga contra qué contrastarse.",
-    prior="Predecimos que NO hay ventaja: esperamos una expectativa indistinguible de cero en "
-          "bruto y negativa una vez descontadas comisiones, porque sin contexto una envolvente es "
-          "mecánicamente 'una vela grande que cerró fuerte', que en BTC aparece más a menudo al "
-          "final de una cascada de liquidaciones que al principio de un movimiento. Queda falsada "
-          "si el delta neto contra el brazo nulo es claramente positivo en cualquiera de los tres "
-          "timeframes; queda falsada también, en el otro sentido, si es claramente negativo, lo "
-          "que indicaría que el patrón funciona invertido.",
-    fn=_envolvente_cruda,
-    params={"patron": "CDLENGULFING", "mantener": 1},
+    rationale="An engulfing candle means that the entire price range the previous candle considered "
+              "acceptable has been travelled end to end and the close has ended up on the other "
+              "side of its open: whoever took a position during the engulfed candle is underwater "
+              "as a block, and their stops sit just beyond the far extreme of the engulfing candle, "
+              "which supplies forced flow in the same direction. That is the mechanism attributed "
+              "to it, and it is registered with no filter at all, exactly as the canon states it, "
+              "so that the conditioned version (candles.engulfing_trend) has something to be "
+              "measured against.",
+    prior="We predict NO edge: we expect an expectancy indistinguishable from zero gross and "
+          "negative once fees are deducted, because without context an engulfing candle is "
+          "mechanically 'a big candle that closed strong', which in BTC turns up more often at the "
+          "end of a liquidation cascade than at the start of a move. It is falsified if the net "
+          "delta against the null arm is clearly positive on any of the three timeframes; it is "
+          "falsified too, in the other direction, if it is clearly negative, which would mean the "
+          "pattern works inverted.",
+    fn=_engulfing_raw,
+    params={"pattern": "CDLENGULFING", "hold": 1},
     timeframes=("1h", "4h", "1d"),
     min_warmup=200,
 ))
 
 
 # ---------------------------------------------------------------------------
-# 2. Envolvente alineada con la tendencia de fondo.
+# 2. Engulfing aligned with the underlying trend.
 # ---------------------------------------------------------------------------
-def _envolvente_tendencia(s: Series) -> np.ndarray:
+def _engulfing_with_trend(s: Series) -> np.ndarray:
     out = np.zeros(len(s), dtype=np.int8)
-    if len(s) < _MIN_VELAS:
+    if len(s) < _MIN_BARS:
         return out
     o, h, l, c = _ohlc(s)
     p = np.asarray(talib.CDLENGULFING(o, h, l, c), dtype=np.float64)
     ema = talib.EMA(c, 200)
-    ok = _sin_nan(p, ema)
+    ok = _no_nan(p, ema)
     out[ok & (p > 0) & (c > ema)] = 1
     out[ok & (p < 0) & (c < ema)] = -1
     return out
 
 
 register(Hypothesis(
-    name="candles.envolvente_tendencia",
+    name="candles.engulfing_trend",
     family="candles",
-    rationale="La misma envolvente, pero solo cuando apunta en el sentido de la tendencia de "
-              "fondo. El mecanismo de stops solo puede funcionar si hay un lado atrapado y otro "
-              "con capacidad de empujar: en un mercado que sube, una envolvente alcista marca a "
-              "los vendedores del retroceso como el bloque atrapado, mientras que una envolvente "
-              "alcista dentro de una caída marca a compradores que seguirán encontrando oferta "
-              "encima. No es una variante de parámetro de la hipótesis anterior: la anterior es la "
-              "afirmación incondicional del canon y esta es la afirmación de que el efecto es "
-              "CONDICIONAL al régimen; el contraste entre ambas es la cantidad informativa, y la "
-              "EMA 200 se fija en su valor convencional y no se busca.",
-    prior="Esperamos ventaja positiva y mayor que la de candles.envolvente_cruda, y esperamos que "
-          "la diferencia entre ambas sea mayor que la ventaja absoluta de cualquiera de las dos. "
-          "Falla si el filtro no mejora nada (el patrón no es sensible al contexto y su mecanismo "
-          "declarado es falso) y falla igualmente si mejora pero con expectativa neta negativa, "
-          "que sería solo el sesgo alcista estructural de BTC filtrado, no el patrón.",
-    fn=_envolvente_tendencia,
-    params={"patron": "CDLENGULFING", "ema": 200, "mantener": 1},
+    rationale="The same engulfing candle, but only when it points in the direction of the "
+              "underlying trend. The stop mechanism can only work if there is one side trapped and "
+              "another with the capacity to push: in a rising market a bullish engulfing marks the "
+              "sellers of the pullback as the trapped block, whereas a bullish engulfing inside a "
+              "decline marks buyers who will keep running into supply above. This is not a "
+              "parameter variant of the previous hypothesis: the previous one is the canon's "
+              "unconditional claim and this one is the claim that the effect is CONDITIONAL on the "
+              "regime; the contrast between the two is the informative quantity, and the EMA 200 is "
+              "fixed at its conventional value and not searched over.",
+    prior="We expect a positive edge, larger than candles.engulfing_raw's, and we expect the "
+          "difference between the two to be larger than the absolute edge of either. It fails if "
+          "the filter improves nothing (the pattern is not context-sensitive and its declared "
+          "mechanism is false) and it fails just the same if it improves but with a negative net "
+          "expectancy, which would be nothing but BTC's structural bullish bias, filtered — not the "
+          "pattern.",
+    fn=_engulfing_with_trend,
+    params={"pattern": "CDLENGULFING", "ema": 200, "hold": 1},
     timeframes=("1h", "4h", "1d"),
     min_warmup=300,
 ))
 
 
 # ---------------------------------------------------------------------------
-# 3. Martillo tras caída (RSI 14 en sobreventa).
+# 3. Hammer after a fall (RSI 14 oversold).
 # ---------------------------------------------------------------------------
-def _martillo_sobreventa(s: Series) -> np.ndarray:
+def _hammer_oversold(s: Series) -> np.ndarray:
     out = np.zeros(len(s), dtype=np.int8)
-    if len(s) < _MIN_VELAS:
+    if len(s) < _MIN_BARS:
         return out
     o, h, l, c = _ohlc(s)
     p = np.asarray(talib.CDLHAMMER(o, h, l, c), dtype=np.float64)
     rsi = talib.RSI(c, 14)
-    ok = _sin_nan(p, rsi)
+    ok = _no_nan(p, rsi)
     out[ok & (p > 0) & (rsi < 30.0)] = 1
     return out
 
 
 register(Hypothesis(
-    name="candles.martillo_sobreventa",
+    name="candles.hammer_oversold",
     family="candles",
-    rationale="Un martillo es una vela cuyo precio bajó mucho y volvió: la mecha inferior es la "
-              "huella visible de una demanda pasiva que absorbió toda la venta agresiva y devolvió "
-              "el precio. Eso solo dice algo después de una caída, cuando la venta agresiva es "
-              "liquidación forzada y no colocación ordenada: el vendedor forzado se agota en "
-              "horas, el comprador que absorbió sigue ahí, y el desequilibrio se resuelve al alza. "
-              "Sin la caída previa, la misma forma es una vela cualquiera de un rango, por eso la "
-              "condición de sobreventa forma parte de la hipótesis y no es un añadido.",
-    prior="Esperamos ventaja positiva pequeña y solo en el lado largo. Esperamos que falle "
-          "justamente donde la venta no es forzada sino informada: en tendencias bajistas "
-          "sostenidas cada absorción se vuelve a probar y el martillo se convierte en cuchillo "
-          "cayendo, así que anticipamos una cola izquierda gorda y una tasa de acierto alta con "
-          "expectativa mediocre. Falsada si el signo es negativo, o si el delta neto contra el "
-          "brazo nulo no se distingue de cero.",
-    fn=_martillo_sobreventa,
-    params={"patron": "CDLHAMMER", "rsi": 14, "umbral_rsi": 30, "mantener": 1},
+    rationale="A hammer is a candle whose price fell a long way and came back: the lower wick is "
+              "the visible footprint of passive demand that absorbed all the aggressive selling and "
+              "handed the price back. That only says something after a fall, when the aggressive "
+              "selling is forced liquidation and not orderly placement: the forced seller is spent "
+              "within hours, the buyer who absorbed is still there, and the imbalance resolves "
+              "upwards. Without the fall beforehand, the same shape is just another candle inside a "
+              "range, which is why the oversold condition is part of the hypothesis and not an "
+              "add-on.",
+    prior="We expect a small positive edge and only on the long side. We expect it to fail exactly "
+          "where the selling is not forced but informed: in sustained downtrends every absorption "
+          "gets retested and the hammer turns into a falling knife, so we anticipate a fat left "
+          "tail and a high hit rate with mediocre expectancy. Falsified if the sign is negative, or "
+          "if the net delta against the null arm cannot be told apart from zero.",
+    fn=_hammer_oversold,
+    params={"pattern": "CDLHAMMER", "rsi": 14, "rsi_threshold": 30, "hold": 1},
     timeframes=("1h", "4h", "1d"),
     min_warmup=200,
 ))
 
 
 # ---------------------------------------------------------------------------
-# 4. Estrella fugaz tras subida (RSI 14 en sobrecompra). El espejo del martillo.
+# 4. Shooting star after a rise (RSI 14 overbought). The hammer's mirror image.
 # ---------------------------------------------------------------------------
-def _estrella_fugaz_sobrecompra(s: Series) -> np.ndarray:
+def _shooting_star_overbought(s: Series) -> np.ndarray:
     out = np.zeros(len(s), dtype=np.int8)
-    if len(s) < _MIN_VELAS:
+    if len(s) < _MIN_BARS:
         return out
     o, h, l, c = _ohlc(s)
     p = np.asarray(talib.CDLSHOOTINGSTAR(o, h, l, c), dtype=np.float64)
     rsi = talib.RSI(c, 14)
-    ok = _sin_nan(p, rsi)
+    ok = _no_nan(p, rsi)
     out[ok & (p < 0) & (rsi > 70.0)] = -1
     return out
 
 
 register(Hypothesis(
-    name="candles.estrella_fugaz_sobrecompra",
+    name="candles.shooting_star_overbought",
     family="candles",
-    rationale="Espejo exacto del martillo: mecha superior larga tras una subida, es decir oferta "
-              "pasiva que absorbió toda la compra agresiva y devolvió el precio. Se registra por "
-              "separado y no como el lado corto de la misma hipótesis porque el mecanismo NO es "
-              "simétrico: la compra agresiva en máximos es discrecional y puede retirarse sin "
-              "coste, mientras que la venta agresiva en mínimos suele ser liquidación forzada con "
-              "plazo. Si la simetría del canon fuese cierta, ambas hipótesis deberían dar una "
-              "ventaja parecida; la comparación entre las dos es el contenido de este par.",
-    prior="Esperamos un efecto claramente MENOR que el del martillo y admitimos como resultado "
-          "probable una expectativa negativa: ponerse corto contra fuerza en BTC pelea a la vez "
-          "contra la deriva positiva del activo y contra el sesgo largo del mercado, y el coste de "
-          "financiación del corto no se recupera en una vela. Falsada si su ventaja iguala o "
-          "supera a la del martillo, lo que indicaría que la absorción es simétrica y que nuestra "
-          "explicación por flujo forzado sobra.",
-    fn=_estrella_fugaz_sobrecompra,
-    params={"patron": "CDLSHOOTINGSTAR", "rsi": 14, "umbral_rsi": 70, "mantener": 1},
+    rationale="Exact mirror of the hammer: a long upper wick after a rise, that is, passive supply "
+              "that absorbed all the aggressive buying and handed the price back. It is registered "
+              "separately rather than as the short side of the same hypothesis because the "
+              "mechanism is NOT symmetric: aggressive buying at highs is discretionary and can walk "
+              "away at no cost, whereas aggressive selling at lows is usually forced liquidation on "
+              "a deadline. If the canon's symmetry held, both hypotheses ought to give a similar "
+              "edge; the comparison between the two is the content of this pair.",
+    prior="We expect an effect clearly SMALLER than the hammer's and we accept a negative "
+          "expectancy as a likely outcome: shorting into strength in BTC fights both the asset's "
+          "positive drift and the market's long bias at once, and the funding cost of the short is "
+          "not recovered within one candle. Falsified if its edge matches or beats the hammer's, "
+          "which would mean absorption is symmetric and our forced-flow explanation is superfluous.",
+    fn=_shooting_star_overbought,
+    params={"pattern": "CDLSHOOTINGSTAR", "rsi": 14, "rsi_threshold": 70, "hold": 1},
     timeframes=("1h", "4h", "1d"),
     min_warmup=200,
 ))
 
 
 # ---------------------------------------------------------------------------
-# 5. Posición del cierre dentro del rango de la vela (estado, no evento).
+# 5. Position of the close within the candle's range (state, not event).
 # ---------------------------------------------------------------------------
-def _cierre_en_rango(s: Series) -> np.ndarray:
+def _close_in_range(s: Series) -> np.ndarray:
     out = np.zeros(len(s), dtype=np.int8)
-    if len(s) < _MIN_VELAS:
+    if len(s) < _MIN_BARS:
         return out
     _o, h, l, c = _ohlc(s)
-    rango = h - l
-    ok = _sin_nan(h, l, c) & (rango > 0.0)
+    rng = h - l
+    ok = _no_nan(h, l, c) & (rng > 0.0)
     pos = np.zeros(len(s), dtype=np.float64)
-    np.divide(c - l, rango, out=pos, where=ok)
+    np.divide(c - l, rng, out=pos, where=ok)
     out[ok & (pos >= 0.80)] = 1
     out[ok & (pos <= 0.20)] = -1
     return out
 
 
 register(Hypothesis(
-    name="candles.cierre_en_rango",
+    name="candles.close_in_range",
     family="candles",
-    rationale="El cierre es el único precio al que ambos lados aceptaron quedarse con la posición "
-              "de una vela a la siguiente; el resto del rango son precios que alguien rechazó. Un "
-              "cierre clavado en el extremo del rango significa que el lado ganador todavía tenía "
-              "demanda sin ejecutar cuando terminó la vela: esa orden no desaparece en el cambio "
-              "de vela, se sigue ejecutando. Es la lectura más despojada de la forma de la vela "
-              "—no necesita nombre de patrón ni contexto— y por eso sirve de referencia mínima "
-              "frente a la que juzgar a los patrones con nombre de esta misma familia.",
-    prior="Esperamos continuación: ventaja positiva pequeña en 1h y 4h. Esperamos que se anule o "
-          "cambie de signo en 1d, donde el horizonte da tiempo a que domine la reversión, y que "
-          "en 15m sea positiva en bruto pero negativa neta, porque la señal dispara en casi una de "
-          "cada tres velas y el coste por rotación se la come. Falsada si el signo es negativo en "
-          "1h y 4h, que sería evidencia de que el cierre en el extremo marca agotamiento y no "
-          "demanda residual.",
-    fn=_cierre_en_rango,
-    params={"umbral_alto": 0.80, "umbral_bajo": 0.20},
+    rationale="The close is the only price both sides agreed to carry a position at from one candle "
+              "into the next; the rest of the range is prices somebody rejected. A close pinned to "
+              "the extreme of the range means the winning side still had unfilled demand when the "
+              "candle ended: that order does not vanish at the candle boundary, it keeps executing. "
+              "It is the most stripped-down reading of candle shape there is —it needs no pattern "
+              "name and no context— and that is why it serves as the minimum benchmark against "
+              "which to judge the named patterns of this same family.",
+    prior="We expect continuation: a small positive edge on 1h and 4h. We expect it to cancel out "
+          "or flip sign on 1d, where the horizon gives reversion time to take over, and on 15m to "
+          "be positive gross but negative net, because the signal fires on almost one candle in "
+          "three and the cost per turnover eats it. Falsified if the sign is negative on 1h and 4h, "
+          "which would be evidence that a close at the extreme marks exhaustion and not residual "
+          "demand.",
+    fn=_close_in_range,
+    params={"upper_threshold": 0.80, "lower_threshold": 0.20},
     timeframes=("15m", "1h", "4h", "1d"),
     min_warmup=200,
 ))
 
 
 # ---------------------------------------------------------------------------
-# 6. Marubozu de cierre: sesión ganada de punta a punta.
+# 6. Closing marubozu: a session won from end to end.
 # ---------------------------------------------------------------------------
-def _marubozu_continuacion(s: Series) -> np.ndarray:
+def _marubozu_continuation(s: Series) -> np.ndarray:
     out = np.zeros(len(s), dtype=np.int8)
-    if len(s) < _MIN_VELAS:
+    if len(s) < _MIN_BARS:
         return out
     o, h, l, c = _ohlc(s)
     p = np.asarray(talib.CDLCLOSINGMARUBOZU(o, h, l, c), dtype=np.float64)
-    ok = _sin_nan(p)
+    ok = _no_nan(p)
     out[ok & (p > 0)] = 1
     out[ok & (p < 0)] = -1
     return out
 
 
 register(Hypothesis(
-    name="candles.marubozu_continuacion",
+    name="candles.marubozu_continuation",
     family="candles",
-    rationale="Un marubozu de cierre es un cuerpo grande sin mecha del lado del cierre: durante "
-              "toda la vela no hubo un solo momento en que el lado perdedor consiguiera devolver "
-              "el precio, ni siquiera al final. Es la firma de un desequilibrio de flujo que no "
-              "encontró oposición pasiva, y un desequilibrio así no se agota exactamente en el "
-              "límite arbitrario de la vela. Se usa la variante de cierre y no el marubozu "
-              "estricto porque el extremo informativo es el del cierre; exigir además ausencia de "
-              "mecha en la apertura solo añade rareza sin añadir mecanismo.",
-    prior="Esperamos continuación en el sentido del cuerpo, con ventaja positiva pequeña. "
-          "Esperamos que falle en los extremos de rango y al final de recorridos largos, donde la "
-          "misma vela es capitulación y no impulso; como no distinguimos ex ante los dos casos, la "
-          "media de ambos debería salir débil. Falsada si el signo neto es negativo, lo que "
-          "apoyaría la lectura de agotamiento frente a la de continuación.",
-    fn=_marubozu_continuacion,
-    params={"patron": "CDLCLOSINGMARUBOZU", "mantener": 1},
+    rationale="A closing marubozu is a large body with no wick on the close side: throughout the "
+              "whole candle there was not one moment in which the losing side managed to hand the "
+              "price back, not even at the end. It is the signature of a flow imbalance that met no "
+              "passive opposition, and an imbalance like that does not expire exactly at the "
+              "arbitrary boundary of the candle. The closing variant is used and not the strict "
+              "marubozu because the informative extreme is the close; also demanding no wick at the "
+              "open only adds rarity without adding mechanism.",
+    prior="We expect continuation in the direction of the body, with a small positive edge. We "
+          "expect it to fail at range extremes and at the end of long runs, where the same candle "
+          "is capitulation and not impulse; as we do not tell the two cases apart ex ante, the "
+          "average of both should come out weak. Falsified if the net sign is negative, which would "
+          "support the exhaustion reading over the continuation one.",
+    fn=_marubozu_continuation,
+    params={"pattern": "CDLCLOSINGMARUBOZU", "hold": 1},
     timeframes=("1h", "4h", "1d"),
     min_warmup=200,
 ))
 
 
 # ---------------------------------------------------------------------------
-# 7. Doji tras impulso direccional (ADX 14 > 25). Hipótesis que predice CERO.
+# 7. Doji after a directional thrust (ADX 14 > 25). A hypothesis that predicts ZERO.
 # ---------------------------------------------------------------------------
-def _doji_tras_impulso(s: Series) -> np.ndarray:
+def _doji_after_thrust(s: Series) -> np.ndarray:
     out = np.zeros(len(s), dtype=np.int8)
-    if len(s) < _MIN_VELAS:
+    if len(s) < _MIN_BARS:
         return out
     o, h, l, c = _ohlc(s)
     p = np.asarray(talib.CDLDOJI(o, h, l, c), dtype=np.float64)
     adx = talib.ADX(h, l, c, 14)
-    di_mas = talib.PLUS_DI(h, l, c, 14)
-    di_menos = talib.MINUS_DI(h, l, c, 14)
-    ok = _sin_nan(p, adx, di_mas, di_menos)
-    impulso = ok & (p != 0.0) & (adx > 25.0)
-    out[impulso & (di_mas > di_menos)] = -1
-    out[impulso & (di_menos > di_mas)] = 1
+    di_plus = talib.PLUS_DI(h, l, c, 14)
+    di_minus = talib.MINUS_DI(h, l, c, 14)
+    ok = _no_nan(p, adx, di_plus, di_minus)
+    thrust = ok & (p != 0.0) & (adx > 25.0)
+    out[thrust & (di_plus > di_minus)] = -1
+    out[thrust & (di_minus > di_plus)] = 1
     return out
 
 
 register(Hypothesis(
-    name="candles.doji_tras_impulso",
+    name="candles.doji_after_thrust",
     family="candles",
-    rationale="Un doji es la primera vela de un tramo en la que el lado dominante encuentra "
-              "contrapartida suficiente para acabar donde empezó; dentro de un movimiento "
-              "direccional maduro marcaría el punto en el que se agota el comprador (o vendedor) "
-              "marginal, y por eso el canon lo lee como aviso de vuelta. La dirección del impulso "
-              "se toma del sistema direccional de Wilder con su parámetro convencional, para no "
-              "introducir una ventana propia. La registramos porque es la hipótesis de velas más "
-              "citada que somos capaces de enunciar con un mecanismo explícito, no porque "
-              "creamos en ella.",
-    prior="Predecimos CERO. En un mercado 24/7 no hay apertura ni cierre de sesión, así que un "
-          "doji no es un veredicto colectivo sino simplemente una vela de cuerpo pequeño, y "
-          "aparece a puñados en las horas de poco volumen; la semántica de 'indecisión' importa "
-          "una estructura de sesión que aquí no existe. Un prior de cero es falsable por cualquier "
-          "efecto significativo en cualquiera de los dos sentidos: si el desvanecimiento del "
-          "impulso da ventaja positiva, nuestra objeción sobre el 24/7 es errónea; si la da "
-          "negativa, el doji es continuación y el canon está invertido.",
-    fn=_doji_tras_impulso,
-    params={"patron": "CDLDOJI", "adx": 14, "umbral_adx": 25, "mantener": 1},
+    rationale="A doji is the first candle of a leg in which the dominant side finds enough "
+              "counterparty to end up where it started; inside a mature directional move it would "
+              "mark the point at which the marginal buyer (or seller) runs out, and that is why the "
+              "canon reads it as a warning of a turn. The direction of the thrust is taken from "
+              "Wilder's directional system with its conventional parameter, so as not to introduce "
+              "a window of our own. We register it because it is the most-cited candle hypothesis "
+              "we are able to state with an explicit mechanism, not because we believe in it.",
+    prior="We predict ZERO. In a 24/7 market there is no session open and no session close, so a "
+          "doji is not a collective verdict but simply a small-bodied candle, and they turn up in "
+          "handfuls during the low-volume hours; the semantics of 'indecision' imports a session "
+          "structure that does not exist here. A prior of zero is falsifiable by any significant "
+          "effect in either direction: if fading the thrust gives a positive edge, our objection "
+          "about the 24/7 market is wrong; if it gives a negative one, the doji is continuation and "
+          "the canon has it inverted.",
+    fn=_doji_after_thrust,
+    params={"pattern": "CDLDOJI", "adx": 14, "adx_threshold": 25, "hold": 1},
     timeframes=("1h", "4h", "1d"),
     min_warmup=200,
 ))
 
 
 # ---------------------------------------------------------------------------
-# 8. Mecha desproporcionada, sin folclore: pura geometría simétrica.
+# 8. Outsized wick, with no folklore attached: pure symmetric geometry.
 # ---------------------------------------------------------------------------
-def _mecha_desproporcionada(s: Series) -> np.ndarray:
+def _outsized_wick(s: Series) -> np.ndarray:
     out = np.zeros(len(s), dtype=np.int8)
-    if len(s) < _MIN_VELAS:
+    if len(s) < _MIN_BARS:
         return out
     o, h, l, c = _ohlc(s)
-    ok = _sin_nan(o, h, l, c)
-    rango = h - l
-    ok &= rango > 0.0
-    cuerpo = np.abs(c - o)
-    mecha_inf = np.minimum(o, c) - l
-    mecha_sup = h - np.maximum(o, c)
-    largo = ok & (mecha_inf >= 2.0 * cuerpo) & (mecha_inf >= 0.60 * rango)
-    corto = ok & (mecha_sup >= 2.0 * cuerpo) & (mecha_sup >= 0.60 * rango)
-    out[largo] = 1
-    out[corto] = -1
+    ok = _no_nan(o, h, l, c)
+    rng = h - l
+    ok &= rng > 0.0
+    body = np.abs(c - o)
+    lower_wick = np.minimum(o, c) - l
+    upper_wick = h - np.maximum(o, c)
+    long_side = ok & (lower_wick >= 2.0 * body) & (lower_wick >= 0.60 * rng)
+    short_side = ok & (upper_wick >= 2.0 * body) & (upper_wick >= 0.60 * rng)
+    out[long_side] = 1
+    out[short_side] = -1
     return out
 
 
 register(Hypothesis(
-    name="candles.mecha_desproporcionada",
+    name="candles.outsized_wick",
     family="candles",
-    rationale="Una mecha larga es la huella de un nivel al que el precio llegó y del que volvió: "
-              "prueba de que allí había liquidez pasiva de verdad, que absorbió el flujo agresivo "
-              "y quedó parcialmente sin ejecutar. Quien tiene una orden grande a ese precio la "
-              "vuelve a poner, así que el nivel funciona como suelo o techo blando durante las "
-              "velas siguientes. Se define solo con geometría —mecha mayor que el doble del cuerpo "
-              "y más del 60% del rango, simétrica arriba y abajo— y sin exigir tendencia previa ni "
-              "posición del cuerpo, precisamente para separar el efecto de absorción del "
-              "vocabulario de martillo y estrella fugaz, que añaden condiciones de contexto.",
-    prior="Esperamos ventaja positiva pequeña en el sentido contrario a la mecha, mayor en 4h que "
-          "en 15m. Esperamos que falle en tendencias fuertes, donde una mecha inferior larga "
-          "dentro de una caída no es absorción sino un retroceso parcial antes de continuar, y "
-          "esperamos que en 15m la ventaja bruta exista pero desaparezca al descontar comisiones. "
-          "Falsada si el signo es negativo, o si no supera al brazo nulo en ningún timeframe.",
-    fn=_mecha_desproporcionada,
-    params={"mecha_vs_cuerpo": 2.0, "mecha_vs_rango": 0.60},
+    rationale="A long wick is the footprint of a level the price reached and came back from: proof "
+              "that there really was passive liquidity there, which absorbed the aggressive flow "
+              "and was left partly unfilled. Whoever has a large order at that price puts it back, "
+              "so the level acts as a soft floor or ceiling over the following candles. It is "
+              "defined by geometry alone —wick greater than twice the body and more than 60% of the "
+              "range, symmetric above and below— and without requiring a prior trend or a body "
+              "position, precisely in order to separate the absorption effect from the vocabulary "
+              "of hammer and shooting star, which add context conditions.",
+    prior="We expect a small positive edge in the direction opposite to the wick, larger on 4h than "
+          "on 15m. We expect it to fail in strong trends, where a long lower wick inside a fall is "
+          "not absorption but a partial retracement before continuing, and we expect that on 15m "
+          "the gross edge will exist but will disappear once fees are deducted. Falsified if the "
+          "sign is negative, or if it beats the null arm on no timeframe.",
+    fn=_outsized_wick,
+    params={"wick_vs_body": 2.0, "wick_vs_range": 0.60},
     timeframes=("15m", "1h", "4h", "1d"),
     min_warmup=200,
 ))
 
 
 # ---------------------------------------------------------------------------
-# 9. Expansión de rango contra ATR: shock informativo o flujo forzado.
+# 9. Range expansion against the ATR: informational shock or forced flow.
 # ---------------------------------------------------------------------------
-def _expansion_rango(s: Series) -> np.ndarray:
+def _range_expansion(s: Series) -> np.ndarray:
     out = np.zeros(len(s), dtype=np.int8)
-    if len(s) < _MIN_VELAS:
+    if len(s) < _MIN_BARS:
         return out
     o, h, l, c = _ohlc(s)
     tr = talib.TRANGE(h, l, c)
-    atr_prev = _retardo(talib.ATR(h, l, c, 14), 1)
-    ok = _sin_nan(tr, atr_prev, o, c) & (atr_prev > 0.0)
+    atr_prev = _lag(talib.ATR(h, l, c, 14), 1)
+    ok = _no_nan(tr, atr_prev, o, c) & (atr_prev > 0.0)
     shock = ok & (tr >= 2.0 * atr_prev)
-    pulso = np.zeros(len(s), dtype=np.int8)
-    pulso[shock & (c > o)] = 1
-    pulso[shock & (c < o)] = -1
-    return _mantener(pulso, 3)
+    pulse = np.zeros(len(s), dtype=np.int8)
+    pulse[shock & (c > o)] = 1
+    pulse[shock & (c < o)] = -1
+    return _hold(pulse, 3)
 
 
 register(Hypothesis(
-    name="candles.expansion_rango",
+    name="candles.range_expansion",
     family="candles",
-    rationale="Una vela cuyo rango verdadero dobla al ATR de las 14 anteriores no es ruido: es un "
-              "reprecio en el que el libro se atravesó entero. Nuestro mecanismo es informativo: "
-              "ha entrado información nueva, la volatilidad se agrupa, y quien tiene que "
-              "reposicionar una cartera grande no lo hace en una sola vela, así que la deriva "
-              "continúa en el sentido en que cerró el cuerpo. El ATR se compara retardado una vela "
-              "para que la referencia sea la norma previa al shock y no una norma ya contaminada "
-              "por él. La señal se mantiene tres velas porque el mecanismo declarado —"
-              "reposicionamiento troceado— dura más de una, no porque tres funcione mejor.",
-    prior="Esperamos continuación: ventaja positiva en el sentido del cuerpo de la vela del "
-          "shock. Existe un mecanismo rival explícito y creíble —que el rango grande sea una "
-          "cascada de liquidaciones, es decir flujo forzado sin información, que los creadores de "
-          "mercado revierten al recotizar— y ese mecanismo predice el signo CONTRARIO. Por eso el "
-          "signo del resultado es informativo pase lo que pase: positivo apoya la lectura "
-          "informativa, negativo apoya la de flujo forzado, y cero dice que ambas se cancelan "
-          "porque no distinguimos ex ante los dos casos, que es lo que consideramos más probable "
-          "en 15m. "
-          "NOTA DE AUDITORÍA (2026-09-08): `volatility.wide_range_thrust` aplica esta misma regla "
-          "(rango verdadero mayor que el doble del ATR previo, dirección dada por el cuerpo) con "
-          "una condición añadida —que el ATR de la vela previa estuviera bajo su mediana de 100— y "
-          "sin mantener la señal tres velas. Medidos sobre datos, sus eventos son un SUBCONJUNTO "
-          "casi exacto de los de esta hipótesis (263 de 267 coinciden vela a vela). No se elimina "
-          "ninguna porque el par sin filtro / con filtro es informativo y ese contraste no estaba "
-          "declarado en ninguno de los dos ficheros, pero queda dicho ahora: no son dos ensayos "
-          "independientes y no deben leerse como confirmación cruzada entre familias si ambas "
-          "salen positivas. El contraste que importa es si la puerta de compresión mejora a esta.",
-    fn=_expansion_rango,
-    params={"atr": 14, "multiplo": 2.0, "mantener": 3},
+    rationale="A candle whose true range doubles the ATR of the previous 14 is not noise: it is a "
+              "repricing in which the book was traded straight through. Our mechanism is "
+              "informational: new information has come in, volatility clusters, and whoever has to "
+              "reposition a large portfolio does not do it inside a single candle, so the drift "
+              "carries on in the direction the body closed. The ATR is compared lagged by one "
+              "candle so that the reference is the norm BEFORE the shock and not a norm already "
+              "contaminated by it. The signal is held for three candles because the declared "
+              "mechanism —sliced repositioning— lasts more than one, not because three works "
+              "better.",
+    prior="We expect continuation: a positive edge in the direction of the shock candle's body. "
+          "There is an explicit and credible rival mechanism —that the large range is a liquidation "
+          "cascade, that is, forced flow carrying no information, which market makers revert as "
+          "they requote— and that mechanism predicts the OPPOSITE sign. That is why the sign of the "
+          "result is informative whatever happens: positive supports the informational reading, "
+          "negative supports the forced-flow one, and zero says the two cancel out because we do "
+          "not tell the two cases apart ex ante, which is what we consider most likely on 15m. "
+          "AUDIT NOTE (2026-09-08): `volatility.wide_range_thrust` applies this very same rule "
+          "(true range greater than twice the previous ATR, direction given by the body) with one "
+          "added condition —that the previous candle's ATR was below its 100-bar median— and "
+          "without holding the signal for three candles. Measured on data, its events are an almost "
+          "exact SUBSET of this hypothesis's (263 of 267 match candle for candle). Neither is "
+          "removed, because the unfiltered / filtered pair is informative and that contrast was "
+          "declared in neither of the two files, but let it be said now: they are not two "
+          "independent trials and they must not be read as cross-family confirmation if both come "
+          "out positive. The contrast that matters is whether the compression gate improves on this "
+          "one.",
+    fn=_range_expansion,
+    params={"atr": 14, "multiple": 2.0, "hold": 3},
     timeframes=("15m", "1h", "4h"),
     min_warmup=200,
 ))
 
 
 # ---------------------------------------------------------------------------
-# 10. Vela interior y ruptura de la vela madre.
+# 10. Inside candle and break of the mother candle.
 # ---------------------------------------------------------------------------
-def _vela_interior_ruptura(s: Series) -> np.ndarray:
+def _inside_bar_break(s: Series) -> np.ndarray:
     out = np.zeros(len(s), dtype=np.int8)
-    if len(s) < _MIN_VELAS:
+    if len(s) < _MIN_BARS:
         return out
     _o, h, l, c = _ohlc(s)
-    h1, l1 = _retardo(h, 1), _retardo(l, 1)
-    h2, l2 = _retardo(h, 2), _retardo(l, 2)
-    ok = _sin_nan(c, h1, l1, h2, l2)
-    dentro = ok & (h1 <= h2) & (l1 >= l2)
-    out[dentro & (c > h2)] = 1
-    out[dentro & (c < l2)] = -1
+    h1, l1 = _lag(h, 1), _lag(l, 1)
+    h2, l2 = _lag(h, 2), _lag(l, 2)
+    ok = _no_nan(c, h1, l1, h2, l2)
+    inside = ok & (h1 <= h2) & (l1 >= l2)
+    out[inside & (c > h2)] = 1
+    out[inside & (c < l2)] = -1
     return out
 
 
 register(Hypothesis(
-    name="candles.vela_interior_ruptura",
+    name="candles.inside_bar_break",
     family="candles",
-    rationale="Una vela contenida dentro del rango de la anterior es una contracción del rango "
-              "negociado: los dos lados aceptan el mismo intervalo de precios y la incertidumbre "
-              "baja. Ahí se acumulan órdenes de protección a ambos lados de los extremos de la "
-              "vela madre. Que el cierre de la vela siguiente quede fuera de ese rango significa "
-              "que la liquidez pasiva de un lado se ha consumido, y el camino de menor resistencia "
-              "pasa a ser el racimo de stops del otro. La ruptura se evalúa con el CIERRE de la "
-              "vela en curso contra extremos de velas ya cerradas, nunca con el máximo intradía, "
-              "para que la decisión sea de la vela i y no de datos que solo se conocen después.",
-    prior="Esperamos continuación con ventaja positiva pequeña en 4h y 1d. Con poca confianza: hay "
-          "un mecanismo contrario igual de plausible en BTC, que el racimo de stops sea el "
-          "OBJETIVO del flujo agresivo y no su combustible, en cuyo caso la ruptura es falsa por "
-          "construcción y el signo sale negativo. Esperamos además que empeore al bajar de "
-          "timeframe, porque la contracción de rango en 1h es en su mayoría horario de poco "
-          "volumen y no acuerdo entre participantes. Falsada por un signo negativo estable. "
-          "NOTA DE AUDITORÍA (2026-09-08): esta hipótesis estaba registrada DOS VECES. "
-          "`structure.inside_bar_break` era la misma regla —misma contención, mismos extremos de "
-          "la vela madre como nivel, misma confirmación por cierre— y sus 244 eventos eran un "
-          "subconjunto estricto de los 293 de esta; se ha eliminado allí y esta es la registración "
-          "superviviente. Queda además declarado que `volatility.inside_bar_breakout` opera sobre "
-          "el MISMO patrón de dos velas pero rompiendo los extremos de la vela INTERIOR en vez de "
-          "los de la madre: como el máximo de la interior es menor, todo evento de esta hipótesis "
-          "es también evento de aquella. Son niveles distintos y afirmaciones mecánicas distintas, "
-          "así que aquella se conserva, pero las dos son ensayos DEPENDIENTES y la corrección por "
-          "contraste múltiple debe tratarlas como tales.",
-    fn=_vela_interior_ruptura,
-    params={"velas_madre": 1, "confirmacion": "cierre"},
+    rationale="A candle contained within the range of the previous one is a contraction of the "
+              "traded range: both sides accept the same price interval and uncertainty drops. "
+              "Protective orders pile up there on both sides of the mother candle's extremes. The "
+              "next candle closing outside that range means the passive liquidity on one side has "
+              "been consumed, and the path of least resistance becomes the cluster of stops on the "
+              "other. The break is judged with the CLOSE of the candle in progress against extremes "
+              "of candles already closed, never with the intrabar high, so that the decision "
+              "belongs to candle i and not to data that is only known afterwards.",
+    prior="We expect continuation with a small positive edge on 4h and 1d. With low confidence: "
+          "there is an equally plausible opposing mechanism in BTC, namely that the stop cluster is "
+          "the TARGET of the aggressive flow and not its fuel, in which case the break is false by "
+          "construction and the sign comes out negative. We also expect it to get worse as the "
+          "timeframe drops, because range contraction on 1h is mostly low-volume hours and not "
+          "agreement between participants. Falsified by a stable negative sign. "
+          "AUDIT NOTE (2026-09-08): this hypothesis was registered TWICE. "
+          "`structure.inside_bar_break` was the same rule —same containment, same mother-candle "
+          "extremes as the level, same confirmation by close— and its 244 events were a strict "
+          "subset of this one's 293; it has been removed there and this is the surviving "
+          "registration. It is further declared that `volatility.inside_bar_breakout` operates on "
+          "the SAME two-candle pattern but breaking the extremes of the INSIDE candle rather than "
+          "those of the mother: since the inside candle's high is the lower of the two, every event "
+          "of this hypothesis is also an event of that one. They are different levels and different "
+          "mechanical claims, so that one is kept, but the two are DEPENDENT trials and the "
+          "multiple-comparisons correction must treat them as such.",
+    fn=_inside_bar_break,
+    params={"mother_bars": 1, "confirmation": "close"},
     timeframes=("1h", "4h", "1d"),
     min_warmup=200,
 ))
 
 
 # ---------------------------------------------------------------------------
-# 11. Hueco de rango entre velas consecutivas en un mercado 24/7.
+# 11. A range gap between consecutive candles in a 24/7 market.
 # ---------------------------------------------------------------------------
-def _hueco_rango(s: Series) -> np.ndarray:
+def _range_gap(s: Series) -> np.ndarray:
     out = np.zeros(len(s), dtype=np.int8)
-    if len(s) < _MIN_VELAS:
+    if len(s) < _MIN_BARS:
         return out
     _o, h, l, c = _ohlc(s)
-    h1, l1 = _retardo(h, 1), _retardo(l, 1)
-    ok = _sin_nan(h, l, h1, l1)
+    h1, l1 = _lag(h, 1), _lag(l, 1)
+    ok = _no_nan(h, l, h1, l1)
     out[ok & (l > h1)] = -1
     out[ok & (h < l1)] = 1
     return out
 
 
 register(Hypothesis(
-    name="candles.hueco_rango",
+    name="candles.range_gap",
     family="candles",
-    rationale="BTC cotiza sin interrupción, así que un hueco no puede ser el resultado de "
-              "información acumulada mientras el mercado estaba cerrado: si el rango entero de una "
-              "vela queda por encima del máximo de la anterior, el libro se ha vaciado y el precio "
-              "ha viajado sin negociación intermedia. Eso es flujo forzado —liquidaciones en "
-              "cadena o un tramo de liquidez muy fina— y no un reprecio consentido: en cuanto los "
-              "creadores de mercado vuelven a cotizar, el hueco se rellena. Advertencia registrada "
-              "de antemano: un agujero en los datos del proveedor produce exactamente esta misma "
-              "forma, así que un resultado positivo obliga a comprobar la continuidad de las "
-              "marcas de tiempo antes de creérselo.",
-    prior="Esperamos reversión: ventaja positiva al operar CONTRA el hueco, mayor en 15m que en "
-          "4h. Esperamos que falle cuando el hueco responde a noticia real (un reprecio legítimo "
-          "que no se rellena), caso que no sabemos distinguir ex ante, y esperamos muy pocas "
-          "señales en 4h, donde un hueco de rango completo implica un cambio de régimen y debería "
-          "continuar en vez de revertir. Falsada si el signo es de continuación en 15m y 1h.",
-    fn=_hueco_rango,
-    params={"tipo": "hueco_de_rango_completo"},
+    rationale="BTC trades without interruption, so a gap cannot be the result of information piling "
+              "up while the market was closed: if a candle's entire range sits above the previous "
+              "candle's high, the book has been emptied and the price has travelled with no trading "
+              "in between. That is forced flow —chained liquidations, or a stretch of very thin "
+              "liquidity— and not a consented repricing: as soon as the market makers quote again, "
+              "the gap fills. Warning registered in advance: a hole in the provider's data produces "
+              "exactly this same shape, so a positive result obliges us to check the continuity of "
+              "the timestamps before believing it.",
+    prior="We expect reversion: a positive edge trading AGAINST the gap, larger on 15m than on 4h. "
+          "We expect it to fail when the gap answers to real news (a legitimate repricing that does "
+          "not fill), a case we cannot tell apart ex ante, and we expect very few signals on 4h, "
+          "where a full-range gap implies a change of regime and ought to continue rather than "
+          "revert. Falsified if the sign is one of continuation on 15m and 1h.",
+    fn=_range_gap,
+    params={"type": "full_range_gap"},
     timeframes=("15m", "1h", "4h"),
     min_warmup=200,
 ))
 
 
 # ---------------------------------------------------------------------------
-# 12. Tres soldados / tres cuervos: la huella de una orden troceada.
+# 12. Three soldiers / three crows: the footprint of an order worked in slices.
 # ---------------------------------------------------------------------------
-def _tres_velas_direccionales(s: Series) -> np.ndarray:
+def _three_directional_bars(s: Series) -> np.ndarray:
     n = len(s)
     out = np.zeros(n, dtype=np.int8)
-    if n < _MIN_VELAS:
+    if n < _MIN_BARS:
         return out
     o, h, l, c = _ohlc(s)
-    sol = np.asarray(talib.CDL3WHITESOLDIERS(o, h, l, c), dtype=np.float64)
-    cue = np.asarray(talib.CDL3BLACKCROWS(o, h, l, c), dtype=np.float64)
-    ok = _sin_nan(sol, cue)
-    pulso = np.zeros(n, dtype=np.int8)
-    pulso[ok & (sol > 0)] = 1
-    pulso[ok & (cue < 0)] = -1
-    return _mantener(pulso, 3)
+    soldiers = np.asarray(talib.CDL3WHITESOLDIERS(o, h, l, c), dtype=np.float64)
+    crows = np.asarray(talib.CDL3BLACKCROWS(o, h, l, c), dtype=np.float64)
+    ok = _no_nan(soldiers, crows)
+    pulse = np.zeros(n, dtype=np.int8)
+    pulse[ok & (soldiers > 0)] = 1
+    pulse[ok & (crows < 0)] = -1
+    return _hold(pulse, 3)
 
 
 register(Hypothesis(
-    name="candles.tres_velas_direccionales",
+    name="candles.three_directional_bars",
     family="candles",
-    rationale="Tres velas seguidas con cuerpo amplio, cada una cerrando cerca de su máximo y por "
-              "encima de la anterior, no es un impulso: es la huella de una orden grande que se "
-              "está ejecutando por tramos a lo largo del tiempo. Un impulso especulativo se agota "
-              "en una vela; un programa de ejecución sigue un calendario y por eso deja tres velas "
-              "iguales. Si la lectura es correcta, la parte no ejecutada del programa sigue "
-              "comprando después de la tercera vela, y por eso la señal se mantiene tres velas: es "
-              "el horizonte del mecanismo declarado, no un valor elegido por rendimiento.",
-    prior="Esperamos continuación débil. Débil porque la entrada es tardía por construcción: para "
-          "cuando el patrón se completa, tres velas del movimiento ya han ocurrido y compramos "
-          "contra el propio ejecutor. Registramos de antemano que ambos patrones son raros y que "
-          "el número de señales será pequeño, así que el intervalo será ancho y la corrección por "
-          "contraste múltiple debe aplicarse igual: un resultado espectacular con n pequeña cuenta "
-          "como no concluyente, no como hallazgo. Falsada por signo negativo, que apoyaría la "
-          "lectura de agotamiento.",
-    fn=_tres_velas_direccionales,
-    params={"patrones": "CDL3WHITESOLDIERS/CDL3BLACKCROWS", "mantener": 3},
+    rationale="Three candles in a row with wide bodies, each closing near its high and above the "
+              "previous one, is not an impulse: it is the footprint of a large order being executed "
+              "in slices over time. A speculative impulse burns out in one candle; an execution "
+              "programme follows a schedule and that is why it leaves three identical candles. If "
+              "the reading is right, the unexecuted part of the programme goes on buying after the "
+              "third candle, and that is why the signal is held for three candles: it is the "
+              "horizon of the declared mechanism, not a value chosen for performance.",
+    prior="We expect weak continuation. Weak because the entry is late by construction: by the time "
+          "the pattern completes, three candles of the move have already happened and we are buying "
+          "against the executor itself. We register in advance that both patterns are rare and that "
+          "the number of signals will be small, so the interval will be wide and the "
+          "multiple-comparisons correction must be applied all the same: a spectacular result with "
+          "a small n counts as inconclusive, not as a finding. Falsified by a negative sign, which "
+          "would support the exhaustion reading.",
+    fn=_three_directional_bars,
+    params={"patterns": "CDL3WHITESOLDIERS/CDL3BLACKCROWS", "hold": 3},
     timeframes=("4h", "1d"),
     min_warmup=200,
 ))
 
 
 # ---------------------------------------------------------------------------
-# 13. Flujo de cuerpos sobre 20 velas: cuánto del rango se convierte en avance (estado).
+# 13. Body flow over 20 candles: how much of the range turns into progress (state).
 # ---------------------------------------------------------------------------
-def _flujo_cuerpos(s: Series) -> np.ndarray:
+def _body_flow(s: Series) -> np.ndarray:
     n = len(s)
     out = np.zeros(n, dtype=np.int8)
-    if n < _MIN_VELAS:
+    if n < _MIN_BARS:
         return out
     o, h, l, c = _ohlc(s)
-    suma_cuerpo = talib.SUM(c - o, 20)
-    suma_rango = talib.SUM(h - l, 20)
-    ok = _sin_nan(suma_cuerpo, suma_rango) & (suma_rango > 0.0)
-    flujo = np.zeros(n, dtype=np.float64)
-    np.divide(suma_cuerpo, suma_rango, out=flujo, where=ok)
-    out[ok & (flujo >= 0.30)] = 1
-    out[ok & (flujo <= -0.30)] = -1
+    body_sum = talib.SUM(c - o, 20)
+    range_sum = talib.SUM(h - l, 20)
+    ok = _no_nan(body_sum, range_sum) & (range_sum > 0.0)
+    flow = np.zeros(n, dtype=np.float64)
+    np.divide(body_sum, range_sum, out=flow, where=ok)
+    out[ok & (flow >= 0.30)] = 1
+    out[ok & (flow <= -0.30)] = -1
     return out
 
 
 register(Hypothesis(
-    name="candles.flujo_cuerpos_20",
+    name="candles.body_flow_20",
     family="candles",
-    rationale="Agrega la forma de la vela en lugar de buscar un patrón: mide qué proporción de "
-              "todo el rango negociado en 20 velas se ha convertido en avance neto de apertura a "
-              "cierre. Cuando esa proporción es alta, las sesiones las está ganando "
-              "sistemáticamente el mismo lado y el rango es recorrido, no ida y vuelta: hay "
-              "participantes direccionales dominando sobre los creadores de mercado. Cuando es "
-              "baja, el precio se mueve pero se devuelve dentro de cada vela, que es la firma del "
-              "inventario de los creadores de mercado. No es una media móvil: ignora los saltos "
-              "entre velas y pondera por el rango negociado, así que dos series con idéntico "
-              "recorrido de precio pueden dar valores opuestos.",
-    prior="Esperamos ventaja positiva en régimen tendencial y nula o negativa en lateral, y "
-          "esperamos que el conjunto de las dos salga apenas por encima de cero. La afirmación "
-          "fuerte y falsable es de valor incremental: si la forma de la vela no añade nada sobre "
-          "la simple dirección del precio, esta hipótesis debería ser indistinguible de un filtro "
-          "de tendencia corriente sobre las mismas velas; que aporte algo por encima de eso es lo "
-          "que la haría interesante, y no lo damos por hecho.",
-    fn=_flujo_cuerpos,
-    params={"ventana": 20, "umbral": 0.30},
+    rationale="Aggregates candle shape instead of hunting for a pattern: it measures what "
+              "proportion of all the range traded over 20 candles has turned into net open-to-close "
+              "progress. When that proportion is high, the same side is systematically winning the "
+              "sessions and the range is being travelled, not round-tripped: there are directional "
+              "participants dominating the market makers. When it is low, price moves but is handed "
+              "back within each candle, which is the signature of market-maker inventory. It is not "
+              "a moving average: it ignores the jumps between candles and weights by the range "
+              "traded, so two series with identical price travel can give opposite values.",
+    prior="We expect a positive edge in a trending regime and none or a negative one in a range, "
+          "and we expect the two together to come out barely above zero. The strong, falsifiable "
+          "claim is one of incremental value: if candle shape adds nothing over the plain direction "
+          "of price, this hypothesis should be indistinguishable from an ordinary trend filter over "
+          "the same candles; that it contributes something above that is what would make it "
+          "interesting, and we do not take it for granted.",
+    fn=_body_flow,
+    params={"window": 20, "threshold": 0.30},
     timeframes=("1h", "4h", "1d"),
     min_warmup=200,
 ))

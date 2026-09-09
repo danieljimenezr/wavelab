@@ -1,9 +1,9 @@
-"""Punto de entrada de los grabadores en sombra.
+"""Entry point for the shadow recorders.
 
     python -m wavelab.collect
 
-Arranca ANTES que el resto del sistema y a propósito: no consume nada de lo que graba, pero lo que
-graba es lo único del proyecto que no se puede recuperar más tarde a ningún precio.
+Starts BEFORE the rest of the system, and deliberately so: it consumes nothing of what it records,
+but what it records is the only thing in the project that cannot be recovered later at any price.
 """
 
 from __future__ import annotations
@@ -23,12 +23,12 @@ SYMBOLS = os.environ.get("WAVELAB_SYMBOLS", "BTCUSDT").split(",")
 
 async def main() -> int:
     raw = DATA / "raw"
-    # Dos fuentes de liquidaciones a propósito: ninguna ve el mercado entero, y si una se
-    # queda muda —como hizo Binance— la otra sigue grabando mientras nos enteramos.
+    # Two liquidation sources on purpose: neither one sees the whole market, and if one goes
+    # silent — as Binance did — the other keeps recording while we find out.
     liqs = [LiquidationRecorder(raw / "liquidations", s) for s in ("okx", "bybit")]
     deriv = DerivativesPoller(raw / "derivatives", SYMBOLS[0])
 
-    print(f"[collect] datos en {DATA.resolve()} | símbolos {SYMBOLS}", flush=True)
+    print(f"[collect] data in {DATA.resolve()} | symbols {SYMBOLS}", flush=True)
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -36,29 +36,29 @@ async def main() -> int:
         with __import__("contextlib").suppress(NotImplementedError):
             loop.add_signal_handler(sig, stop.set)
 
-    tareas = [asyncio.create_task(l.run(), name=f"liq-{l.source}") for l in liqs]
-    tareas.append(asyncio.create_task(deriv.run(), name="derivatives"))
+    tasks = [asyncio.create_task(l.run(), name=f"liq-{l.source}") for l in liqs]
+    tasks.append(asyncio.create_task(deriv.run(), name="derivatives"))
 
-    async def latido() -> None:
+    async def heartbeat() -> None:
         while not stop.is_set():
             await asyncio.sleep(600)
-            partes = " ".join(f"{l.source}={l.n}(mudo {l.silent_seconds/60:.0f}m)" for l in liqs)
-            print(f"[collect] liquidaciones: {partes} | sondeos={deriv.n}", flush=True)
-            # Una conexión ABIERTA que no entrega nada es el fallo de Binance. Vigilamos el
-            # silencio, no el estado del socket.
+            parts = " ".join(f"{l.source}={l.n}(silent {l.silent_seconds/60:.0f}m)" for l in liqs)
+            print(f"[collect] liquidations: {parts} | polls={deriv.n}", flush=True)
+            # An OPEN connection that delivers nothing is the Binance failure mode. We watch the
+            # silence, not the state of the socket.
             for l in liqs:
                 if l.silent_seconds > 6 * 3600:
-                    print(f"[collect] AVISO: {l.source} lleva {l.silent_seconds/3600:.1f} h "
-                          "sin un solo mensaje pese a estar conectado", flush=True)
+                    print(f"[collect] WARNING: {l.source} has gone {l.silent_seconds/3600:.1f} h "
+                          "without a single message despite being connected", flush=True)
 
-    tareas.append(asyncio.create_task(latido(), name="heartbeat"))
+    tasks.append(asyncio.create_task(heartbeat(), name="heartbeat"))
     await stop.wait()
-    print("[collect] parando…", flush=True)
-    for t in tareas:
+    print("[collect] stopping…", flush=True)
+    for t in tasks:
         t.cancel()
-    await asyncio.gather(*tareas, return_exceptions=True)
-    print(f"[collect] total: {sum(l.n for l in liqs)} liquidaciones, "
-          f"{deriv.n} sondeos", flush=True)
+    await asyncio.gather(*tasks, return_exceptions=True)
+    print(f"[collect] total: {sum(l.n for l in liqs)} liquidations, "
+          f"{deriv.n} polls", flush=True)
     return 0
 
 

@@ -1,16 +1,16 @@
-"""Hidratación del histórico. Cuatro etapas: listar, descargar, verificar, ingestar.
+"""History hydration. Four stages: list, download, verify, ingest.
 
-    python -m wavelab.store.hydrate            # todo lo publicado (2017-08 -> hoy)
-    python -m wavelab.store.hydrate --quick    # últimos 2 años, para ver un gráfico ya
+    python -m wavelab.store.hydrate            # everything published (2017-08 -> today)
+    python -m wavelab.store.hydrate --quick    # last 2 years, to get a chart up right away
 
-Por qué el archivo y no REST: dos años de velas de 1m son 24 ficheros / ~50 MB / ~50 s a la
-velocidad medida desde España (1,1 MB/s), frente a 1.051 llamadas REST y ~33 minutos. Y el archivo
-llega hasta 2017-08; REST también, pero paginando durante horas.
+Why the archive and not REST: two years of 1m bars is 24 files / ~50 MB / ~50 s at the speed
+measured from Spain (1.1 MB/s), against 1,051 REST calls and ~33 minutes. And the archive reaches
+back to 2017-08; REST does too, but only by paginating for hours.
 
-Tres niveles de granularidad, porque el archivo no publica el mes en curso hasta que termina:
-  1. mensual  — meses completos (lo masivo)
-  2. diario   — días del mes en curso
-  3. REST     — las últimas horas, que aún no tienen fichero diario
+Three levels of granularity, because the archive does not publish the current month until it ends:
+  1. monthly — complete months (the bulk of it)
+  2. daily   — days of the current month
+  3. REST    — the last few hours, which do not have a daily file yet
 """
 
 from __future__ import annotations
@@ -43,7 +43,8 @@ def _daily_url(symbol: str, day: date) -> str:
 
 
 async def _fetch(client: httpx.AsyncClient, url: str) -> bytes | None:
-    """Descarga y verifica el checksum. Devuelve None si el fichero no existe (404 legítimo)."""
+    """Downloads and verifies the checksum. Returns None if the file does not exist (a legitimate
+    404)."""
     r = await client.get(url)
     if r.status_code == 404:
         return None
@@ -51,7 +52,7 @@ async def _fetch(client: httpx.AsyncClient, url: str) -> bytes | None:
     raw = r.content
     chk = await client.get(url + ".CHECKSUM")
     if chk.status_code == 200:
-        # Un ZIP truncado a veces descomprime "bien" y produce un mes con la mitad de las velas.
+        # A truncated ZIP sometimes decompresses "fine" and yields a month with half the bars.
         verify_checksum(raw, chk.text)
     return raw
 
@@ -65,90 +66,92 @@ async def hydrate(
     store = BarStore(Path(data_dir) / "bars")
     t0 = time.perf_counter()
 
-    print(f"[hydrate] listando meses publicados de {symbol} 1m…", flush=True)
-    meses = list_available_months(symbol, TF_1M, Market.SPOT)
-    if not meses:
-        print("[hydrate] el archivo no devolvió ningún mes", file=sys.stderr)
+    print(f"[hydrate] listing published months for {symbol} 1m…", flush=True)
+    months = list_available_months(symbol, TF_1M, Market.SPOT)
+    if not months:
+        print("[hydrate] the archive returned no months at all", file=sys.stderr)
         return 1
     if quick:
-        corte = date.today().replace(day=1) - timedelta(days=730)
-        meses = [m for m in meses if m >= corte]
-    print(f"[hydrate] {len(meses)} meses: {meses[0]:%Y-%m} → {meses[-1]:%Y-%m}", flush=True)
+        cutoff = date.today().replace(day=1) - timedelta(days=730)
+        months = [m for m in months if m >= cutoff]
+    print(f"[hydrate] {len(months)} months: {months[0]:%Y-%m} → {months[-1]:%Y-%m}", flush=True)
 
-    ya = set(store.months(symbol))
-    # El mes más reciente ya guardado puede estar incompleto (se ingestó a mitad de mes),
-    # así que se vuelve a bajar. Ingestar es idempotente, no cuesta nada.
-    pendientes = [m for m in meses if f"{m:%Y-%m}" not in ya or f"{m:%Y-%m}" == max(ya, default="")]
-    print(f"[hydrate] {len(ya)} ya presentes, {len(pendientes)} por descargar", flush=True)
+    already = set(store.months(symbol))
+    # The most recent stored month may be incomplete (it was ingested mid-month), so it gets
+    # downloaded again. Ingesting is idempotent, it costs nothing.
+    pending = [m for m in months
+               if f"{m:%Y-%m}" not in already or f"{m:%Y-%m}" == max(already, default="")]
+    print(f"[hydrate] {len(already)} already present, {len(pending)} to download", flush=True)
 
-    total_bytes = escritas = duplicadas = 0
+    total_bytes = written = duplicated = 0
     sem = asyncio.Semaphore(concurrency)
     limits = httpx.Limits(max_connections=concurrency + 2)
 
     async with httpx.AsyncClient(timeout=120.0, follow_redirects=True, limits=limits) as client:
 
-        async def uno(mes: date) -> tuple[date, bytes | None]:
+        async def one(month: date) -> tuple[date, bytes | None]:
             async with sem:
-                url = f"{BASE_URL}/data/spot/monthly/klines/{symbol.upper()}/1m/{symbol.upper()}-1m-{mes:%Y-%m}.zip"
-                return mes, await _fetch(client, url)
+                url = f"{BASE_URL}/data/spot/monthly/klines/{symbol.upper()}/1m/{symbol.upper()}-1m-{month:%Y-%m}.zip"
+                return month, await _fetch(client, url)
 
-        for i in range(0, len(pendientes), concurrency):
-            lote = pendientes[i:i + concurrency]
-            for mes, raw in await asyncio.gather(*(uno(m) for m in lote)):
+        for i in range(0, len(pending), concurrency):
+            batch = pending[i:i + concurrency]
+            for month, raw in await asyncio.gather(*(one(m) for m in batch)):
                 if raw is None:
-                    print(f"  {mes:%Y-%m}: no publicado", flush=True)
+                    print(f"  {month:%Y-%m}: not published", flush=True)
                     continue
                 total_bytes += len(raw)
-                df = parse_klines_zip(raw, TF_1M, symbol, Market.SPOT, mes)
+                df = parse_klines_zip(raw, TF_1M, symbol, Market.SPOT, month)
                 r = store.ingest(symbol, df)
-                escritas += r.written
-                duplicadas += r.duplicates
-                print(f"  {mes:%Y-%m}: {len(df):>6,} velas → {r.written:>6,} nuevas "
+                written += r.written
+                duplicated += r.duplicates
+                print(f"  {month:%Y-%m}: {len(df):>6,} bars → {r.written:>6,} new "
                       f"({len(raw)/1e6:.1f} MB)", flush=True)
 
-        # --- días del mes en curso, que aún no tienen fichero mensual ---
-        hoy = datetime.now(UTC).date()
-        dias = [hoy - timedelta(days=k) for k in range(1, 35)]
-        dias = [d for d in dias if d >= hoy.replace(day=1)] or [hoy - timedelta(days=1)]
-        print(f"[hydrate] {len(dias)} día(s) del mes en curso…", flush=True)
+        # --- days of the current month, which have no monthly file yet ---
+        today = datetime.now(UTC).date()
+        days = [today - timedelta(days=k) for k in range(1, 35)]
+        days = [d for d in days if d >= today.replace(day=1)] or [today - timedelta(days=1)]
+        print(f"[hydrate] {len(days)} day(s) of the current month…", flush=True)
 
-        async def un_dia(d: date) -> tuple[date, bytes | None]:
+        async def one_day(d: date) -> tuple[date, bytes | None]:
             async with sem:
                 return d, await _fetch(client, _daily_url(symbol, d))
 
-        for d, raw in await asyncio.gather(*(un_dia(d) for d in sorted(dias))):
+        for d, raw in await asyncio.gather(*(one_day(d) for d in sorted(days))):
             if raw is None:
                 continue
             total_bytes += len(raw)
             df = parse_klines_zip(raw, TF_1M, symbol, Market.SPOT)
             r = store.ingest(symbol, df)
-            escritas += r.written
-            duplicadas += r.duplicates
+            written += r.written
+            duplicated += r.duplicates
 
     dt = time.perf_counter() - t0
     mb = total_bytes / 1e6
-    print(f"\n[hydrate] {escritas:,} velas nuevas, {duplicadas:,} duplicadas ignoradas", flush=True)
-    print(f"[hydrate] {mb:.0f} MB en {dt:.0f} s ({mb/dt if dt else 0:.1f} MB/s)", flush=True)
+    print(f"\n[hydrate] {written:,} new bars, {duplicated:,} duplicates ignored", flush=True)
+    print(f"[hydrate] {mb:.0f} MB in {dt:.0f} s ({mb/dt if dt else 0:.1f} MB/s)", flush=True)
 
     ms = store.months(symbol)
     if ms:
         lo = int(datetime.strptime(ms[0], "%Y-%m").replace(tzinfo=UTC).timestamp() * 1000)
         hi = int(time.time() * 1000)
         pres, tot, frac = store.coverage(symbol, lo, hi)
-        print(f"[hydrate] cobertura {ms[0]} → {ms[-1]}: {pres:,}/{tot:,} velas ({frac:.2%})",
+        print(f"[hydrate] coverage {ms[0]} → {ms[-1]}: {pres:,}/{tot:,} bars ({frac:.2%})",
               flush=True)
-        faltan = tot - pres
-        if faltan:
-            print(f"[hydrate] faltan {faltan:,} velas de 1m. Algunas son paradas reales de "
-                  "Binance; el relleno REST cubrirá el resto en el arranque del motor.", flush=True)
+        missing = tot - pres
+        if missing:
+            print(f"[hydrate] {missing:,} 1m bars missing. Some of them are real Binance outages; "
+                  "the REST backfill will cover the rest when the engine starts.", flush=True)
     return 0
 
 
 def _main() -> int:
-    ap = argparse.ArgumentParser(description="Hidrata el histórico de velas desde data.binance.vision")
+    ap = argparse.ArgumentParser(
+        description="Hydrates the bar history from data.binance.vision")
     ap.add_argument("--symbol", default="BTCUSDT")
     ap.add_argument("--data-dir", default=None)
-    ap.add_argument("--quick", action="store_true", help="solo los últimos 2 años")
+    ap.add_argument("--quick", action="store_true", help="only the last 2 years")
     ap.add_argument("--concurrency", type=int, default=6)
     a = ap.parse_args()
     import os

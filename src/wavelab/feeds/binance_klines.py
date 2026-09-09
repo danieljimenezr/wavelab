@@ -1,13 +1,12 @@
-"""Velas de 1m en vivo, con curado de huecos en cada reconexión.
+"""Live 1m bars, with gap healing on every reconnect.
 
-La única serie que se almacena es 1m; todo lo demás se resamplea en local. Si cada timeframe
-se pidiese por separado, sus fronteras y sus huecos no coincidirían y la lógica de acuerdo entre
-timeframes mediría ruido de alineación en vez de estructura de mercado.
+The only series stored is 1m; everything else is resampled locally. If each timeframe were requested
+separately, their boundaries and their gaps would not line up and the cross-timeframe agreement logic
+would be measuring alignment noise instead of market structure.
 
-El curado de huecos se ejecuta en CADA reconexión, no solo tras el corte de 24 h que Binance hace
-por diseño. Un reinicio del servicio, un despliegue o un corte de red dejan exactamente el mismo
-agujero, y un agujero sin curar no lanza ningún error: simplemente hace que una ventana de N velas
-abarque más tiempo del que dice.
+Gap healing runs on EVERY reconnect, not only after the 24 h cut Binance makes by design. A service
+restart, a deploy or a network outage leave exactly the same hole, and an unhealed hole raises no
+error at all: it simply makes a window of N bars span more time than it claims to.
 """
 
 from __future__ import annotations
@@ -36,7 +35,7 @@ def _to_bar(k: dict, symbol: str, tf: Timeframe) -> Bar:
 
 
 class KlineFeed:
-    """Emite velas de 1m: cerradas y, entre medias, la que está en curso."""
+    """Emits 1m bars: the closed ones and, in between, the one still forming."""
 
     def __init__(self, symbol: str = "BTCUSDT") -> None:
         self.symbol = symbol.upper()
@@ -48,63 +47,63 @@ class KlineFeed:
 
     @property
     def silent_seconds(self) -> float:
-        """Una conexión ABIERTA que no entrega nada es un modo de fallo real y observado
-        (el WebSocket de futuros de Binance hace exactamente eso). Se vigila el silencio."""
+        """An OPEN connection that delivers nothing is a real, observed failure mode (the Binance
+        futures WebSocket does exactly that). So it is the silence that gets watched."""
         return (time.time() * 1000 - self.last_msg_ms) / 1000 if self.last_msg_ms else float("inf")
 
-    async def heal(self, desde_ms: int, hasta_ms: int) -> list[Bar]:
-        """Rellena por REST el hueco entre la última vela conocida y ahora."""
-        if hasta_ms <= desde_ms:
+    async def heal(self, start_ms: int, end_ms: int) -> list[Bar]:
+        """Fill the gap between the last known bar and now over REST."""
+        if end_ms <= start_ms:
             return []
         async with BinanceREST() as c:
-            velas = await c.heal_gap(self.symbol, TF_1M, desde_ms, hasta_ms)
-        self.healed += len(velas)
-        return velas
+            bars = await c.heal_gap(self.symbol, TF_1M, start_ms, end_ms)
+        self.healed += len(bars)
+        return bars
 
     async def stream(
         self,
-        desde_ms: int | None = None,
+        start_ms: int | None = None,
         on_heal: Callable[[list[Bar]], None] | None = None,
     ) -> AsyncIterator[Bar]:
-        """Velas en vivo. Antes de la primera y tras cada reconexión, cura el hueco."""
-        self.last_closed_ms = desde_ms
-        pendiente_curar = asyncio.Event()
-        pendiente_curar.set()
+        """Live bars. Before the first one, and after every reconnect, the gap is healed."""
+        self.last_closed_ms = start_ms
+        heal_pending = asyncio.Event()
+        heal_pending.set()
 
         def _up() -> None:
             self.connected = True
-            pendiente_curar.set()
+            heal_pending.set()
 
-        def _down(motivo: str) -> None:
+        def _down(reason: str) -> None:
             self.connected = False
             self.reconnects += 1
-            print(f"[klines] caído ({motivo}); curará el hueco al volver", flush=True)
+            print(f"[klines] down ({reason}); will heal the gap on the way back", flush=True)
 
         stream = f"{self.symbol.lower()}@kline_1m"
         async for msg in stream_json(SPOT_WS, [stream], on_connect=_up, on_disconnect=_down):
             self.last_msg_ms = msg["_ts_ingest_ms"]
 
-            if pendiente_curar.is_set() and self.last_closed_ms is not None:
-                pendiente_curar.clear()
-                # `- TF_1M.ms` para solapar una vela: el almacén deduplica, y solapar es la
-                # única forma de garantizar que no se pierde la vela de la frontera.
-                velas = await self.heal(self.last_closed_ms - TF_1M.ms,
-                                        int(msg["_ts_ingest_ms"]))
-                nuevas = [b for b in velas
-                          if self.last_closed_ms is None or b.open_time_ms > self.last_closed_ms]
-                if nuevas:
-                    print(f"[klines] hueco curado: {len(nuevas)} velas", flush=True)
+            if heal_pending.is_set() and self.last_closed_ms is not None:
+                heal_pending.clear()
+                # `- TF_1M.ms` to overlap by one bar: the store deduplicates, and overlapping is
+                # the only way to guarantee the boundary bar is not lost.
+                bars = await self.heal(self.last_closed_ms - TF_1M.ms,
+                                       int(msg["_ts_ingest_ms"]))
+                fresh = [b for b in bars
+                         if self.last_closed_ms is None or b.open_time_ms > self.last_closed_ms]
+                if fresh:
+                    print(f"[klines] gap healed: {len(fresh)} bars", flush=True)
                     if on_heal:
-                        on_heal(nuevas)
-                    for b in nuevas:
+                        on_heal(fresh)
+                    for b in fresh:
                         self.last_closed_ms = b.open_time_ms
                         yield b
-            elif pendiente_curar.is_set():
-                pendiente_curar.clear()
+            elif heal_pending.is_set():
+                heal_pending.clear()
 
             bar = _to_bar(msg["k"], self.symbol, TF_1M)
             if bar.is_closed:
                 if self.last_closed_ms is not None and bar.open_time_ms <= self.last_closed_ms:
-                    continue          # ya la teníamos por el curado
+                    continue          # we already had it from the healing
                 self.last_closed_ms = bar.open_time_ms
             yield bar

@@ -4,29 +4,29 @@ UV := uv
 help:
 	@grep -E '^[a-z-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "};{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
-sync:          ## Instala el entorno (CPython 3.13 vía uv)
+sync:          ## Install the environment (CPython 3.13 via uv)
 	$(UV) sync --group dev
 
-test:          ## Suite completa. La puerta de M0 vive aquí.
+test:          ## Full suite. The M0 gate lives here.
 	$(UV) run pytest
 
-bench:         ## Mide de verdad los tiempos y los anota en docs/BENCHMARKS.md
+bench:         ## Actually measures the timings and records them in docs/BENCHMARKS.md
 	$(UV) run pytest tests/bench --benchmark-only -q || true
 
 lint:
 	$(UV) run ruff check src tests
 
-run:           ## Feeds + motor + web en 127.0.0.1:8000  (M2)
+run:           ## Feeds + engine + web on 127.0.0.1:8000  (M2)
 	$(UV) run uvicorn wavelab.server.app:app --host 127.0.0.1 --port 8000
 
-hydrate:       ## Descarga el histórico desde data.binance.vision  (M1)
+hydrate:       ## Download the history from data.binance.vision  (M1)
 	$(UV) run python -m wavelab.store.hydrate
 
-provision:     ## Contención del VPS: imagen loopback, slice, units, cuotas  (M0b)
-	@echo "Requiere ssh con sudo en el nodo. Ver scripts/provision_vps.sh"
+provision:     ## VPS containment: loopback image, slice, units, quotas  (M0b)
+	@echo "Requires ssh with sudo on the node. See scripts/provision_vps.sh"
 
-contain-test:  ## Demuestra que wavelab no puede llenar el disco del host  (M0b)
-	@echo "Ver scripts/contain_test.sh — se ejecuta EN el nodo"
+contain-test:  ## Proves wavelab cannot fill the host disk  (M0b)
+	@echo "See scripts/contain_test.sh - it runs ON the node"
 
 clean:
 	rm -rf .pytest_cache .hypothesis .ruff_cache .benchmarks

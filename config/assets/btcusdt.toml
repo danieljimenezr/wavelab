@@ -1,25 +1,25 @@
-# BTC spot. Añadir otro activo = copiar este fichero y cambiar los valores. Cero código.
+# BTC spot. Adding another asset = copy this file and change the values. Zero code.
 symbol      = "BTCUSDT"
 exchange    = "binance"
 instrument  = "spot"
 asset_class = "crypto"
 
-# Filtros reales de Binance (se hidratan de exchangeInfo al arrancar y se cachean).
+# Binance's real filters (hydrated from exchangeInfo at startup and cached).
 tick_size    = 0.01
 qty_step     = 0.00001
 min_notional = 5.0
 
 fee_bps_taker = 7.5
 fee_bps_maker = 2.0
-# Spot no paga funding. El funding/OI de fapi entra como CONTEXTO cross-instrumento,
-# etiquetado como tal, nunca como coste de esta operación.
+# Spot pays no funding. The funding/OI from fapi comes in as cross-instrument CONTEXT,
+# labelled as such, never as a cost of this trade.
 has_funding = false
 
 price_space = "log"
 session     = "24x7"
-# La excepción de solape de la onda 4 es de futuros y materias primas, no de spot.
+# The wave 4 overlap exception belongs to futures and commodities, not spot.
 allow_overlap = false
-# Invalidar por cierre y no por mecha: la caza de liquidaciones es endémica en BTC.
+# Invalidate on close and not on wick: liquidation hunting is endemic in BTC.
 r3_on = "close"
 
 timeframes = ["15m", "1h", "4h", "1d"]

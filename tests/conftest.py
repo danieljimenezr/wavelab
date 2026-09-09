@@ -1,4 +1,4 @@
-"""Fixtures deterministas. Ni una sola llamada a `random` sin semilla ni al reloj de pared."""
+"""Deterministic fixtures. Not one call to `random` without a seed, nor to the wall clock."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from wavelab.core.timeframes import TF_1H, TF_15M, Timeframe
 from wavelab.core.types import Bar
 
 SYMBOL = "BTCUSDT"
-T0 = 1_600_000_000_000 - (1_600_000_000_000 % TF_1H.ms)  # alineado a rejilla UTC
+T0 = 1_600_000_000_000 - (1_600_000_000_000 % TF_1H.ms)  # aligned to the UTC grid
 
 
 def make_bars(
@@ -20,7 +20,7 @@ def make_bars(
     drop: set[int] | None = None,
     start_price: float = 30_000.0,
 ) -> list[Bar]:
-    """Paseo aleatorio con semilla fija. ``drop`` elimina índices para simular huecos reales."""
+    """Seeded random walk. ``drop`` removes indices to simulate real gaps."""
     rng = np.random.default_rng(seed)
     r = rng.standard_normal(n) * 0.004
     close = start_price * np.exp(np.cumsum(r))
@@ -50,7 +50,7 @@ def make_bars(
 
 @pytest.fixture(scope="session")
 def bars_2k() -> list[Bar]:
-    """Las 2.000 velas que exige la verificación de M0."""
+    """The 2,000 bars the M0 verification demands."""
     return make_bars(2000)
 
 

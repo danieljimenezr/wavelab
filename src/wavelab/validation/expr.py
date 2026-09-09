@@ -1,14 +1,15 @@
-"""Intérprete seguro de reglas de trading escritas por el usuario.
+"""Safe interpreter for trading rules written by the user.
 
-NO usa eval(). Recorre el AST de Python con lista blanca: si un nodo no está permitido, se rechaza.
-Esto no es paranoia: si Assay se ofrece como servicio, un eval() de una cadena que envía un
-desconocido es ejecución remota de código.
+There is NO eval() anywhere. It walks Python's own AST against an allowlist: any node that is not
+explicitly permitted is rejected. That is not paranoia: if Assay is offered as a service, calling
+eval() on a string a stranger sent you is remote code execution.
 
-Prohibido: importaciones, acceso a atributos (`().__class__`), suscripción (`x[i]`), lambdas,
-comprensiones, asignaciones, f-strings, walrus y cualquier función que no esté en la lista.
+Forbidden: imports, attribute access (`().__class__`), subscription (`x[i]`), lambdas,
+comprehensions, assignments, f-strings, the walrus operator, and any function not on the list.
 
-★ Y una restricción propia del dominio: `desplazar(x, n)` SOLO acepta n positivo. Desplazar hacia
-el futuro es mirar al futuro, y el error más caro de este oficio no debería ser ni escribible.
+★ Plus one constraint that comes from the domain rather than from security: `shift(x, n)` accepts
+positive n ONLY. Shifting forward is looking at the future, and the most expensive mistake in this
+trade should not even be expressible.
 """
 
 from __future__ import annotations
@@ -19,14 +20,14 @@ from dataclasses import dataclass
 import numpy as np
 import talib
 
-__all__ = ["FUNC_DOCS", "SAFE_FUNCS", "SERIE_DOCS", "ExprError", "build_series", "evaluate_rule"]
+__all__ = ["FUNC_DOCS", "SAFE_FUNCS", "SERIES_DOCS", "ExprError", "build_series", "evaluate_rule"]
 
 
 class ExprError(ValueError):
-    """La regla no es válida. El mensaje se le enseña al usuario tal cual."""
+    """The rule is not valid. The message is shown to the user exactly as it is."""
 
 
-# ------------------------------------------------------------------ funciones permitidas
+# ------------------------------------------------------------------ allowed functions
 
 def _n(x) -> np.ndarray:
     return np.asarray(x, dtype=float)
@@ -36,19 +37,19 @@ def sma(x, n): return talib.SMA(_n(x), int(n))
 def ema(x, n): return talib.EMA(_n(x), int(n))
 def rsi(x, n=14): return talib.RSI(_n(x), int(n))
 def std(x, n): return talib.STDDEV(_n(x), int(n))
-def maximo(x, n): return talib.MAX(_n(x), int(n))
-def minimo(x, n): return talib.MIN(_n(x), int(n))
-def cambio(x, n=1): return talib.ROC(_n(x), int(n))
+def highest(x, n): return talib.MAX(_n(x), int(n))
+def lowest(x, n): return talib.MIN(_n(x), int(n))
+def change(x, n=1): return talib.ROC(_n(x), int(n))
 
 
-def desplazar(x, n=1):
-    """Desplaza la serie n barras hacia ATRÁS. n negativo está PROHIBIDO: sería mirar al futuro."""
+def shift(x, n=1):
+    """Shifts the series n bars BACKWARD. Negative n is FORBIDDEN: it would be looking ahead."""
     n = int(n)
     if n < 0:
         raise ExprError(
-            "desplazar() no admite valores negativos. Un desplazamiento negativo trae datos del "
-            "FUTURO, y es el error que hace que un backtest precioso pierda dinero en real. "
-            "Si de verdad quieres mirar hacia adelante, esta herramienta no es para ti."
+            "shift() does not accept negative values. A negative shift brings in data from the "
+            "FUTURE, and that is the bug that turns a beautiful backtest into money lost live. "
+            "If you really do want to look forward, this tool is not for you."
         )
     a = _n(x)
     if n == 0:
@@ -58,44 +59,44 @@ def desplazar(x, n=1):
     return out
 
 
-def cruza_arriba(a, b):
+def crosses_above(a, b):
     a, b = _n(a), _n(b)
-    prev_a, prev_b = desplazar(a), desplazar(b)
+    prev_a, prev_b = shift(a), shift(b)
     return ((a > b) & (prev_a <= prev_b)).astype(float)
 
 
-def cruza_abajo(a, b):
+def crosses_below(a, b):
     a, b = _n(a), _n(b)
-    prev_a, prev_b = desplazar(a), desplazar(b)
+    prev_a, prev_b = shift(a), shift(b)
     return ((a < b) & (prev_a >= prev_b)).astype(float)
 
 
 SAFE_FUNCS = {
     "sma": sma, "ema": ema, "rsi": rsi, "std": std,
-    "maximo": maximo, "minimo": minimo, "cambio": cambio,
-    "desplazar": desplazar, "cruza_arriba": cruza_arriba, "cruza_abajo": cruza_abajo,
+    "highest": highest, "lowest": lowest, "change": change,
+    "shift": shift, "crosses_above": crosses_above, "crosses_below": crosses_below,
     "abs": lambda x: np.abs(_n(x)),
 }
 
 FUNC_DOCS = {
-    "sma(x, n)": "media simple de n barras",
-    "ema(x, n)": "media exponencial de n barras",
-    "rsi(x, n)": "RSI de n barras (por defecto 14)",
-    "std(x, n)": "desviación típica de n barras",
-    "maximo(x, n)": "máximo de las últimas n barras",
-    "minimo(x, n)": "mínimo de las últimas n barras",
-    "cambio(x, n)": "variación porcentual respecto a n barras atrás",
-    "desplazar(x, n)": "el valor de hace n barras (n negativo PROHIBIDO)",
-    "cruza_arriba(a, b)": "1 en la barra en que a cruza por encima de b",
-    "cruza_abajo(a, b)": "1 en la barra en que a cruza por debajo de b",
-    "abs(x)": "valor absoluto",
+    "sma(x, n)": "simple moving average over n bars",
+    "ema(x, n)": "exponential moving average over n bars",
+    "rsi(x, n)": "RSI over n bars (14 by default)",
+    "std(x, n)": "standard deviation over n bars",
+    "highest(x, n)": "highest value of the last n bars",
+    "lowest(x, n)": "lowest value of the last n bars",
+    "change(x, n)": "percent change against n bars ago",
+    "shift(x, n)": "the value n bars ago (negative n FORBIDDEN)",
+    "crosses_above(a, b)": "1 on the bar where a crosses above b",
+    "crosses_below(a, b)": "1 on the bar where a crosses below b",
+    "abs(x)": "absolute value",
 }
 
-SERIE_DOCS = {
-    "cierre": "precio de cierre", "apertura": "precio de apertura",
-    "maximo_": "máximo de la barra", "minimo_": "mínimo de la barra",
-    "volumen": "volumen", "atr": "ATR de 14 barras",
-    "rango": "máximo − mínimo de la barra", "cuerpo": "cierre − apertura",
+SERIES_DOCS = {
+    "close": "closing price", "open": "opening price",
+    "high": "high of the bar", "low": "low of the bar",
+    "volume": "volume", "atr": "14-bar ATR",
+    "range": "high − low of the bar", "body": "close − open",
 }
 
 _BIN = {ast.Add: np.add, ast.Sub: np.subtract, ast.Mult: np.multiply,
@@ -105,46 +106,47 @@ _CMP = {ast.Lt: np.less, ast.LtE: np.less_equal, ast.Gt: np.greater,
         ast.GtE: np.greater_equal, ast.Eq: np.equal, ast.NotEq: np.not_equal}
 
 
-class _Interprete:
-    """Intérprete recursivo del AST. NO hay eval() en ninguna parte.
+class _Interpreter:
+    """Recursive AST interpreter. There is NO eval() anywhere in this module.
 
-    Evaluar a mano en vez de compilar tiene dos ventajas que justifican el código extra:
-    control total sobre qué se puede ejecutar, y poder tratar `and`/`or` ELEMENTO A ELEMENTO.
-    Python evalúa `a and b` sobre la verdad global del array y lanza "the truth value of an array
-    is ambiguous" — que es un error incomprensible para quien solo quería escribir una regla.
+    Walking the tree by hand instead of compiling it buys two things that pay for the extra code:
+    total control over what is allowed to run, and the ability to treat `and`/`or` ELEMENT BY
+    ELEMENT. Python evaluates `a and b` on the array's global truth value and raises "the truth
+    value of an array is ambiguous" — an incomprehensible error for someone who only wanted to
+    write a rule.
     """
 
-    def __init__(self, entorno: dict) -> None:
-        self.env = entorno
+    def __init__(self, env: dict) -> None:
+        self.env = env
 
     def visit(self, n: ast.AST):
         m = getattr(self, "v_" + type(n).__name__, None)
         if m is None:
             raise ExprError(
-                f"expresión no permitida: {type(n).__name__}. Solo se admiten comparaciones, "
-                "operaciones aritméticas, `and`/`or`/`not` y las funciones de la lista. "
-                "Nada de importaciones, atributos, índices ni lambdas.")
+                f"expression not allowed: {type(n).__name__}. Only comparisons, arithmetic, "
+                "`and`/`or`/`not` and the functions on the list are accepted. "
+                "No imports, no attributes, no indexing, no lambdas.")
         return m(n)
 
     def v_Expression(self, n): return self.visit(n.body)
 
     def v_Constant(self, n):
         if not isinstance(n.value, (int, float, bool)):
-            raise ExprError(f"solo se admiten números, no {type(n.value).__name__}")
+            raise ExprError(f"only numbers are accepted, not {type(n.value).__name__}")
         return float(n.value)
 
     def v_Name(self, n):
         if n.id not in self.env:
             raise ExprError(
-                f"nombre desconocido: {n.id}. "
+                f"unknown name: {n.id}. "
                 f"Series: {', '.join(sorted(k for k in self.env if not callable(self.env[k])))}. "
-                f"Funciones: {', '.join(sorted(SAFE_FUNCS))}")
+                f"Functions: {', '.join(sorted(SAFE_FUNCS))}")
         return self.env[n.id]
 
     def v_BinOp(self, n):
         op = _BIN.get(type(n.op))
         if op is None:
-            raise ExprError(f"operador no permitido: {type(n.op).__name__}")
+            raise ExprError(f"operator not allowed: {type(n.op).__name__}")
         with np.errstate(all="ignore"):
             return op(self.visit(n.left), self.visit(n.right))
 
@@ -153,10 +155,10 @@ class _Interprete:
         if isinstance(n.op, ast.USub): return np.negative(v)
         if isinstance(n.op, ast.UAdd): return v
         if isinstance(n.op, (ast.Not, ast.Invert)): return np.logical_not(_bool(v))
-        raise ExprError(f"operador unario no permitido: {type(n.op).__name__}")
+        raise ExprError(f"unary operator not allowed: {type(n.op).__name__}")
 
     def v_BoolOp(self, n):
-        # ELEMENTO A ELEMENTO. Es la razón principal de escribir este intérprete.
+        # ELEMENT BY ELEMENT. This is the main reason for writing the interpreter at all.
         vals = [_bool(self.visit(v)) for v in n.values]
         f = np.logical_and if isinstance(n.op, ast.And) else np.logical_or
         out = vals[0]
@@ -166,23 +168,23 @@ class _Interprete:
 
     def v_Compare(self, n):
         if len(n.ops) != 1:
-            raise ExprError("escribe las comparaciones de una en una: `a > b and b > c`, "
-                            "no `a > b > c`")
+            raise ExprError("write comparisons one at a time: `a > b and b > c`, "
+                            "not `a > b > c`")
         op = _CMP.get(type(n.ops[0]))
         if op is None:
-            raise ExprError(f"comparación no permitida: {type(n.ops[0]).__name__}")
+            raise ExprError(f"comparison not allowed: {type(n.ops[0]).__name__}")
         with np.errstate(all="ignore"):
             return op(self.visit(n.left), self.visit(n.comparators[0]))
 
     def v_Call(self, n):
         if not isinstance(n.func, ast.Name):
-            raise ExprError("solo se pueden llamar funciones por su nombre")
+            raise ExprError("functions can only be called by name")
         f = SAFE_FUNCS.get(n.func.id)
         if f is None:
-            raise ExprError(f"función desconocida: {n.func.id}(). "
-                            f"Disponibles: {', '.join(sorted(SAFE_FUNCS))}")
+            raise ExprError(f"unknown function: {n.func.id}(). "
+                            f"Available: {', '.join(sorted(SAFE_FUNCS))}")
         if n.keywords:
-            raise ExprError("las funciones no admiten argumentos con nombre")
+            raise ExprError("functions do not take keyword arguments")
         return f(*[self.visit(a) for a in n.args])
 
 
@@ -192,72 +194,62 @@ def _bool(v) -> np.ndarray:
 
 
 def build_series(o, h, l, c, v) -> dict[str, np.ndarray]:
-    """Las series que la regla puede nombrar. Todas causales por construcción."""
+    """The series a rule is allowed to name. All of them causal by construction."""
     o, h, l, c, v = (_n(x) for x in (o, h, l, c, v))
     return {
-        "cierre": c, "apertura": o, "maximo_": h, "minimo_": l, "volumen": v,
+        "close": c, "open": o, "high": h, "low": l, "volume": v,
         "atr": talib.ATR(h, l, c, 14),
-        "rango": h - l, "cuerpo": c - o,
+        "range": h - l, "body": c - o,
     }
 
 
-def _check(node: ast.AST) -> None:
-    for n in ast.walk(node):
-        if not isinstance(n, _NODOS):
-            raise ExprError(
-                f"expresión no permitida: {type(n).__name__}. Solo se admiten comparaciones, "
-                "operaciones aritméticas, y las funciones de la lista. Nada de importaciones, "
-                "atributos, índices ni lambdas."
-            )
-        if isinstance(n, ast.Call):
-            if not isinstance(n.func, ast.Name):
-                raise ExprError("solo se pueden llamar funciones por su nombre")
-            if n.func.id not in SAFE_FUNCS:
-                raise ExprError(f"función desconocida: {n.func.id}(). "
-                                f"Disponibles: {', '.join(sorted(SAFE_FUNCS))}")
-            if n.keywords:
-                raise ExprError("las funciones no admiten argumentos con nombre")
+# NOTE: an earlier `_check(node)` helper lived here that walked the tree against a `_NODES`
+# allowlist tuple. The tuple never existed, nothing ever called the helper, and calling it would
+# have raised NameError rather than rejecting anything. It has been removed: the allowlist is
+# `_Interpreter`'s `v_*` dispatch, which rejects any node type it has no visitor for, and a second
+# half-written gate beside it is a trap, not defence in depth.
 
 
 @dataclass(frozen=True, slots=True)
 class RuleResult:
     signal: np.ndarray
-    n_largo: int
-    n_corto: int
+    n_long: int
+    n_short: int
 
 
-def evaluate_rule(series: dict[str, np.ndarray], largo: str, corto: str = "") -> RuleResult:
-    """Evalúa las reglas de entrada y devuelve la señal en {-1, 0, +1}.
+def evaluate_rule(series: dict[str, np.ndarray], long_rule: str,
+                  short_rule: str = "") -> RuleResult:
+    """Evaluates the entry rules and returns the signal in {-1, 0, +1}.
 
-    Si ambas se cumplen en la misma barra, gana 0 (fuera): una regla que dice a la vez compra y
-    vende no es una señal, es una contradicción, y resolverla en silencio a favor de una de las
-    dos ocultaría el error al usuario.
+    If both fire on the same bar, 0 (flat) wins: a rule that says buy and sell at once is not a
+    signal, it is a contradiction, and settling it silently in favour of one side would hide the
+    mistake from the user.
     """
-    entorno = {**series, **SAFE_FUNCS}
+    env = {**series, **SAFE_FUNCS}
 
     def _eval(src: str) -> np.ndarray:
         src = src.strip()
         if not src:
-            return np.zeros_like(series["cierre"], dtype=bool)
+            return np.zeros_like(series["close"], dtype=bool)
         try:
-            arbol = ast.parse(src, mode="eval")
+            tree = ast.parse(src, mode="eval")
         except SyntaxError as e:
-            raise ExprError(f"error de sintaxis: {e.msg}") from None
+            raise ExprError(f"syntax error: {e.msg}") from None
         try:
-            v = _Interprete(entorno).visit(arbol)
+            v = _Interpreter(env).visit(tree)
         except ExprError:
             raise
         except Exception as e:  # noqa: BLE001
-            raise ExprError(f"error al evaluar: {type(e).__name__}: {e}") from None
+            raise ExprError(f"error while evaluating: {type(e).__name__}: {e}") from None
         a = np.asarray(v)
-        if a.shape != series["cierre"].shape:
-            raise ExprError("la regla debe producir una serie del mismo tamaño que los precios "
-                            "(¿has escrito una constante en vez de una comparación?)")
+        if a.shape != series["close"].shape:
+            raise ExprError("the rule has to produce a series the same size as the prices "
+                            "(did you write a constant instead of a comparison?)")
         return np.nan_to_num(a, nan=0.0).astype(bool)
 
-    l_ = _eval(largo)
-    s_ = _eval(corto)
-    sig = np.zeros(series["cierre"].size, dtype=np.int8)
-    sig[l_ & ~s_] = 1
-    sig[s_ & ~l_] = -1
+    long_hit = _eval(long_rule)
+    short_hit = _eval(short_rule)
+    sig = np.zeros(series["close"].size, dtype=np.int8)
+    sig[long_hit & ~short_hit] = 1
+    sig[short_hit & ~long_hit] = -1
     return RuleResult(sig, int((sig == 1).sum()), int((sig == -1).sum()))

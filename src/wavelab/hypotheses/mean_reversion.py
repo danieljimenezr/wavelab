@@ -1,33 +1,34 @@
-"""Familia `mean_reversion`: el precio vuelve a un ancla después de alejarse demasiado.
+"""Family `mean_reversion`: price returns to an anchor after moving too far from it.
 
-REGISTRO PREVIO. Todo lo que hay en este fichero se escribió ANTES de ejecutar un solo backtest y
-antes de mirar un solo número. Los parámetros son los convencionales de la literatura y están
-FIJOS: no hay variantes del mismo parámetro "por probar". Las 12 hipótesis se registran juntas y
-las 12 deben contarse en la corrección por contraste múltiple, incluidas las que fracasen.
+PRE-REGISTERED. Everything in this file was written BEFORE running a single backtest and before
+looking at a single number. The parameters are the conventional ones from the literature and they
+are FIXED: there are no variants of the same parameter "just to see". The 12 hypotheses are
+registered together and all 12 must be counted in the multiple-comparisons correction, the ones
+that fail included.
 
-El mecanismo de mercado que comparte la familia —lo que tendría que ser cierto para que esto
-funcione— es de tres piezas:
+The market mechanism the family shares —what would have to be true for this to work— has three
+parts:
 
-  1. Provisión de liquidez. Cuando una orden grande e impaciente barre el libro, el precio se
-     desplaza más de lo que justifica la información que trae esa orden. Quien está al otro lado
-     cobra por absorberla. Ese cobro es la prima de reversión, y es el único ingreso "real" que
-     esta familia puede capturar.
-  2. Sobrerreacción. Los operadores extrapolan el último tramo y sobreponderan lo reciente; el
-     precio se aleja del consenso más de lo que el flujo de información justifica y luego corrige.
-  3. Cierre forzado. En un mercado con apalancamiento alto (BTC perpetuos), las liquidaciones en
-     cascada son ventas que NO expresan una opinión sobre el valor. Son mecánicas y se agotan
-     cuando se acaba el colateral. El hueco que dejan se rellena.
+  1. Liquidity provision. When a large, impatient order sweeps the book, the price moves further
+     than the information that order carries justifies. Whoever is on the other side charges for
+     absorbing it. That charge is the reversion premium, and it is the only "real" income this
+     family can capture.
+  2. Overreaction. Traders extrapolate the last leg and overweight what is recent; the price moves
+     away from consensus further than the flow of information justifies and then corrects.
+  3. Forced closing. In a market with high leverage (BTC perpetuals), cascading liquidations are
+     sales that do NOT express an opinion about value. They are mechanical and they run out when
+     the collateral does. The hole they leave gets filled.
 
-Y el modo de fallo que comparte, también declarado de antemano: en una tendencia sostenida, toda
-esta familia vende fuerza y compra debilidad justo cuando eso es exactamente lo contrario de lo que
-hay que hacer. Un estadístico de reversión "clavado" en el extremo durante un tramo direccional no
-es una señal, es una pérdida lenta. Varias de las hipótesis de abajo existen precisamente para
-medir ese fallo en lugar de esconderlo (`bb20_2_range_adx14` y `rsi14_cardwell_sma200` frente a sus
-versiones sin filtro de régimen).
+And the failure mode it shares, also declared in advance: in a sustained trend, this whole family
+sells strength and buys weakness at exactly the moment when that is the opposite of what to do. A
+reversion statistic "pinned" at the extreme throughout a directional leg is not a signal, it is a
+slow loss. Several of the hypotheses below exist precisely in order to measure that failure instead
+of hiding it (`bb20_2_range_adx14` and `rsi14_cardwell_sma200` against their versions with no
+regime filter).
 
-Nota sobre `min_warmup`. Es una decisión de higiene numérica, no un parámetro de la señal: se elige
-para descartar el arranque de los indicadores (y el periodo inestable de las EMA largas, ~2x el
-periodo), no para mejorar ningún resultado. No se toca después de ver datos.
+A note on `min_warmup`. It is a decision of numerical hygiene, not a parameter of the signal: it is
+chosen to discard the indicators' start-up (and the unstable stretch of the long EMAs, ~2x the
+period), not to improve any result. It is not touched after seeing data.
 """
 
 from __future__ import annotations
@@ -38,21 +39,21 @@ import talib
 from wavelab.hypotheses.base import Hypothesis, Series, register
 
 # --------------------------------------------------------------------------------------------
-# Utilidades. Ninguna mira hacia adelante.
+# Utilities. None of them looks ahead.
 # --------------------------------------------------------------------------------------------
 
 
 def _f(x: np.ndarray) -> np.ndarray:
-    """talib exige float64 contiguo; si no, lanza 'input array type is not double'."""
+    """talib demands contiguous float64; otherwise it raises 'input array type is not double'."""
     return np.ascontiguousarray(x, dtype=np.float64)
 
 
 def _prev(a: np.ndarray) -> np.ndarray:
-    """Valor de la barra ANTERIOR, alineado a i (es decir, a[i-1] colocado en la posición i).
+    """Value of the PREVIOUS bar, aligned to i (that is, a[i-1] placed at position i).
 
-    El desplazamiento va del pasado hacia el presente, nunca al revés. `np.roll(a, 1)` está
-    prohibido aquí: mete a[-1] —el último dato de toda la serie— en la posición 0, que es
-    exactamente la fuga de información que este proyecto persigue.
+    The shift runs from the past towards the present, never the other way round. `np.roll(a, 1)` is
+    banned here: it puts a[-1] —the last data point of the whole series— at position 0, which is
+    exactly the information leak this project is hunting.
     """
     out = np.empty_like(a)
     out[0] = np.nan
@@ -61,13 +62,13 @@ def _prev(a: np.ndarray) -> np.ndarray:
 
 
 def _finite(*arrays: np.ndarray) -> np.ndarray:
-    """Máscara de posiciones donde TODOS los indicadores están definidos.
+    """Mask of the positions where ALL the indicators are defined.
 
-    talib devuelve NaN durante el calentamiento. Una comparación con NaN da False, así que no
-    inventa un largo; pero sí puede inventar un corto si la condición se escribe negada. Por eso
-    la comprobación es explícita con np.isnan y se aplica como AND a cada condición, en vez de
-    confiar en el comportamiento implícito o en nan_to_num (que sí inventaría señales al sustituir
-    el NaN por un número que compara verdadero).
+    talib returns NaN during warm-up. A comparison against NaN yields False, so it does not invent a
+    long; but it can invent a short if the condition is written negated. That is why the check is
+    explicit, with np.isnan, and is ANDed into every condition, instead of relying on the implicit
+    behaviour or on nan_to_num (which WOULD invent signals, by replacing the NaN with a number that
+    compares true).
     """
     ok = np.ones(arrays[0].shape, dtype=bool)
     for a in arrays:
@@ -80,7 +81,7 @@ def _sig(n: int) -> np.ndarray:
 
 
 # --------------------------------------------------------------------------------------------
-# 1. Bandas de Bollinger: el desvanecimiento desnudo.
+# 1. Bollinger bands: the naked fade.
 # --------------------------------------------------------------------------------------------
 
 
@@ -97,29 +98,29 @@ def _bb_fade(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="mean_reversion.bb20_2_fade",
     family="mean_reversion",
-    rationale="Cerrar fuera de la banda de 2 sigma sobre 20 velas significa que el precio se ha "
-              "movido más de lo que la dispersión reciente del propio activo considera normal. "
-              "El comportamiento que produciría el efecto es el del creador de mercado y el "
-              "operador de rango: ven un desequilibrio temporal de flujo —una orden impaciente "
-              "que barre el libro— y cobran una prima por absorberla, devolviendo el precio hacia "
-              "la SMA20 cuando esa orden se agota. Es la formulación más desnuda posible de la "
-              "familia y sirve de línea base contra la que se miden las otras once.",
-    prior="Esperamos ventaja positiva pero pequeña en régimen lateral y NEGATIVA en régimen "
-          "tendencial, porque en tendencia el precio 'camina la banda' durante decenas de velas y "
-          "esta regla mantiene el lado equivocado todo ese tiempo. Neta sobre toda la muestra "
-          "esperamos algo cercano a cero, o negativo tras costes. Queda refutada si la ventaja es "
-          "positiva y estable en ambos regímenes: eso significaría que no estamos midiendo "
-          "provisión de liquidez sino otra cosa.",
+    rationale="Closing outside the 2-sigma band over 20 candles means the price has moved further "
+              "than the asset's own recent dispersion considers normal. The behaviour that would "
+              "produce the effect is that of the market maker and the range trader: they see a "
+              "temporary imbalance of flow —an impatient order sweeping the book— and charge a "
+              "premium for absorbing it, handing the price back towards the SMA20 once that order "
+              "runs out. It is the barest possible formulation of the family and it serves as the "
+              "baseline against which the other eleven are measured.",
+    prior="We expect a positive but small edge in a ranging regime and a NEGATIVE one in a trending "
+          "regime, because in a trend the price 'walks the band' for dozens of candles and this "
+          "rule holds the wrong side that entire time. Net over the whole sample we expect "
+          "something close to zero, or negative after costs. It is refuted if the edge is positive "
+          "and stable in both regimes: that would mean we are not measuring liquidity provision but "
+          "something else.",
     fn=_bb_fade,
-    params={"periodo": 20, "desviaciones": 2.0},
+    params={"period": 20, "deviations": 2.0},
     timeframes=("15m", "1h", "4h"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 2. Bollinger con reentrada. MISMOS parámetros, REGLA DE DECISIÓN distinta (no es una variante
-#    de parámetro: la 1 entra durante la excursión, esta espera a que la excursión termine).
+# 2. Bollinger with re-entry. SAME parameters, DIFFERENT decision rule (this is not a parameter
+#    variant: #1 enters during the excursion, this one waits for the excursion to end).
 # --------------------------------------------------------------------------------------------
 
 
@@ -131,16 +132,16 @@ def _bb_reentry(s: Series) -> np.ndarray:
 
     pos = 0
     for i in range(1, n):
-        # Solo se leen los índices i e i-1. Nunca i+1.
+        # Only indices i and i-1 are read. Never i+1.
         if np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(mid[i]) \
                 or np.isnan(upper[i - 1]) or np.isnan(lower[i - 1]):
             pos = 0
             out[i] = 0
             continue
-        # Salida primero: objetivo en la media móvil, que es el ancla de la hipótesis.
+        # Exit first: the target is the moving average, which is the hypothesis's anchor.
         if pos == 1 and c[i] >= mid[i] or pos == -1 and c[i] <= mid[i]:
             pos = 0
-        # Entrada solo si estamos planos y la vela anterior cerró FUERA y esta cierra DENTRO.
+        # Entry only if we are flat and the previous candle closed OUTSIDE and this one closes IN.
         if pos == 0:
             if c[i - 1] < lower[i - 1] and c[i] >= lower[i]:
                 pos = 1
@@ -153,29 +154,30 @@ def _bb_reentry(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="mean_reversion.bb20_2_reentry",
     family="mean_reversion",
-    rationale="Misma banda que la hipótesis 1 y los mismos 20/2, pero la regla de decisión es la "
-              "contraria en el tiempo: no se compra la caída, se compra el final de la caída. "
-              "Exigir que la vela anterior cerrara fuera y esta dentro es pedir una prueba de que "
-              "el flujo impaciente ya se agotó, en lugar de suponerlo. El participante concreto es "
-              "el vendedor forzado: mientras liquida, el precio sigue fuera de la banda; cuando "
-              "termina, la primera vela que vuelve a cerrar dentro marca que el desequilibrio se "
-              "ha consumido. Se registra junto a la 1 porque la comparación entre ambas es la que "
-              "aísla el coste de anticipar frente al coste de esperar.",
-    prior="Esperamos MENOS operaciones y MEJOR ventaja por operación que la hipótesis 1, y sobre "
-          "todo una cola izquierda mucho más corta, porque no se entra contra una liquidación en "
-          "curso. Esperamos que pierda en mercados con reversiones en V muy rápidas, donde la "
-          "vela de reentrada llega cuando el movimiento de vuelta ya ha ocurrido. Queda refutada "
-          "si su ventaja por operación no supera a la de la hipótesis 1: en ese caso la 'prueba de "
-          "agotamiento' no aporta información y solo llega tarde.",
+    rationale="The same band as hypothesis 1 and the same 20/2, but the decision rule is the "
+              "opposite one in time: you do not buy the fall, you buy the end of the fall. "
+              "Requiring the previous candle to have closed outside and this one inside is asking "
+              "for proof that the impatient flow has already run out, instead of assuming it. The "
+              "concrete participant is the forced seller: while they are liquidating, the price "
+              "stays outside the band; when they finish, the first candle that closes back inside "
+              "marks that the imbalance has been consumed. It is registered alongside #1 because "
+              "the comparison between the two is what isolates the cost of anticipating against the "
+              "cost of waiting.",
+    prior="We expect FEWER trades and a BETTER edge per trade than hypothesis 1, and above all a "
+          "much shorter left tail, because we do not enter against a liquidation in progress. We "
+          "expect it to lose in markets with very fast V-shaped reversals, where the re-entry "
+          "candle arrives once the move back has already happened. It is refuted if its edge per "
+          "trade does not beat hypothesis 1's: in that case the 'proof of exhaustion' carries no "
+          "information and merely arrives late.",
     fn=_bb_reentry,
-    params={"periodo": 20, "desviaciones": 2.0, "salida": "SMA20"},
+    params={"period": 20, "deviations": 2.0, "exit": "SMA20"},
     timeframes=("15m", "1h", "4h"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 3. Bollinger filtrado por régimen. Existe para MEDIR el modo de fallo declarado de la familia.
+# 3. Bollinger filtered by regime. It exists to MEASURE the family's declared failure mode.
 # --------------------------------------------------------------------------------------------
 
 
@@ -185,37 +187,36 @@ def _bb_range_adx(s: Series) -> np.ndarray:
     upper, _mid, lower = talib.BBANDS(c, timeperiod=20, nbdevup=2.0, nbdevdn=2.0, matype=0)
     adx = talib.ADX(h, low, c, timeperiod=14)
     ok = _finite(upper, lower, adx)
-    quieto = ok & (adx < 20.0)
-    out[quieto & (c < lower)] = 1
-    out[quieto & (c > upper)] = -1
+    quiet = ok & (adx < 20.0)
+    out[quiet & (c < lower)] = 1
+    out[quiet & (c > upper)] = -1
     return out
 
 
 register(Hypothesis(
     name="mean_reversion.bb20_2_range_adx14",
     family="mean_reversion",
-    rationale="La hipótesis 1 con una única puerta: operar solo cuando el ADX14 está por debajo "
-              "de 20, el umbral de Wilder para 'sin tendencia'. La afirmación que se comprueba es "
-              "estructural, no cosmética: la prima de reversión existe porque alguien absorbe "
-              "flujo impaciente, y absorber solo es rentable cuando ese flujo NO está informado. "
-              "Cuando hay tendencia, la orden que barre el libro suele traer información —alguien "
-              "reposiciona de verdad— y el que la absorbe queda seleccionado adversamente. El ADX "
-              "bajo es la aproximación clásica a 'aquí no hay nadie reposicionando'.",
-    prior="Esperamos ventaja CLARAMENTE mayor que la hipótesis 1 sobre las mismas velas, y que la "
-          "diferencia venga de eliminar pérdidas, no de añadir ganancias. Esperamos también menos "
-          "de la mitad de operaciones. La hipótesis queda refutada si la ventaja no mejora a la "
-          "de la 1: eso significaría que el ADX se entera del régimen demasiado tarde para servir "
-          "de filtro, y entonces la explicación de la familia por selección adversa se queda sin "
-          "apoyo empírico.",
+    rationale="Hypothesis 1 with a single gate: trade only when the ADX14 is below 20, Wilder's "
+              "threshold for 'no trend'. The claim being tested is structural, not cosmetic: the "
+              "reversion premium exists because somebody absorbs impatient flow, and absorbing is "
+              "only profitable when that flow is NOT informed. When there is a trend, the order "
+              "sweeping the book usually carries information —somebody is genuinely "
+              "repositioning— and whoever absorbs it is adversely selected. A low ADX is the "
+              "classic approximation to 'nobody here is repositioning'.",
+    prior="We expect a CLEARLY larger edge than hypothesis 1 over the same candles, and we expect "
+          "the difference to come from removing losses, not from adding gains. We also expect fewer "
+          "than half the trades. The hypothesis is refuted if the edge does not improve on #1's: "
+          "that would mean the ADX finds out about the regime too late to work as a filter, and "
+          "then the family's explanation by adverse selection is left without empirical support.",
     fn=_bb_range_adx,
-    params={"periodo": 20, "desviaciones": 2.0, "adx_periodo": 14, "adx_max": 20.0},
+    params={"period": 20, "deviations": 2.0, "adx_period": 14, "adx_max": 20.0},
     timeframes=("1h", "4h", "1d"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 4. Keltner: la misma idea con la anchura medida en rango real y no en dispersión de cierres.
+# 4. Keltner: the same idea with the width measured in true range and not in dispersion of closes.
 # --------------------------------------------------------------------------------------------
 
 
@@ -235,29 +236,29 @@ def _keltner_fade(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="mean_reversion.keltner20_atr14_fade",
     family="mean_reversion",
-    rationale="Canal de Keltner en su forma moderna: EMA20 como ancla y 2xATR14 como anchura. "
-              "Frente a Bollinger, cambia QUÉ se considera un movimiento normal. Bollinger mide "
-              "la dispersión de los cierres; el ATR mide el rango real, mechas y huecos incluidos. "
-              "La diferencia importa por un motivo concreto de microestructura: una cascada de "
-              "liquidaciones deja una mecha enorme y un cierre recuperado, lo que ENSANCHA el ATR "
-              "de inmediato pero apenas mueve la sigma de cierres. El canal de Keltner, por tanto, "
-              "deja de dar señales justo después de un evento de liquidación, mientras que "
-              "Bollinger sigue dándolas.",
-    prior="Esperamos MENOS señales que Bollinger en las semanas posteriores a un desplome, y por "
-          "esa razón una peor tasa de acierto pero una cola izquierda más corta: renuncia a los "
-          "rebotes más rentables a cambio de no entrar en el peor momento. Esperamos que sea "
-          "inferior a Bollinger en mercado tranquilo, donde el ATR se estrecha y el canal se "
-          "vuelve hipersensible. Queda refutada si sus señales son indistinguibles de las de la "
-          "hipótesis 1: eso indicaría que en BTC la mecha y el cierre llevan la misma información.",
+    rationale="The Keltner channel in its modern form: EMA20 as the anchor and 2xATR14 as the "
+              "width. Against Bollinger, what changes is WHAT counts as a normal move. Bollinger "
+              "measures the dispersion of the closes; the ATR measures the true range, wicks and "
+              "gaps included. The difference matters for a concrete microstructure reason: a "
+              "liquidation cascade leaves an enormous wick and a recovered close, which WIDENS the "
+              "ATR immediately but barely moves the sigma of the closes. The Keltner channel "
+              "therefore stops giving signals right after a liquidation event, while Bollinger goes "
+              "on giving them.",
+    prior="We expect FEWER signals than Bollinger in the weeks following a crash, and for that "
+          "reason a worse hit rate but a shorter left tail: it gives up the most profitable bounces "
+          "in exchange for not entering at the worst moment. We expect it to be inferior to "
+          "Bollinger in a quiet market, where the ATR narrows and the channel turns "
+          "hypersensitive. It is refuted if its signals are indistinguishable from hypothesis 1's: "
+          "that would indicate that in BTC the wick and the close carry the same information.",
     fn=_keltner_fade,
-    params={"ema_periodo": 20, "atr_periodo": 14, "multiplicador": 2.0},
+    params={"ema_period": 20, "atr_period": 14, "multiplier": 2.0},
     timeframes=("1h", "4h", "1d"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 5. RSI 14 con umbrales fijos 30/70. La línea base que Cardwell dice que está rota.
+# 5. RSI 14 with fixed 30/70 thresholds. The baseline Cardwell says is broken.
 # --------------------------------------------------------------------------------------------
 
 
@@ -274,30 +275,30 @@ def _rsi_fixed(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="mean_reversion.rsi14_fixed_3070",
     family="mean_reversion",
-    rationale="RSI 14 con los umbrales originales de Wilder, 30 y 70. Se registra aunque casi "
-              "nadie espere que funcione, y por un motivo metodológico: es el control de la "
-              "hipótesis 6. La afirmación de Cardwell —que el RSI se 'clava' en el extremo durante "
-              "las tendencias y por eso los umbrales fijos fallan— solo es comprobable si el "
-              "control fijo está registrado de antemano. Si solo registrásemos la versión "
-              "adaptativa y saliera bien, no sabríamos si el mérito es de las bandas de Cardwell "
-              "o simplemente del RSI.",
-    prior="Esperamos ventaja NULA o NEGATIVA neta, y en particular esperamos que el lado corto "
-          "(RSI>70) sea el que más pierde, porque BTC pasa la mayor parte de su historia en "
-          "tramos alcistas donde el RSI supera 70 y se queda ahí. Esperamos que la mayor parte de "
-          "la pérdida se concentre en pocos tramos largos y direccionales. Queda refutada si el "
-          "30/70 fijo iguala o supera a las bandas de Cardwell de la hipótesis 6: eso invalidaría "
-          "la premisa central de esta familia sobre el sesgo del RSI en tendencia.",
+    rationale="RSI 14 with Wilder's original thresholds, 30 and 70. It is registered even though "
+              "hardly anybody expects it to work, and for a methodological reason: it is the "
+              "control for hypothesis 6. Cardwell's claim —that the RSI 'pins' at the extreme "
+              "during trends and that this is why fixed thresholds fail— is only testable if the "
+              "fixed control is registered in advance. If we only registered the adaptive version "
+              "and it came out well, we would not know whether the credit belongs to Cardwell's "
+              "bands or simply to the RSI.",
+    prior="We expect a NULL or NEGATIVE net edge, and in particular we expect the short side "
+          "(RSI>70) to be the one that loses most, because BTC spends most of its history in "
+          "bullish legs where the RSI goes above 70 and stays there. We expect most of the loss to "
+          "be concentrated in a few long, directional legs. It is refuted if the fixed 30/70 "
+          "matches or beats hypothesis 6's Cardwell bands: that would invalidate this family's "
+          "central premise about the RSI's bias in a trend.",
     fn=_rsi_fixed,
-    params={"periodo": 14, "sobreventa": 30.0, "sobrecompra": 70.0},
+    params={"period": 14, "oversold": 30.0, "overbought": 70.0},
     timeframes=("1h", "4h", "1d"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 6. RSI 14 con bandas de Cardwell condicionadas por la SMA200. La cabeza de cartel de la familia.
-#    Mismo periodo 14 que la 5 a propósito: lo único que cambia es el esquema de umbrales, y esa
-#    es exactamente la afirmación que se quiere contrastar.
+# 6. RSI 14 with Cardwell bands conditioned on the SMA200. The family's headline act.
+#    Same period 14 as #5 on purpose: the only thing that changes is the threshold scheme, and that
+#    is exactly the claim to be tested.
 # --------------------------------------------------------------------------------------------
 
 
@@ -308,45 +309,45 @@ def _rsi_cardwell(s: Series) -> np.ndarray:
     sma200 = talib.SMA(c, timeperiod=200)
     ok = _finite(rsi, sma200)
 
-    alcista = ok & (c > sma200)   # rango de Cardwell 40-80
-    bajista = ok & (c <= sma200)  # rango de Cardwell 20-60
+    bullish = ok & (c > sma200)   # Cardwell range 40-80
+    bearish = ok & (c <= sma200)  # Cardwell range 20-60
 
-    out[alcista & (rsi < 40.0)] = 1
-    out[alcista & (rsi > 80.0)] = -1
-    out[bajista & (rsi < 20.0)] = 1
-    out[bajista & (rsi > 60.0)] = -1
+    out[bullish & (rsi < 40.0)] = 1
+    out[bullish & (rsi > 80.0)] = -1
+    out[bearish & (rsi < 20.0)] = 1
+    out[bearish & (rsi > 60.0)] = -1
     return out
 
 
 register(Hypothesis(
     name="mean_reversion.rsi14_cardwell_sma200",
     family="mean_reversion",
-    rationale="Andrew Cardwell observó que el RSI no oscila en el mismo rango en todos los "
-              "regímenes: en tendencia alcista se mueve entre 40 y 80, y en bajista entre 20 y 60. "
-              "El mecanismo detrás es de composición de participantes. En un mercado alcista, las "
-              "caídas las provocan tomas de beneficio de operadores cortoplacistas y se encuentran "
-              "con compradores estructurales esperando; la presión vendedora se agota antes, y por "
-              "eso el suelo del oscilador está en 40 y no en 30. Comprar a 30 en ese régimen "
-              "significa esperar una capitulación que casi nunca llega, y quedarse fuera. La "
-              "SMA200 sobre el cierre decide qué régimen aplica con la información disponible en "
-              "la barra, sin mirar adelante.",
-    prior="Esperamos ventaja positiva y, sobre todo, MÁS OPERACIONES en el lado favorable al "
-          "régimen (largos en alcista, cortos en bajista) que la hipótesis 5, y una reducción "
-          "grande de las pérdidas del lado contrario. Esperamos que falle en los cambios de "
-          "régimen, cuando el precio cruza la SMA200 varias veces seguidas: ahí las bandas "
-          "alternan y se compra a 40 justo cuando el régimen relevante ya era el bajista. Queda "
-          "refutada si no mejora a la hipótesis 5, o si toda su ventaja proviene del filtro "
-          "direccional de la SMA200 y no de los umbrales asimétricos.",
+    rationale="Andrew Cardwell observed that the RSI does not oscillate in the same range under "
+              "every regime: in an uptrend it moves between 40 and 80, and in a downtrend between "
+              "20 and 60. The mechanism behind it is one of participant composition. In a bull "
+              "market the falls are caused by profit taking from short-term traders and they run "
+              "into structural buyers waiting; the selling pressure runs out sooner, and that is "
+              "why the oscillator's floor is at 40 and not at 30. Buying at 30 in that regime means "
+              "waiting for a capitulation that almost never arrives, and staying out. The SMA200 on "
+              "the close decides which regime applies using the information available at the bar, "
+              "without looking ahead.",
+    prior="We expect a positive edge and, above all, MORE TRADES on the side that favours the "
+          "regime (longs in an uptrend, shorts in a downtrend) than hypothesis 5, and a large "
+          "reduction in the losses on the opposite side. We expect it to fail at regime changes, "
+          "when the price crosses the SMA200 several times in a row: there the bands alternate and "
+          "we buy at 40 just when the relevant regime had already turned bearish. It is refuted if "
+          "it does not improve on hypothesis 5, or if all of its edge comes from the SMA200's "
+          "directional filter and not from the asymmetric thresholds.",
     fn=_rsi_cardwell,
-    params={"periodo": 14, "sma_regimen": 200,
-            "banda_alcista": (40.0, 80.0), "banda_bajista": (20.0, 60.0)},
+    params={"period": 14, "regime_sma": 200,
+            "bullish_band": (40.0, 80.0), "bearish_band": (20.0, 60.0)},
     timeframes=("1h", "4h", "1d"),
     min_warmup=260,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 7. Williams %R: posición dentro del RANGO alto-bajo, no momento de cierres.
+# 7. Williams %R: position within the high-low RANGE, not momentum of closes.
 # --------------------------------------------------------------------------------------------
 
 
@@ -363,28 +364,28 @@ def _willr_fade(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="mean_reversion.willr14_fade",
     family="mean_reversion",
-    rationale="El %R no mide momento: mide dónde cierra el precio dentro del rango máximo-mínimo "
-              "de las últimas 14 velas. Eso lo hace sensible a un comportamiento distinto del que "
-              "capta el RSI. Cerrar en el suelo absoluto del rango de dos semanas es la firma de "
-              "una barrida de stops: un desplazamiento buscando liquidez acumulada bajo los "
-              "mínimos previos, ejecutado por quien necesita contrapartida para una posición "
-              "grande. Ese flujo es mecánico y no informado, y una vez ejecutado desaparece, que "
-              "es justo la condición para que la absorción sea rentable.",
-    prior="Esperamos ventaja positiva concentrada en horizontes CORTOS (pocas velas): el efecto de "
-          "barrida se agota rápido y, si se mantiene la posición, la señal se convierte en una "
-          "apuesta direccional que no es lo que la hipótesis afirma. Esperamos que falle en "
-          "rupturas verdaderas de rango, donde el mínimo del rango se rompe porque hay "
-          "información nueva y el %R se queda pegado a -100 durante todo el tramo. Queda refutada "
-          "si la ventaja no decae con el horizonte de tenencia.",
+    rationale="%R does not measure momentum: it measures where the price closes within the "
+              "high-low range of the last 14 candles. That makes it sensitive to a different "
+              "behaviour from the one the RSI picks up. Closing at the absolute floor of a two-week "
+              "range is the signature of a stop run: a push looking for the liquidity accumulated "
+              "below the previous lows, executed by somebody who needs counterparty for a large "
+              "position. That flow is mechanical and uninformed, and once executed it disappears, "
+              "which is exactly the condition for the absorption to be profitable.",
+    prior="We expect a positive edge concentrated at SHORT horizons (a few candles): the sweep "
+          "effect runs out quickly and, if the position is held, the signal turns into a "
+          "directional bet, which is not what the hypothesis claims. We expect it to fail on "
+          "genuine range breaks, where the low of the range gives way because there is new "
+          "information and the %R stays glued to -100 for the whole leg. It is refuted if the edge "
+          "does not decay with the holding horizon.",
     fn=_willr_fade,
-    params={"periodo": 14, "sobreventa": -80.0, "sobrecompra": -20.0},
+    params={"period": 14, "oversold": -80.0, "overbought": -20.0},
     timeframes=("15m", "1h", "4h"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 8. CCI 20: desviación normalizada por desviación media ABSOLUTA (robusta a la cola).
+# 8. CCI 20: deviation normalised by the MEAN ABSOLUTE deviation (robust to the tail).
 # --------------------------------------------------------------------------------------------
 
 
@@ -401,29 +402,29 @@ def _cci_fade(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="mean_reversion.cci20_fade",
     family="mean_reversion",
-    rationale="El CCI usa el precio típico (H+L+C)/3 y lo normaliza por la desviación media "
-              "ABSOLUTA, no por la desviación típica. La diferencia no es cosmética en BTC: la "
-              "desviación típica eleva al cuadrado, así que una sola vela de liquidación infla el "
-              "denominador durante 20 velas y anestesia la señal de Bollinger justo después del "
-              "evento. La desviación media absoluta apenas se inmuta. La hipótesis, por tanto, es "
-              "que el estadístico robusto sigue detectando dislocaciones en el periodo posterior "
-              "a un choque, que es cuando la prima por proveer liquidez debería ser mayor porque "
-              "el capital de los proveedores habituales está agotado.",
-    prior="Esperamos que la ventaja del CCI supere a la de Bollinger (hipótesis 1) precisamente y "
-          "solo en las ventanas que siguen a las velas de mayor rango, y que sea similar o "
-          "ligeramente peor en el resto de la muestra por dar más señales de peor calidad. "
-          "Esperamos el clásico fallo del +-100 en tendencia, igual que el resto de la familia. "
-          "Queda refutada si su ventaja condicionada a 'después de un choque' no es mayor que la "
-          "de Bollinger en esas mismas ventanas: ese era todo el argumento.",
+    rationale="The CCI uses the typical price (H+L+C)/3 and normalises it by the mean ABSOLUTE "
+              "deviation, not by the standard deviation. The difference is not cosmetic in BTC: the "
+              "standard deviation squares, so a single liquidation candle inflates the denominator "
+              "for 20 candles and anaesthetises the Bollinger signal right after the event. The "
+              "mean absolute deviation barely flinches. The hypothesis, therefore, is that the "
+              "robust statistic goes on detecting dislocations in the period after a shock, which "
+              "is when the premium for providing liquidity ought to be highest because the usual "
+              "providers' capital is exhausted.",
+    prior="We expect the CCI's edge to beat Bollinger's (hypothesis 1) precisely and only in the "
+          "windows that follow the largest-range candles, and to be similar or slightly worse over "
+          "the rest of the sample, by giving more signals of poorer quality. We expect the classic "
+          "+-100 failure in a trend, just like the rest of the family. It is refuted if its edge "
+          "conditioned on 'after a shock' is not larger than Bollinger's in those same windows: "
+          "that was the whole argument.",
     fn=_cci_fade,
-    params={"periodo": 20, "umbral": 100.0},
+    params={"period": 20, "threshold": 100.0},
     timeframes=("15m", "1h", "4h"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 9. Estiramiento frente al ancla LARGA. Otro horizonte, otro participante.
+# 9. Stretch against the LONG anchor. A different horizon, a different participant.
 # --------------------------------------------------------------------------------------------
 
 
@@ -441,30 +442,30 @@ def _stretch_ema200(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="mean_reversion.stretch_ema200_atr14",
     family="mean_reversion",
-    rationale="Las ocho hipótesis anteriores miden dislocaciones frente a un ancla de 14-20 velas, "
-              "el horizonte del operador de rango. Esta cambia de escala: mide la distancia a la "
-              "EMA200 en unidades de ATR14, con el multiplicador 3 de la convención de salidas por "
-              "ATR. El participante es otro. La media de 200 periodos es la referencia que usan "
-              "los asignadores de capital y los tenedores estructurales para decidir si el activo "
-              "está 'caro' o 'barato'; cuando el precio se aleja tres rangos diarios de ella, la "
-              "demanda que aparece no es de creadores de mercado sino de rebalanceo, y opera en "
-              "una escala temporal de semanas.",
-    prior="Esperamos MUY POCAS señales, ventaja positiva por operación pero con una varianza "
-          "enorme y un horizonte de recuperación largo, de decenas de velas. Esperamos que el "
-          "lado corto (3 ATR por encima de la EMA200) funcione peor que el largo, porque en las "
-          "burbujas de BTC el precio se ha mantenido estirado por encima durante meses. Queda "
-          "refutada si el número de señales es alto —eso significaría que 3 ATR no es un extremo "
-          "en este activo y la premisa de 'dislocación estructural' es falsa— o si la ventaja se "
-          "agota en pocas velas, lo que la haría indistinguible de la reversión de corto plazo.",
+    rationale="The eight previous hypotheses measure dislocations against an anchor of 14-20 "
+              "candles, the range trader's horizon. This one changes scale: it measures the "
+              "distance to the EMA200 in units of ATR14, with the multiplier 3 from the convention "
+              "for ATR-based exits. The participant is a different one. The 200-period average is "
+              "the reference that capital allocators and structural holders use to decide whether "
+              "the asset is 'expensive' or 'cheap'; when the price moves three daily ranges away "
+              "from it, the demand that shows up is not from market makers but from rebalancing, "
+              "and it operates on a timescale of weeks.",
+    prior="We expect VERY FEW signals, a positive edge per trade but with an enormous variance and "
+          "a long recovery horizon, of dozens of candles. We expect the short side (3 ATR above the "
+          "EMA200) to work worse than the long one, because in BTC's bubbles the price has stayed "
+          "stretched above it for months. It is refuted if the number of signals is high —that "
+          "would mean 3 ATR is not an extreme in this asset and the 'structural dislocation' "
+          "premise is false— or if the edge runs out within a few candles, which would make it "
+          "indistinguishable from short-term reversion.",
     fn=_stretch_ema200,
-    params={"ema_periodo": 200, "atr_periodo": 14, "multiplicador": 3.0},
+    params={"ema_period": 200, "atr_period": 14, "multiplier": 3.0},
     timeframes=("4h", "1d"),
     min_warmup=420,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 10. Extremo CON confirmación de volumen. Aquí es donde el "cierre forzado" se hace explícito.
+# 10. Extreme WITH volume confirmation. This is where "forced closing" becomes explicit.
 # --------------------------------------------------------------------------------------------
 
 
@@ -472,9 +473,9 @@ def _bb_volume_climax(s: Series) -> np.ndarray:
     c, v = _f(s.close), _f(s.volume)
     out = _sig(c.size)
     upper, _mid, lower = talib.BBANDS(c, timeperiod=20, nbdevup=2.0, nbdevdn=2.0, matype=0)
-    vmedia = talib.SMA(v, timeperiod=20)
-    ok = _finite(upper, lower, vmedia)
-    climax = ok & (v > 2.0 * vmedia)
+    v_mean = talib.SMA(v, timeperiod=20)
+    ok = _finite(upper, lower, v_mean)
+    climax = ok & (v > 2.0 * v_mean)
     out[climax & (c < lower)] = 1
     out[climax & (c > upper)] = -1
     return out
@@ -483,31 +484,31 @@ def _bb_volume_climax(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="mean_reversion.bb20_2_volume_climax",
     family="mean_reversion",
-    rationale="Mismo extremo de Bollinger que la hipótesis 1, con una condición añadida: el "
-              "volumen de la vela debe doblar su media de 20, el umbral convencional de volumen "
-              "climático. El volumen es lo que separa los dos motivos por los que el precio puede "
-              "salirse de la banda. Si sale con volumen bajo, es un libro fino y no hay prima que "
-              "cobrar: nadie está pagando por salir. Si sale con volumen que dobla la media, hay "
-              "alguien cerrando de forma forzada —liquidaciones en cascada de perpetuos, llamadas "
-              "de margen— y ese vendedor no tiene opinión sobre el valor ni capacidad de esperar. "
-              "Es el único caso en el que la hipótesis afirma que existe una contrapartida "
-              "estructuralmente dispuesta a pagar.",
-    prior="Esperamos ventaja MAYOR por operación que la hipótesis 1 y muchas menos operaciones. "
-          "Esperamos que el efecto sea marcadamente asimétrico: mucho más fuerte en el lado largo "
-          "(comprar capitulación) que en el corto, porque las liquidaciones bajistas en BTC son "
-          "más violentas y más concentradas en el tiempo que las alcistas. Esperamos que falle en "
-          "el primer día de un choque macro real, donde el volumen alto sí trae información. "
-          "Queda refutada si el filtro de volumen no mejora la ventaja de la hipótesis 1: eso "
-          "diría que el volumen no distingue flujo forzado de flujo informado en este mercado.",
+    rationale="The same Bollinger extreme as hypothesis 1, with one added condition: the candle's "
+              "volume must double its 20-period average, the conventional threshold for climactic "
+              "volume. Volume is what separates the two reasons the price can leave the band. If it "
+              "leaves on low volume, the book is thin and there is no premium to charge: nobody is "
+              "paying to get out. If it leaves on volume that doubles the average, somebody is "
+              "closing under duress —cascading perpetual liquidations, margin calls— and that "
+              "seller has neither an opinion about value nor the ability to wait. It is the only "
+              "case in which the hypothesis asserts that a structurally willing counterparty "
+              "exists.",
+    prior="We expect a LARGER edge per trade than hypothesis 1 and far fewer trades. We expect the "
+          "effect to be markedly asymmetric: much stronger on the long side (buying capitulation) "
+          "than on the short one, because bearish liquidations in BTC are more violent and more "
+          "concentrated in time than bullish ones. We expect it to fail on the first day of a "
+          "genuine macro shock, where high volume does carry information. It is refuted if the "
+          "volume filter does not improve hypothesis 1's edge: that would say that volume does not "
+          "distinguish forced flow from informed flow in this market.",
     fn=_bb_volume_climax,
-    params={"periodo": 20, "desviaciones": 2.0, "vol_periodo": 20, "vol_multiplo": 2.0},
+    params={"period": 20, "deviations": 2.0, "vol_period": 20, "vol_multiple": 2.0},
     timeframes=("15m", "1h", "4h"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 11. Barrida y rechazo. La única hipótesis de la familia que mira la forma de la vela.
+# 11. Sweep and rejection. The only hypothesis in the family that looks at candle shape.
 # --------------------------------------------------------------------------------------------
 
 
@@ -515,51 +516,52 @@ def _sweep_rejection(s: Series) -> np.ndarray:
     c, h, low = _f(s.close), _f(s.high), _f(s.low)
     out = _sig(c.size)
 
-    # Mínimo/máximo de las 20 velas ANTERIORES: talib.MIN(...)[i] cubre la ventana que termina en
-    # i INCLUIDO, así que hay que desplazarlo una barra para excluir la vela actual. El
-    # desplazamiento es hacia el futuro (_prev), nunca hacia atrás.
+    # Low/high of the 20 PREVIOUS candles: talib.MIN(...)[i] covers the window ending at i
+    # INCLUSIVE, so it has to be shifted by one bar to exclude the current candle. The shift runs
+    # towards the future (_prev), never backwards.
     min_prev = _prev(talib.MIN(low, timeperiod=20))
     max_prev = _prev(talib.MAX(h, timeperiod=20))
 
-    rango = h - low
-    ok = _finite(min_prev, max_prev, rango) & (rango > 0.0)
+    rng = h - low
+    ok = _finite(min_prev, max_prev, rng) & (rng > 0.0)
 
-    # Rechazo: la vela perfora el extremo previo pero cierra en el tercio opuesto de su rango.
-    barrida_baja = ok & (low < min_prev) & ((c - low) / np.where(ok, rango, 1.0) > 2.0 / 3.0)
-    barrida_alta = ok & (h > max_prev) & ((h - c) / np.where(ok, rango, 1.0) > 2.0 / 3.0)
+    # Rejection: the candle pierces the previous extreme but closes in the opposite third of its
+    # range.
+    sweep_low = ok & (low < min_prev) & ((c - low) / np.where(ok, rng, 1.0) > 2.0 / 3.0)
+    sweep_high = ok & (h > max_prev) & ((h - c) / np.where(ok, rng, 1.0) > 2.0 / 3.0)
 
-    out[barrida_baja] = 1
-    out[barrida_alta] = -1
+    out[sweep_low] = 1
+    out[sweep_high] = -1
     return out
 
 
 register(Hypothesis(
     name="mean_reversion.sweep_rejection_20",
     family="mean_reversion",
-    rationale="La vela perfora el mínimo de las 20 anteriores pero cierra en el tercio superior de "
-              "su propio rango. Esa forma es la huella observable de una secuencia concreta: bajo "
-              "un mínimo visible se acumulan stops de compradores y órdenes de venta en ruptura; "
-              "un participante que necesita comprar tamaño empuja el precio hasta ahí, esas "
-              "órdenes se ejecutan y le dan la contrapartida que necesitaba, y el precio vuelve "
-              "porque la venta era mecánica y se agotó en la propia vela. La clave es que el "
-              "rechazo se confirma DENTRO de la misma barra, con el cierre: no hace falta ver la "
-              "vela siguiente, y por eso la señal es causal.",
-    prior="Esperamos ventaja positiva y de vida corta, con el grueso del movimiento en las "
-          "primeras velas tras la señal. Esperamos que la ventaja sea mayor en 15m y 1h que en 4h, "
-          "porque la acumulación de stops en niveles visibles es un fenómeno de microestructura y "
-          "se difumina al agregar. Esperamos que falle cuando la perforación del mínimo es el "
-          "inicio real de una pierna bajista: ahí el cierre en el tercio superior es solo un "
-          "rebote técnico dentro de la caída. Queda refutada si no hay diferencia de ventaja entre "
-          "las velas que perforan el mínimo previo y las que simplemente cierran fuertes.",
+    rationale="The candle pierces the low of the previous 20 but closes in the upper third of its "
+              "own range. That shape is the observable footprint of a specific sequence: beneath a "
+              "visible low, buyers' stops and breakout sell orders accumulate; a participant who "
+              "needs to buy size pushes the price down there, those orders execute and give them "
+              "the counterparty they needed, and the price comes back because the selling was "
+              "mechanical and exhausted itself within the candle. The key is that the rejection is "
+              "confirmed INSIDE the same bar, by the close: there is no need to see the next "
+              "candle, and that is why the signal is causal.",
+    prior="We expect a positive and short-lived edge, with the bulk of the move in the first "
+          "candles after the signal. We expect the edge to be larger on 15m and 1h than on 4h, "
+          "because the accumulation of stops at visible levels is a microstructure phenomenon and "
+          "it blurs under aggregation. We expect it to fail when the piercing of the low is the "
+          "real start of a bear leg: there the close in the upper third is only a technical bounce "
+          "inside the fall. It is refuted if there is no difference in edge between the candles "
+          "that pierce the previous low and the ones that simply close strong.",
     fn=_sweep_rejection,
-    params={"lookback": 20, "fraccion_rechazo": 2 / 3},
+    params={"lookback": 20, "rejection_fraction": 2 / 3},
     timeframes=("15m", "1h", "4h"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 12. Racha de tres cierres. Sin indicador, sin normalizar: la sobrerreacción en crudo.
+# 12. A streak of three closes. No indicator, no normalisation: overreaction in the raw.
 # --------------------------------------------------------------------------------------------
 
 
@@ -576,25 +578,25 @@ def _streak3(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="mean_reversion.streak3_fade",
     family="mean_reversion",
-    rationale="Tres cierres consecutivos a la baja se compran; tres al alza se venden. No hay "
-              "indicador, ni normalización por volatilidad, ni umbral que ajustar, y esa desnudez "
-              "es el objetivo: es la prueba más limpia de la sobrerreacción por extrapolación. El "
-              "comportamiento concreto es el del operador que confunde una racha corta con una "
-              "tendencia y se posiciona en su dirección, junto con el gestor de riesgo que reduce "
-              "exposición mecánicamente tras varios cierres en contra. Si la reversión a la media "
-              "en BTC existe de verdad como fenómeno de comportamiento, tiene que aparecer aquí; "
-              "si solo aparece en formulaciones más elaboradas, hay que sospechar que lo que "
-              "estamos midiendo es un artefacto de esas formulaciones.",
-    prior="Esperamos una ventaja MUY pequeña, apenas distinguible del ruido, y probablemente "
-          "negativa después de costes por la alta frecuencia de señales; lo que esperamos que sea "
-          "informativo es el SIGNO y su consistencia entre timeframes, no la magnitud. Esperamos "
-          "que sea negativa en los tramos de tendencia fuerte, donde las rachas de tres se "
-          "encadenan. Queda refutada, y con ella la premisa de sobrerreacción de toda la familia, "
-          "si el signo es sistemáticamente negativo en todos los timeframes: eso indicaría que en "
-          "BTC las rachas cortas continúan en lugar de revertir, y entonces las once hipótesis "
-          "anteriores que funcionen estarían capturando otra cosa.",
+    rationale="Three consecutive closes to the downside are bought; three to the upside are sold. "
+              "There is no indicator, no normalisation by volatility and no threshold to tune, and "
+              "that bareness is the point: it is the cleanest test of overreaction by "
+              "extrapolation. The concrete behaviour is that of the trader who mistakes a short "
+              "streak for a trend and positions in its direction, together with the risk manager "
+              "who mechanically cuts exposure after several closes against them. If mean reversion "
+              "in BTC really exists as a behavioural phenomenon, it has to show up here; if it only "
+              "shows up in more elaborate formulations, we should suspect that what we are "
+              "measuring is an artefact of those formulations.",
+    prior="We expect a VERY small edge, barely distinguishable from noise, and probably negative "
+          "after costs given the high frequency of signals; what we expect to be informative is the "
+          "SIGN and its consistency across timeframes, not the magnitude. We expect it to be "
+          "negative in strongly trending legs, where streaks of three chain together. It is "
+          "refuted, and with it the overreaction premise of the whole family, if the sign is "
+          "systematically negative on every timeframe: that would indicate that in BTC short "
+          "streaks continue instead of reverting, and then whichever of the eleven preceding "
+          "hypotheses work would be capturing something else.",
     fn=_streak3,
-    params={"velas_consecutivas": 3},
+    params={"consecutive_bars": 3},
     timeframes=("15m", "1h", "4h", "1d"),
     min_warmup=200,
 ))

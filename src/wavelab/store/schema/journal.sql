@@ -1,13 +1,13 @@
--- El journal: la única evidencia no contaminada que este proyecto va a tener nunca.
+-- The journal: the only uncontaminated evidence this project is ever going to have.
 --
--- Vive en su propio fichero SQLite (WAL) y NO comparte destino con el almacén de velas:
--- las velas se pueden volver a descargar, esto no. Acumula ~60 señales al año, así que dos años de
--- registro son irreemplazables e irreconstruibles — los pesos, la configuración y el código habrán
--- derivado, de modo que no se puede re-derivar qué habría dicho el sistema.
+-- It lives in its own SQLite file (WAL) and does NOT share a destination with the bar store:
+-- bars can be downloaded again, this cannot. It accumulates ~60 signals a year, so two years of
+-- journal are irreplaceable and impossible to reconstruct — the weights, the configuration and the
+-- code will all have drifted, so there is no way to re-derive what the system would have said.
 --
--- Cada fila lleva estampados engine_sha, config_hash y weights_version para que la evidencia sea
--- AUTODESCRIPTIVA: dentro de un año, saber qué versión produjo una señal no puede depender de la
--- memoria de nadie ni del historial de git.
+-- Every row is stamped with engine_sha, config_hash and weights_version so that the evidence is
+-- SELF-DESCRIBING: a year from now, knowing which version produced a signal must not depend on
+-- anybody's memory or on the git history.
 
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -24,8 +24,8 @@ CREATE TABLE IF NOT EXISTS decisions (
     entry_lo          REAL,
     entry_hi          REAL,
     stop              REAL,
-    -- El producto. Se guarda junto al NOMBRE de la regla que lo produjo para que no pueda
-    -- desviarse de su justificación.
+    -- The product. Stored next to the NAME of the rule that produced it, so that it cannot drift
+    -- away from its own justification.
     invalidation_price REAL,
     invalidation_rule  TEXT,
     targets_json      TEXT,
@@ -34,11 +34,11 @@ CREATE TABLE IF NOT EXISTS decisions (
     rr_at_t2          REAL,
     cost_r            REAL,
     p_required        REAL,
-    ev_r_lo           REAL,      -- límite inferior del IC bootstrap; NULL si no es computable
-    n_cell            INTEGER,   -- n del que sale ev_r_lo: nunca un número sin su n
+    ev_r_lo           REAL,      -- lower bound of the bootstrap CI; NULL when not computable
+    n_cell            INTEGER,   -- the n behind ev_r_lo: never a number without its n
     stale             INTEGER NOT NULL DEFAULT 0,
     catching_up       INTEGER NOT NULL DEFAULT 0,
-    manual            INTEGER NOT NULL DEFAULT 0,  -- conteo restringido a mano: fuera de estadística
+    manual            INTEGER NOT NULL DEFAULT 0,  -- hand-constrained count: out of the statistics
     reasons_json      TEXT,
     engine_sha        TEXT    NOT NULL,
     config_hash       TEXT    NOT NULL,
@@ -48,9 +48,9 @@ CREATE TABLE IF NOT EXISTS decisions (
 CREATE INDEX IF NOT EXISTS ix_decisions_ts     ON decisions (symbol, timeframe, ts_ms);
 CREATE INDEX IF NOT EXISTS ix_decisions_arch   ON decisions (archetype, verdict);
 
--- Cada señal emitida escribe TAMBIÉN una fila de brazo nulo con la misma ExitTemplate.
--- El delta emparejado contra un brazo aleatorio bajo reglas de salida idénticas es interpretable
--- mucho antes que la tasa de acierto absoluta.
+-- Every signal emitted ALSO writes a null-arm row with the same ExitTemplate.
+-- The paired delta against a random arm under identical exit rules becomes interpretable long
+-- before the absolute hit rate does.
 CREATE TABLE IF NOT EXISTS null_arm (
     id                INTEGER PRIMARY KEY,
     decision_id       INTEGER NOT NULL REFERENCES decisions(id),
@@ -68,15 +68,15 @@ CREATE TABLE IF NOT EXISTS outcomes (
     mae_r             REAL    NOT NULL,
     mfe_r             REAL    NOT NULL,
     bars_to_resolve   INTEGER NOT NULL,
-    -- Si en la vela caben TP y SL a la vez, se resuelve sobre la serie de 1m. La TASA de ambigüedad
-    -- se registra: por encima del 5% significa que las barreras son demasiado estrechas y las
-    -- etiquetas no describen operaciones reales.
+    -- When TP and SL both fit inside the same bar, it is resolved on the 1m series. The RATE of
+    -- ambiguity is recorded: above 5% it means the barriers are too tight and the labels are not
+    -- describing real trades.
     intrabar_ambiguous INTEGER NOT NULL DEFAULT 0
 ) STRICT;
 
--- Posiciones que el usuario declara haber tomado. Cierra la segunda mitad de "puntos de entrada
--- y de SALIDA": sin esto la herramienta emite un plan y no vuelve a mirarlo.
--- El requisito prohíbe EJECUCIÓN, no seguimiento.
+-- Positions the user declares having taken. This closes the second half of "entry AND EXIT points":
+-- without it the tool emits a plan and never looks at it again.
+-- The requirement forbids EXECUTION, not follow-up.
 CREATE TABLE IF NOT EXISTS manual_positions (
     id                INTEGER PRIMARY KEY,
     decision_id       INTEGER REFERENCES decisions(id),
@@ -91,8 +91,8 @@ CREATE TABLE IF NOT EXISTS manual_positions (
     note              TEXT
 ) STRICT;
 
--- Instantáneas de conteo para el escrutador de tiempo. `provenance` separa la ruta viva del
--- re-parseo offline: el offline NO es causal y jamás puede llegar a la lectura en vivo.
+-- Count snapshots for the time scrutineer. `provenance` keeps the live path apart from the offline
+-- re-parse: the offline one is NOT causal and must never reach the live reading.
 CREATE TABLE IF NOT EXISTS wave_snapshots (
     id                INTEGER PRIMARY KEY,
     ts_ms             INTEGER NOT NULL,
@@ -112,8 +112,8 @@ CREATE TABLE IF NOT EXISTS wave_snapshots (
 
 CREATE INDEX IF NOT EXISTS ix_snap_asof ON wave_snapshots (symbol, timeframe, ts_ms, provenance);
 
--- Pivotes fijados o prohibidos por el usuario. Los conteos restringidos a mano se marcan
--- manual=1 en decisions y quedan FUERA de la estadística, para no contaminar el aparato de honestidad.
+-- Pivots pinned or forbidden by the user. Hand-constrained counts are marked manual=1 in decisions
+-- and stay OUT of the statistics, so they cannot contaminate the honesty apparatus.
 CREATE TABLE IF NOT EXISTS user_anchors (
     id                INTEGER PRIMARY KEY,
     symbol            TEXT    NOT NULL,

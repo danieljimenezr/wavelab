@@ -1,50 +1,49 @@
-"""Familia `volatility`: compresión y expansión del rango. REGISTRO PREVIO.
+"""`volatility` family: compression and expansion of the range. PRE-REGISTRATION.
 
-Escrito antes de ejecutar un solo backtest. Ningún parámetro de este fichero se ha elegido mirando
-resultados: cada uno es el valor convencional de la literatura que lo definió (Bollinger 20/2,
-Keltner EMA-20 ± 2·ATR-10, TTM Squeeze 20/20/1.5, ATR-14, NATR-14, Chandelier 22/3, NR7, 252 como
-ventana anual convencional). Que aparezcan ATR-20, ATR-14, ATR-10 y ATR-22 en distintas hipótesis
-NO es un barrido del periodo del ATR: cada uno viene fijado por el indicador compuesto que lo
-contiene, y ninguno se mueve.
+Written before running a single backtest. No parameter in this file was chosen by looking at
+results: each one is the conventional value from the literature that defined it (Bollinger 20/2,
+Keltner EMA-20 ± 2·ATR-10, TTM Squeeze 20/20/1.5, ATR-14, NATR-14, Chandelier 22/3, NR7, 252 as the
+conventional annual window). That ATR-20, ATR-14, ATR-10 and ATR-22 appear in different hypotheses
+is NOT a sweep over the ATR period: each one is fixed by the composite indicator that contains it,
+and none of them moves.
 
-Mecanismo común de la familia
+The family's shared mechanism
 -----------------------------
-Agrupamiento de volatilidad (Mandelbrot 1963, Engle 1982): la varianza está autocorrelacionada
-aunque el retorno no lo esté. En un mercado 24/7 con creadores de mercado apalancados, un periodo
-tranquilo comprime el inventario de liquidez: los MM estrechan sus horquillas, los vendedores de
-volatilidad se cargan de gamma corta y las órdenes de stop de todo el mundo se acumulan justo
-fuera de un rango cada vez más estrecho. Cuando el rango se rompe, la cobertura de esa gamma corta
-y la cascada de stops empujan en la misma dirección: el movimiento grande nace del periodo
-tranquilo, no del ruidoso.
+Volatility clustering (Mandelbrot 1963, Engle 1982): variance is autocorrelated even when the
+return is not. In a 24/7 market with leveraged market makers, a quiet period compresses the
+inventory of liquidity: MMs narrow their spreads, volatility sellers load up on short gamma and
+everybody's stop orders pile up just outside an ever-narrower range. When the range breaks, the
+hedging of that short gamma and the stop cascade push in the same direction: the big move is born
+in the quiet period, not in the noisy one.
 
-Estimador de volatilidad realizada
-----------------------------------
-Rogers-Satchell: RS_t = ln(H/C)·ln(H/O) + ln(L/C)·ln(L/O). Elegido sobre Garman-Klass porque es
-insesgado con deriva distinta de cero (BTC tiene deriva fuerte y GK la contabiliza como varianza),
-y sobre Yang-Zhang porque YZ dedica un término al salto de apertura, que en un activo 24/7 sin
-sesión no existe: ese término sería ruido de microestructura del corte arbitrario de la vela.
+Realised volatility estimator
+-----------------------------
+Rogers-Satchell: RS_t = ln(H/C)·ln(H/O) + ln(L/C)·ln(L/O). Chosen over Garman-Klass because it is
+unbiased under non-zero drift (BTC has strong drift and GK books it as variance), and over
+Yang-Zhang because YZ devotes a term to the opening jump, which in a 24/7 asset with no session
+does not exist: that term would be microstructure noise from the arbitrary candle boundary.
 
-Contrastes deliberados (esto NO es búsqueda en rejilla)
+Deliberate contrasts (this is NOT a grid search)
 -------------------------------------------------------
-Tres parejas registradas a propósito, con la predicción de cuál gana escrita de antemano:
+Three pairs registered on purpose, with the prediction of which one wins written in advance:
 
-  1. `rs_vol_pct_low_carry` vs `bbw_pct_low_carry`: MISMA regla de dirección, distinto estimador de
-     compresión (RS sobre OHLC vs anchura de Bollinger, que es desviación típica de cierres). Si el
-     mecanismo "lo tranquilo precede a lo grande" es real, las dos deberían ir en el mismo sentido.
-     Si solo una funciona, lo que se está midiendo es el estimador, no el mecanismo.
-  2. `rs_vol_pct_high_fade` vs `rs_vol_pct_high_carry`: complementarias exactas. Como mucho una
-     puede tener ventaja. Registrarlas juntas impide elegir el signo después de mirar.
-  3. `natr_low_regime_trend` vs `natr_high_regime_trend`: partición por la mediana de la MISMA
-     señal de tendencia. Juntas reconstruyen la señal sin filtrar, así que la comparación aísla el
-     efecto del régimen de volatilidad y no el de la tendencia.
+  1. `rs_vol_pct_low_carry` vs `bbw_pct_low_carry`: SAME direction rule, different compression
+     estimator (RS over OHLC vs Bollinger width, which is the standard deviation of closes). If the
+     "quiet precedes big" mechanism is real, the two should point the same way. If only one of them
+     works, what is being measured is the estimator, not the mechanism.
+  2. `rs_vol_pct_high_fade` vs `rs_vol_pct_high_carry`: exact complements. At most one of them can
+     have an edge. Registering them together makes it impossible to choose the sign after looking.
+  3. `natr_low_regime_trend` vs `natr_high_regime_trend`: a median split of the SAME trend signal.
+     Together they reconstruct the unfiltered signal, so the comparison isolates the effect of the
+     volatility regime and not that of the trend.
 
-Causalidad
-----------
-Todo indicador aquí usa solo datos hasta i incluido. Las ventanas móviles se alinean con
-`sliding_window_view(x, n)[j] == x[j : j+n]`, cuyo resultado se escribe en el índice `j+n-1`. No hay
-ningún desplazamiento negativo, ningún `find_peaks`, ningún estadístico definido contra el array
-entero. Los estados con memoria (`squeeze`, Keltner, Chandelier) se calculan en bucles hacia
-delante, que son causales por construcción.
+Causality
+---------
+Every indicator here uses only data up to and including i. Rolling windows are aligned with
+`sliding_window_view(x, n)[j] == x[j : j+n]`, whose result is written at index `j+n-1`. There is no
+negative shift, no `find_peaks`, and no statistic defined against the whole array. The stateful
+constructions (`squeeze`, Keltner, Chandelier) are computed in forward loops, which are causal by
+construction.
 """
 
 from __future__ import annotations
@@ -56,18 +55,18 @@ from numpy.lib.stride_tricks import sliding_window_view
 from wavelab.hypotheses.base import Hypothesis, Series, register
 
 # --------------------------------------------------------------------------------------------
-# Utilidades. Ninguna mira hacia adelante.
+# Utilities. None of them looks ahead.
 # --------------------------------------------------------------------------------------------
 
 
 def _ohlc(s: Series) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """talib exige float64 contiguo."""
+    """talib requires contiguous float64."""
     f = lambda a: np.ascontiguousarray(a, dtype=np.float64)
     return f(s.open), f(s.high), f(s.low), f(s.close)
 
 
 def _roll_mean(x: np.ndarray, n: int) -> np.ndarray:
-    """Media de las n últimas observaciones, la de i incluida. NaN si la ventana toca un NaN."""
+    """Mean of the last n observations, i's included. NaN if the window touches a NaN."""
     out = np.full(x.size, np.nan)
     if x.size >= n:
         out[n - 1:] = sliding_window_view(x, n).mean(axis=1)
@@ -75,29 +74,29 @@ def _roll_mean(x: np.ndarray, n: int) -> np.ndarray:
 
 
 def _rolling_rank(x: np.ndarray, n: int) -> np.ndarray:
-    """Percentil de x[i] dentro de la ventana x[i-n+1 : i+1]. Devuelve NaN durante el calentamiento.
+    """Percentile of x[i] within the window x[i-n+1 : i+1]. Returns NaN during warm-up.
 
-    La ventana TERMINA en i, nunca lo rodea. Un percentil calculado contra el array entero sería
-    lookahead puro (sabría hoy cuál fue la volatilidad máxima de 2031), y es exactamente el error
-    que este proyecto persigue.
+    The window ENDS at i, it never straddles it. A percentile computed against the whole array
+    would be pure lookahead (it would know today what the maximum volatility of 2031 was), and that
+    is exactly the mistake this project hunts.
     """
     out = np.full(x.size, np.nan)
     if x.size < n:
         return out
-    win = sliding_window_view(x, n)                  # win[j] == x[j : j+n]  ->  índice j+n-1
-    # Cuenta de NaN por ventana sin propagar NaN (cumsum sobre enteros).
+    win = sliding_window_view(x, n)                  # win[j] == x[j : j+n]  ->  index j+n-1
+    # NaN count per window without propagating NaN (cumsum over integers).
     cs = np.concatenate(([0], np.cumsum(np.isnan(x).astype(np.int64))))
     valid = (cs[n:] - cs[:-n]) == 0
     last = win[:, -1]
-    cnt = (win < last[:, None]).sum(axis=1)          # comparar con NaN da False; se descarta abajo
+    cnt = (win < last[:, None]).sum(axis=1)          # comparing with NaN gives False; dropped below
     out[n - 1:] = np.where(valid, cnt / (n - 1), np.nan)
     return out
 
 
 def _shift(x: np.ndarray, k: int) -> np.ndarray:
-    """Valor de hace k velas. k > 0 SIEMPRE: un k negativo sería mirar el futuro."""
+    """Value from k candles ago. k > 0 ALWAYS: a negative k would be looking into the future."""
     if k <= 0:
-        raise ValueError("_shift solo mira hacia atrás")
+        raise ValueError("_shift only looks backwards")
     out = np.full(x.size, np.nan)
     if k < x.size:
         out[k:] = x[: x.size - k]
@@ -105,20 +104,20 @@ def _shift(x: np.ndarray, k: int) -> np.ndarray:
 
 
 def _rs_vol(s: Series, n: int) -> np.ndarray:
-    """Volatilidad realizada de Rogers-Satchell sobre las n últimas velas, la de i incluida."""
+    """Rogers-Satchell realised volatility over the last n candles, i's included."""
     o, h, l, c = _ohlc(s)
     term = np.full(c.size, np.nan)
     pos = (o > 0) & (h > 0) & (l > 0) & (c > 0)
     if pos.any():
         oo, hh, ll, cc = o[pos], h[pos], l[pos], c[pos]
         term[pos] = np.log(hh / cc) * np.log(hh / oo) + np.log(ll / cc) * np.log(ll / oo)
-    # RS es no negativo por construcción (H >= max(O,C) y L <= min(O,C)); el clip solo protege de
-    # ruido numérico. np.maximum propaga NaN, así que el calentamiento se conserva como NaN.
+    # RS is non-negative by construction (H >= max(O,C) and L <= min(O,C)); the clip only guards
+    # against numerical noise. np.maximum propagates NaN, so the warm-up is preserved as NaN.
     return np.sqrt(_roll_mean(np.maximum(term, 0.0), n))
 
 
 def _hold(entry: np.ndarray, flat: np.ndarray) -> np.ndarray:
-    """Mantiene la última entrada hasta que `flat` la cierra. Bucle hacia delante: causal."""
+    """Holds the last entry until `flat` closes it. Forward loop: causal."""
     out = np.zeros(entry.size, dtype=np.int8)
     cur = 0
     for i in range(entry.size):
@@ -132,7 +131,7 @@ def _hold(entry: np.ndarray, flat: np.ndarray) -> np.ndarray:
 
 
 # --------------------------------------------------------------------------------------------
-# 1. Squeeze de Bollinger dentro de Keltner (TTM Squeeze), operado en la liberación.
+# 1. Bollinger squeeze inside Keltner (TTM Squeeze), traded on the release.
 # --------------------------------------------------------------------------------------------
 
 
@@ -171,30 +170,30 @@ def _squeeze_release(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="volatility.squeeze_bb_kc_release",
     family="volatility",
-    rationale="Cuando las bandas de Bollinger (20, 2σ) caben dentro del canal de Keltner "
-              "(EMA-20 ± 1.5·ATR-20), la dispersión de cierres se ha hundido por debajo del rango "
-              "verdadero: el mercado cotiza en un pañuelo mientras sigue habiendo recorrido "
-              "intravela. Ese estado lo fabrican creadores de mercado y vendedores de volatilidad "
-              "que estrechan horquillas y acumulan gamma corta, y traders de rango que colocan "
-              "stops justo fuera del pañuelo. Cuando el precio sale, esos mismos participantes "
-              "tienen que cubrirse en la dirección del movimiento y los stops se ejecutan a "
-              "mercado, de modo que el flujo que sigue a la ruptura es forzado, no discrecional.",
-    prior="Esperamos ventaja positiva en la dirección de la ruptura respecto a la media móvil de "
-          "20, concentrada en las primeras velas tras la liberación. Esperamos que FALLE, con "
-          "ventaja negativa, cuando la compresión ocurre dentro de un rango amplio de orden "
-          "superior (falsa ruptura que revierte al centro) y en 15m, donde el 'squeeze' es a "
-          "menudo un hueco de liquidez de madrugada y no acumulación de posicionamiento. Si la "
-          "ventaja resultara indistinguible de cero en los tres timeframes, el mecanismo de gamma "
-          "corta no está operando en BTC al detalle de vela.",
+    rationale="When the Bollinger bands (20, 2σ) fit inside the Keltner channel "
+              "(EMA-20 ± 1.5·ATR-20), the dispersion of closes has sunk below the true range: the "
+              "market is trading in a handkerchief while there is still intra-candle travel. That "
+              "state is manufactured by market makers and volatility sellers who narrow spreads "
+              "and accumulate short gamma, and by range traders who place stops just outside the "
+              "handkerchief. When price leaves, those same participants have to hedge in the "
+              "direction of the move and the stops execute at market, so the flow that follows the "
+              "break is forced, not discretionary.",
+    prior="We expect a positive edge in the direction of the break relative to the 20-period "
+          "moving average, concentrated in the first candles after the release. We expect it to "
+          "FAIL, with a negative edge, when the compression happens inside a wide higher-order "
+          "range (a false break that reverts to the middle) and on 15m, where the 'squeeze' is "
+          "often an overnight liquidity hole rather than an accumulation of positioning. If the "
+          "edge turned out to be indistinguishable from zero on all three timeframes, the "
+          "short-gamma mechanism is not operating in BTC at candle resolution.",
     fn=_squeeze_release,
-    params={"bb_periodo": 20, "bb_sigma": 2.0, "kc_periodo": 20, "kc_atr": 20, "kc_mult": 1.5},
+    params={"bb_period": 20, "bb_sigma": 2.0, "kc_period": 20, "kc_atr": 20, "kc_mult": 1.5},
     timeframes=("1h", "4h", "1d"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 2 y 3. Compresión medida de dos formas distintas, MISMA regla de dirección.
+# 2 and 3. Compression measured two different ways, SAME direction rule.
 # --------------------------------------------------------------------------------------------
 
 
@@ -212,26 +211,26 @@ def _rs_vol_pct_low_carry(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="volatility.rs_vol_pct_low_carry",
     family="volatility",
-    rationale="La volatilidad realizada de Rogers-Satchell sobre 24 velas, situada en su percentil "
-              "móvil de 252, mide si el mercado está tranquilo RESPECTO A SÍ MISMO y no respecto a "
-              "un umbral absoluto que la inflación de precio de BTC dejaría obsoleto. Con "
-              "volatilidad en el quintil inferior, quien está posicionado no está siendo expulsado "
-              "por ruido: el coste de mantener una posición tendencial cae, las liquidaciones "
-              "forzosas se detienen y la deriva se acumula sin interrupciones. La dirección la "
-              "damos con el precio contra la EMA-55, deliberadamente trivial, porque lo que se "
-              "contrasta aquí es la PUERTA de volatilidad, no el detector de tendencia.",
-    prior="Esperamos ventaja positiva mientras la volatilidad esté en el quintil bajo, y que esa "
-          "ventaja sea MAYOR que la de la misma regla de dirección sin filtrar. Esperamos que "
-          "falle en dos sitios concretos: (a) tras una caída estructural del nivel de volatilidad "
-          "(mercado lateral prolongado), donde el percentil se queda anclado abajo y la señal "
-          "opera un rango sin tendencia; (b) en 1d, donde 252 velas son un año entero y el "
-          "percentil arrastra régimen viejo. Si la ventaja fuese igual o menor que la de la EMA-55 "
-          "sin filtrar, la puerta de volatilidad no aporta nada. NOTA DE AUDITORÍA (2026-09-08): "
-          "ese brazo sin filtrar no estaba registrado, de modo que el criterio de falsación de esta "
-          "hipótesis y el de `bbw_pct_low_carry` no se podían ejecutar; se ha registrado como "
-          "`volatility.ema55_side_unfiltered` y es contra él contra quien deben medirse las dos.",
+    rationale="Rogers-Satchell realised volatility over 24 candles, placed in its 252-period "
+              "rolling percentile, measures whether the market is quiet RELATIVE TO ITSELF rather "
+              "than relative to an absolute threshold that BTC's price inflation would render "
+              "obsolete. With volatility in the bottom quintile, whoever is positioned is not "
+              "being shaken out by noise: the cost of holding a trend position falls, forced "
+              "liquidations stop and the drift accumulates without interruption. We give the "
+              "direction with price against the EMA-55, deliberately trivial, because what is "
+              "being tested here is the volatility GATE, not the trend detector.",
+    prior="We expect a positive edge while volatility is in the low quintile, and for that edge to "
+          "be GREATER than that of the same direction rule unfiltered. We expect it to fail in two "
+          "specific places: (a) after a structural fall in the level of volatility (a prolonged "
+          "range), where the percentile stays pinned at the bottom and the signal trades a range "
+          "with no trend; (b) on 1d, where 252 candles are a whole year and the percentile drags "
+          "an old regime along with it. If the edge were equal to or smaller than that of the "
+          "unfiltered EMA-55, the volatility gate adds nothing. AUDIT NOTE (2026-09-08): "
+          "that unfiltered arm was not registered, so neither this hypothesis's falsification "
+          "criterion nor `bbw_pct_low_carry`'s could be run; it has been registered as "
+          "`volatility.ema55_side_unfiltered` and that is what both must be measured against.",
     fn=_rs_vol_pct_low_carry,
-    params={"rs_ventana": 24, "percentil_ventana": 252, "umbral": 0.20, "ema_direccion": 55},
+    params={"rs_window": 24, "percentile_window": 252, "threshold": 0.20, "ema_direction": 55},
     timeframes=("1h", "4h", "1d"),
     min_warmup=300,
 ))
@@ -255,29 +254,30 @@ def _bbw_pct_low_carry(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="volatility.bbw_pct_low_carry",
     family="volatility",
-    rationale="Contraste controlado de la anterior: idéntica regla de dirección (precio contra "
-              "EMA-55), idéntica ventana de percentil (252), idéntico umbral (quintil inferior), y "
-              "lo ÚNICO que cambia es el estimador de compresión: anchura de Bollinger, que es "
-              "desviación típica de CIERRES, frente a Rogers-Satchell, que usa el rango OHLC "
-              "completo. Los dos pueden divergir mucho: una vela de mecha larga y cierre plano "
-              "(liquidación absorbida) es tranquila para Bollinger y ruidosa para RS. Si el "
-              "mecanismo de agrupamiento es real, debería aparecer con los dos estimadores.",
-    prior="Esperamos el MISMO signo que en `rs_vol_pct_low_carry` y una magnitud algo menor, "
-          "porque el estimador de cierres desperdicia la información de las mechas. La predicción "
-          "falsable fuerte es la conjunta: si una de las dos da ventaja clara y la otra da cero o "
-          "signo contrario, la conclusión correcta NO es 'funciona la compresión' sino que "
-          "estamos midiendo una peculiaridad del estimador, y ninguna de las dos debe sobrevivir a "
-          "la corrección por contraste múltiple como evidencia del mecanismo.",
+    rationale="A controlled contrast to the previous one: identical direction rule (price against "
+              "the EMA-55), identical percentile window (252), identical threshold (bottom "
+              "quintile), and the ONLY thing that changes is the compression estimator: Bollinger "
+              "width, which is the standard deviation of CLOSES, against Rogers-Satchell, which "
+              "uses the full OHLC range. The two can diverge a great deal: a candle with a long "
+              "wick and a flat close (an absorbed liquidation) is quiet for Bollinger and noisy "
+              "for RS. If the clustering mechanism is real, it should show up with both "
+              "estimators.",
+    prior="We expect the SAME sign as `rs_vol_pct_low_carry` and a somewhat smaller magnitude, "
+          "because the close-based estimator throws away the information in the wicks. The strong "
+          "falsifiable prediction is the joint one: if one of the two gives a clear edge and the "
+          "other gives zero or the opposite sign, the correct conclusion is NOT 'compression "
+          "works' but that we are measuring a quirk of the estimator, and neither of the two "
+          "should survive the multiple-comparisons correction as evidence for the mechanism.",
     fn=_bbw_pct_low_carry,
-    params={"bb_periodo": 20, "bb_sigma": 2.0, "percentil_ventana": 252, "umbral": 0.20,
-            "ema_direccion": 55},
+    params={"bb_period": 20, "bb_sigma": 2.0, "percentile_window": 252, "threshold": 0.20,
+            "ema_direction": 55},
     timeframes=("1h", "4h", "1d"),
     min_warmup=300,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 4 y 5. Volatilidad alta: complementarias exactas. Como mucho una puede tener ventaja.
+# 4 and 5. High volatility: exact complements. At most one of them can have an edge.
 # --------------------------------------------------------------------------------------------
 
 
@@ -295,22 +295,21 @@ def _rs_vol_pct_high_fade(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="volatility.rs_vol_pct_high_fade",
     family="volatility",
-    rationale="En el decil superior de volatilidad realizada, el movimiento de las últimas 3 velas "
-              "está dominado por liquidaciones forzosas: el motor de riesgo del exchange vende (o "
-              "compra) a mercado sin mirar el precio, y quien provee liquidez contra esa cascada "
-              "exige una prima. Si esa prima es la parte grande del desplazamiento, el precio "
-              "vuelve cuando la cascada agota el colateral disponible, y el proveedor de liquidez "
-              "se lleva el retroceso. Esta hipótesis apuesta a que el exceso es prima de "
-              "liquidez, no información.",
-    prior="Esperamos ventaja positiva al contrarrestar el movimiento de 3 velas. Esperamos que "
-          "FALLE, con ventaja claramente negativa, si la volatilidad alta en BTC es informativa en "
-          "lugar de mecánica: en marzo de 2020 o en el desapalancamiento de mayo de 2021 la "
-          "cascada continuó días. Como está registrada junto a su complementaria exacta "
-          "`rs_vol_pct_high_carry`, ambas no pueden ganar; si las dos salen indistinguibles de "
-          "cero, el decil alto de volatilidad simplemente no contiene señal direccional y las dos "
-          "deben publicarse como fallidas.",
+    rationale="In the top decile of realised volatility, the move of the last 3 candles is "
+              "dominated by forced liquidations: the exchange's risk engine sells (or buys) at "
+              "market without looking at the price, and whoever provides liquidity against that "
+              "cascade demands a premium. If that premium is the large part of the displacement, "
+              "price comes back once the cascade exhausts the available collateral, and the "
+              "liquidity provider pockets the retracement. This hypothesis bets that the excess is "
+              "a liquidity premium, not information.",
+    prior="We expect a positive edge from fading the 3-candle move. We expect it to FAIL, with a "
+          "clearly negative edge, if high volatility in BTC is informative rather than mechanical: "
+          "in March 2020 or in the May 2021 deleveraging the cascade ran for days. Since it is "
+          "registered alongside its exact complement `rs_vol_pct_high_carry`, they cannot both "
+          "win; if both come out indistinguishable from zero, the top volatility decile simply "
+          "contains no directional signal and both must be published as failures.",
     fn=_rs_vol_pct_high_fade,
-    params={"rs_ventana": 24, "percentil_ventana": 252, "umbral": 0.90, "impulso_velas": 3},
+    params={"rs_window": 24, "percentile_window": 252, "threshold": 0.90, "impulse_bars": 3},
     timeframes=("1h", "4h", "1d"),
     min_warmup=300,
 ))
@@ -330,29 +329,30 @@ def _rs_vol_pct_high_carry(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="volatility.rs_vol_pct_high_carry",
     family="volatility",
-    rationale="La lectura opuesta del mismo estado: en el decil superior de volatilidad realizada, "
-              "la liquidación forzosa es reflexiva. Cada liquidación mueve el precio hacia el "
-              "siguiente grupo de garantías, que se liquida a su vez; el libro se vacía en la "
-              "dirección del movimiento y los creadores de mercado retiran cotizaciones en vez de "
-              "absorber. Bajo ese mecanismo, el exceso de volatilidad es la propia señal de que la "
-              "cascada sigue viva y la continuación domina al retroceso en el horizonte de unas "
-              "pocas velas.",
-    prior="Esperamos ventaja positiva en la dirección del movimiento de 3 velas, pero PEQUEÑA en "
-          "términos netos, porque opera justo cuando la horquilla y el deslizamiento "
-          "son máximos: es una predicción que puede ser correcta en signo y aun así no sobrevivir "
-          "a los costes, y así debe evaluarse. Esperamos que falle en los máximos de capitulación, "
-          "donde la última vela del decil alto es exactamente el giro. Es complementaria exacta de "
-          "`rs_vol_pct_high_fade`: registrarlas juntas impide elegir el signo después de mirar.",
+    rationale="The opposite reading of the same state: in the top decile of realised volatility, "
+              "forced liquidation is reflexive. Each liquidation moves price towards the next "
+              "cluster of collateral, which liquidates in turn; the book empties out in the "
+              "direction of the move and market makers pull their quotes instead of absorbing. "
+              "Under that mechanism, the excess volatility is itself the signal that the cascade "
+              "is still alive, and continuation dominates the retracement over a horizon of a few "
+              "candles.",
+    prior="We expect a positive edge in the direction of the 3-candle move, but a SMALL one in net "
+          "terms, because it trades exactly when spread and slippage "
+          "are at their worst: it is a prediction that can be right in sign and still not survive "
+          "costs, and that is how it must be evaluated. We expect it to fail at capitulation "
+          "highs, where the last candle of the top decile is precisely the turn. It is the exact "
+          "complement of `rs_vol_pct_high_fade`: registering them together makes it impossible to "
+          "choose the sign after looking.",
     fn=_rs_vol_pct_high_carry,
-    params={"rs_ventana": 24, "percentil_ventana": 252, "umbral": 0.90, "impulso_velas": 3},
+    params={"rs_window": 24, "percentile_window": 252, "threshold": 0.90, "impulse_bars": 3},
     timeframes=("1h", "4h", "1d"),
     min_warmup=300,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 6, 7, 8. Contracción de rango y expansión, a nivel de vela. Horizonte de UNA vela: no
-# introducimos un parámetro de duración de la posición que después habría que justificar.
+# 6, 7, 8. Range contraction and expansion, at the candle level. Horizon of ONE candle: we do not
+# introduce a position-duration parameter that would then have to be justified.
 # --------------------------------------------------------------------------------------------
 
 
@@ -360,8 +360,8 @@ def _nr7_breakout(s: Series) -> np.ndarray:
     o, h, l, c = _ohlc(s)
     tr = talib.TRANGE(h, l, c)
     min7 = talib.MIN(tr, 7)
-    es_nr7 = np.where(np.isnan(tr) | np.isnan(min7), np.nan, (tr <= min7).astype(float))
-    nr7_prev = _shift(es_nr7, 1)
+    is_nr7 = np.where(np.isnan(tr) | np.isnan(min7), np.nan, (tr <= min7).astype(float))
+    nr7_prev = _shift(is_nr7, 1)
     hi_prev, lo_prev = _shift(h, 1), _shift(l, 1)
     out = np.zeros(c.size, dtype=np.int8)
     ok = ~(np.isnan(nr7_prev) | np.isnan(hi_prev) | np.isnan(lo_prev)) & (nr7_prev == 1.0)
@@ -373,21 +373,21 @@ def _nr7_breakout(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="volatility.nr7_breakout",
     family="volatility",
-    rationale="NR7 de Toby Crabel: la vela anterior tuvo el rango verdadero más estrecho de las "
-              "últimas siete. Un rango mínimo local significa que compradores y vendedores "
-              "acordaron el precio durante un periodo completo, lo que concentra las órdenes en "
-              "reposo (stops y límites) en una franja muy delgada. El cierre de la vela siguiente "
-              "fuera de esa franja consume esas órdenes de golpe, y el desequilibrio resultante es "
-              "mecánico. Es la versión mínima del mecanismo de la familia: contracción medida sin "
-              "estimadores ni ventanas largas, solo el rango de siete velas.",
-    prior="Esperamos ventaja positiva en la dirección de la ruptura, con horizonte de una sola "
-          "vela. Esperamos que sea MAYOR en 15m y 1h, donde el libro de órdenes en reposo es "
-          "relevante frente al tamaño típico, y que se degrade o desaparezca en 4h, donde una vela "
-          "agrega demasiadas manos para que quede un desequilibrio explotable. Si la ventaja "
-          "creciera con el timeframe estaríamos midiendo tendencia, no contracción de rango, y la "
-          "hipótesis quedaría refutada aunque el número fuese bueno.",
+    rationale="Toby Crabel's NR7: the previous candle had the narrowest true range of the last "
+              "seven. A local range minimum means buyers and sellers agreed on the price for a "
+              "whole period, which concentrates the resting orders (stops and limits) into a very "
+              "thin band. The next candle closing outside that band consumes those orders in one "
+              "go, and the resulting imbalance is mechanical. It is the minimal version of the "
+              "family's mechanism: contraction measured with no estimators and no long windows, "
+              "only the range over seven candles.",
+    prior="We expect a positive edge in the direction of the break, with a horizon of a single "
+          "candle. We expect it to be LARGER on 15m and 1h, where the book of resting orders is "
+          "significant relative to typical size, and to degrade or disappear on 4h, where a candle "
+          "aggregates too many hands for any exploitable imbalance to be left. If the edge grew "
+          "with the timeframe we would be measuring trend, not range contraction, and the "
+          "hypothesis would be refuted even if the number were good.",
     fn=_nr7_breakout,
-    params={"nr_ventana": 7, "horizonte_velas": 1},
+    params={"nr_window": 7, "horizon_bars": 1},
     timeframes=("15m", "1h", "4h"),
     min_warmup=200,
 ))
@@ -408,30 +408,31 @@ def _inside_bar_breakout(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="volatility.inside_bar_breakout",
     family="volatility",
-    rationale="Vela interior: el rango de la vela anterior está ESTRICTAMENTE contenido en el de "
-              "la que la precede. No es lo mismo que NR7 y por eso se registra aparte: NR7 es "
-              "estrechez relativa a una muestra de siete, la vela interior es una condición de "
-              "contención absoluta respecto a UNA vela concreta, la madre. La contención significa "
-              "que ningún participante logró imponer un precio fuera del rango que ya se había "
-              "explorado y rechazado: el equilibrio se ha reafirmado en un rango conocido, con las "
-              "órdenes ancladas a los extremos de la vela interior. Romperlos por cierre invalida "
-              "esa reafirmación.",
-    prior="Esperamos ventaja positiva, del mismo signo que `nr7_breakout` y de magnitud similar. "
-          "La comparación entre ambas es informativa por sí misma: si la contención absoluta "
-          "funciona y la estrechez relativa no (o al revés), lo que hay es una peculiaridad del "
-          "criterio y no el mecanismo de contracción. Esperamos que falle en mercados con deriva "
-          "fuerte y sostenida, donde la vela interior es solo una pausa de continuación y la "
-          "ruptura ya llega tarde, y en 15m durante las horas de menor volumen, donde la "
-          "contención refleja ausencia de participantes y no acuerdo entre ellos. "
-          "NOTA DE AUDITORÍA (2026-09-08): `candles.vela_interior_ruptura` registra el mismo patrón "
-          "de dos velas pero rompiendo los extremos de la vela MADRE. Como el máximo de la vela "
-          "interior es menor que el de la madre, todo evento de aquella es también evento de esta: "
-          "son el mismo patrón con dos umbrales distintos. Se conservan las dos porque el nivel es "
-          "la afirmación y son niveles distintos, pero son ensayos DEPENDIENTES y así deben "
-          "contarse. (Una tercera registración del mismo patrón, `structure.inside_bar_break`, era "
-          "un duplicado exacto de la de `candles` y se ha eliminado en la auditoría.)",
+    rationale="Inside bar: the range of the previous candle is STRICTLY contained within that of "
+              "the one before it. It is not the same thing as NR7, and that is why it is "
+              "registered separately: NR7 is narrowness relative to a sample of seven, the inside "
+              "bar is a condition of absolute containment relative to ONE specific candle, the "
+              "mother. Containment means no participant managed to impose a price outside the "
+              "range that had already been explored and rejected: equilibrium has reasserted "
+              "itself within a known range, with the orders anchored to the extremes of the inside "
+              "candle. Breaking them on a close invalidates that reassertion.",
+    prior="We expect a positive edge, of the same sign as `nr7_breakout` and of similar magnitude. "
+          "The comparison between the two is informative in itself: if absolute containment works "
+          "and relative narrowness does not (or the other way round), what we have is a quirk of "
+          "the criterion and not the contraction mechanism. We expect it to fail in markets with "
+          "strong sustained drift, where the inside bar is only a continuation pause and the break "
+          "already arrives late, and on 15m during the lowest-volume hours, where the containment "
+          "reflects an absence of participants rather than agreement among them. "
+          "AUDIT NOTE (2026-09-08): `candles.inside_bar_break` registers the same two-candle "
+          "pattern but breaking the extremes of the MOTHER candle. Since the inside candle's high "
+          "is lower than the mother's, every event of the former is also an event of the latter: "
+          "they are the same pattern with two different thresholds. Both are kept because the "
+          "level is the claim and these are different levels, but they are DEPENDENT trials and "
+          "must be counted as such. (A third registration of the same pattern, "
+          "`structure.inside_bar_break`, was an exact duplicate of the `candles` one and has been "
+          "removed in the audit.)",
     fn=_inside_bar_breakout,
-    params={"horizonte_velas": 1},
+    params={"horizon_bars": 1},
     timeframes=("15m", "1h", "4h"),
     min_warmup=200,
 ))
@@ -454,29 +455,29 @@ def _wide_range_thrust(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="volatility.wide_range_thrust",
     family="volatility",
-    rationale="Expansión de rango DESPUÉS de contracción, que es la formulación directa de 'los "
-              "movimientos grandes nacen de periodos tranquilos': exigimos que el ATR-14 de la "
-              "vela previa estuviera por debajo de su mediana de 100 velas (contracción) y que el "
-              "rango verdadero actual supere el doble de ese ATR (expansión). Una vela así, "
-              "saliendo de una base tranquila, no la produce el flujo minorista repartido: la "
-              "produce un participante grande que necesita ejecutar y acepta pagar el rango, o el "
-              "disparo de un grupo de stops. La dirección la da el cuerpo de la vela, cierre "
-              "contra apertura, porque es lo que revela quién ganó el intercambio.",
-    prior="Esperamos ventaja positiva en la dirección del cuerpo, con horizonte de una vela. "
-          "Esperamos que FALLE claramente cuando el empuje es una reacción a una noticia puntual "
-          "que se retrae entera en las velas siguientes (patrón típico en BTC con anuncios "
-          "regulatorios), y en 1d, donde una vela de expansión suele ser ya el final del "
-          "movimiento y no su principio. Si la ventaja fuese negativa de forma consistente, el "
-          "mecanismo correcto sería el de agotamiento y no el de inicio de expansión.",
+    rationale="Range expansion AFTER contraction, which is the direct formulation of 'big moves "
+              "are born in quiet periods': we require the previous candle's ATR-14 to have been "
+              "below its 100-candle median (contraction) and the current true range to exceed "
+              "twice that ATR (expansion). A candle like that, coming out of a quiet base, is not "
+              "produced by dispersed retail flow: it is produced by a large participant who needs "
+              "to execute and accepts paying the range, or by a cluster of stops being triggered. "
+              "The direction is given by the candle's body, close against open, because that is "
+              "what reveals who won the exchange.",
+    prior="We expect a positive edge in the direction of the body, with a horizon of one candle. "
+          "We expect it to FAIL clearly when the thrust is a reaction to a one-off news item that "
+          "is entirely retraced over the following candles (a typical pattern in BTC with "
+          "regulatory announcements), and on 1d, where an expansion candle is usually already the "
+          "end of the move and not its beginning. If the edge were consistently negative, the "
+          "correct mechanism would be exhaustion and not the start of an expansion.",
     fn=_wide_range_thrust,
-    params={"atr_periodo": 14, "mult_expansion": 2.0, "mediana_ventana": 100, "horizonte_velas": 1},
+    params={"atr_period": 14, "expansion_mult": 2.0, "median_window": 100, "horizon_bars": 1},
     timeframes=("15m", "1h", "4h"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 9 y 10. Estructuras escaladas por volatilidad: el umbral se mueve con el ATR, no con el precio.
+# 9 and 10. Volatility-scaled structures: the threshold moves with the ATR, not with the price.
 # --------------------------------------------------------------------------------------------
 
 
@@ -504,23 +505,23 @@ def _keltner_breakout(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="volatility.keltner_breakout",
     family="volatility",
-    rationale="Ruptura normalizada por volatilidad, sin componente de compresión: cierre por "
-              "encima de EMA-20 + 2·ATR-10, o por debajo de EMA-20 − 2·ATR-10. Bajo un paseo "
-              "aleatorio con la volatilidad ACTUAL, alejarse dos ATR de la media es raro; que "
-              "ocurra es evidencia de que ha entrado un flujo que el nivel de volatilidad vigente "
-              "no explica, es decir, de un cambio en la deriva y no de una fluctuación. El umbral "
-              "se reescala solo, así que la misma regla es igual de exigente a 20.000 que a "
-              "100.000 dólares. Se mantiene hasta que el cierre vuelve a cruzar la EMA-20, que "
-              "es la definición mínima de 'el flujo se acabó'.",
-    prior="Esperamos ventaja positiva y, sobre todo, ASIMETRÍA respecto al squeeze: si "
-          "`squeeze_bb_kc_release` bate a esta hipótesis, la compresión previa aporta información "
-          "por encima de la ruptura sola, que es la afirmación central de la familia. Si gana "
-          "esta en cambio, la compresión es decorativa y lo único que funciona es la ruptura "
-          "normalizada por volatilidad. "
-          "Esperamos que falle en régimen lateral con volatilidad media, donde el precio cruza los "
-          "dos ATR en ambos sentidos repetidamente y cada cruce cuesta una horquilla.",
+    rationale="A volatility-normalised breakout with no compression component: a close above "
+              "EMA-20 + 2·ATR-10, or below EMA-20 − 2·ATR-10. Under a random walk with the CURRENT "
+              "volatility, getting two ATR away from the mean is rare; that it happens is evidence "
+              "that flow has arrived which the prevailing volatility level does not explain — that "
+              "is, evidence of a change in the drift and not of a fluctuation. The threshold "
+              "rescales itself, so the same rule is equally demanding at 20,000 as at 100,000 "
+              "dollars. It is held until the close crosses back over the EMA-20, which is the "
+              "minimal definition of 'the flow is over'.",
+    prior="We expect a positive edge and, above all, an ASYMMETRY with respect to the squeeze: if "
+          "`squeeze_bb_kc_release` beats this hypothesis, the prior compression adds information "
+          "over and above the break alone, which is the family's central claim. If this one wins "
+          "instead, the compression is decorative and the only thing that works is the "
+          "volatility-normalised break. "
+          "We expect it to fail in a mid-volatility range, where price crosses the two ATR in both "
+          "directions repeatedly and each crossing costs a spread.",
     fn=_keltner_breakout,
-    params={"ema_periodo": 20, "atr_periodo": 10, "mult": 2.0},
+    params={"ema_period": 20, "atr_period": 10, "mult": 2.0},
     timeframes=("1h", "4h", "1d"),
     min_warmup=200,
 ))
@@ -535,105 +536,106 @@ def _chandelier_trail(s: Series) -> np.ndarray:
     long_stop = hh - 3.0 * atr
     short_stop = ll + 3.0 * atr
 
-    # CORREGIDO EN AUDITORÍA (2026-09-08). Antes esto era:
+    # FIXED IN THE AUDIT (2026-09-08). This used to be:
     #     entry[ok & (c > short_stop)] = 1
     #     entry[ok & (c < long_stop)] = -1
-    # y las dos asignaciones se pisaban. Cuando el rango de 22 velas es ancho (hh - ll > 6·ATR) el
-    # umbral largo queda POR ENCIMA del corto, así que un cierre en la zona intermedia cumplía las
-    # DOS condiciones a la vez; como el -1 se escribía después, ganaba siempre el corto. Medido
-    # sobre una serie con los tres regímenes, eso afectaba al 2,7 % de las velas y las forzaba
-    # todas a corto.
+    # and the two assignments trampled each other. When the 22-candle range is wide (hh - ll >
+    # 6·ATR) the long threshold ends up ABOVE the short one, so a close in the zone between them
+    # satisfied BOTH conditions at once; since the -1 was written second, the short always won.
+    # Measured over a series containing all three regimes, that affected 2.7% of candles and forced
+    # every one of them short.
     #
-    # Por qué importaba y no es un detalle. El comentario de esta misma función declaraba lo
-    # contrario de lo que hacía el código ("cuando el cierre queda entre los dos umbrales no hay
-    # información nueva: se mantiene el estado"), y el sesgo no era aleatorio: la zona ambigua
-    # aparece precisamente en los rangos anchos, es decir, en el régimen donde el prior de esta
-    # hipótesis predice PÉRDIDAS. Un desempate arbitrario que sistemáticamente se pone corto justo
-    # en el régimen que se quiere medir contamina el signo del resultado y lo hace ininterpretable:
-    # no se sabría si lo medido es el escalado por ATR o el desempate. Ahora la zona ambigua emite
-    # 0 —sin entrada nueva— y `_hold` arrastra el estado anterior, que es la regla de Chandelier
-    # tal y como está declarada en el `rationale` y lo que hace `_events` en la familia `structure`.
+    # Why it mattered, and why it is not a detail. The comment on this very function declared the
+    # opposite of what the code did ("when the close falls between the two thresholds there is no
+    # new information: the state is held"), and the bias was not random: the ambiguous zone appears
+    # precisely in wide ranges, that is, in the regime where this hypothesis's prior predicts
+    # LOSSES. An arbitrary tie-break that systematically goes short exactly in the regime you are
+    # trying to measure contaminates the sign of the result and makes it uninterpretable: you could
+    # not tell whether what was measured was the ATR scaling or the tie-break. The ambiguous zone
+    # now emits 0 —no new entry— and `_hold` carries the previous state forward, which is the
+    # Chandelier rule as declared in the `rationale` and what `_events` does in the `structure`
+    # family.
     entry = np.zeros(c.size, dtype=np.int8)
-    largo = ok & (c > short_stop)
-    corto = ok & (c < long_stop)
-    ambiguo = largo & corto
-    entry[largo & ~ambiguo] = 1
-    entry[corto & ~ambiguo] = -1
+    long_side = ok & (c > short_stop)
+    short_side = ok & (c < long_stop)
+    ambiguous = long_side & short_side
+    entry[long_side & ~ambiguous] = 1
+    entry[short_side & ~ambiguous] = -1
     return _hold(entry, np.zeros(c.size, dtype=bool))
 
 
 register(Hypothesis(
     name="volatility.chandelier_atr_trail",
     family="volatility",
-    rationale="Salida Chandelier (Chuck LeBeau, 22/3): largo mientras el cierre esté por encima "
-              "del mínimo de 22 velas más 3·ATR-22, corto mientras esté por debajo del máximo de "
-              "22 velas menos 3·ATR-22. El contenido de volatilidad está en que la distancia de "
-              "invalidación se escala con el ATR: la posición sobrevive exactamente al ruido que "
-              "el régimen actual produce y ni un poco más. Es la traducción operativa del "
-              "agrupamiento de volatilidad: si la varianza está autocorrelacionada, el ruido de "
-              "mañana se estima bien con el de hoy, y un umbral fijo en porcentaje estaría "
-              "demasiado cerca en régimen agitado y demasiado lejos en régimen tranquilo.",
-    prior="Esperamos ventaja positiva en régimen tendencial y NEGATIVA en lateral: la señal está "
-          "siempre en mercado, así que en rango paga cada giro. La afirmación falsable propia de "
-          "esta familia no es 'seguir tendencias funciona' —eso lo contrasta la familia trend— "
-          "sino que ESCALAR el umbral con el ATR bate a la misma estructura con umbral fijo — "
-          "brazo que NO estaba registrado y que la auditoría de 2026-09-08 ha añadido como "
-          "`volatility.chandelier_fixed_pct`, sin el cual este criterio no se podía ejecutar. Si el "
-          "resultado neto a lo largo de todo el histórico fuese indistinguible de cero, la "
-          "conclusión correcta es que en BTC la ganancia de las tendencias compensa justo el coste "
-          "de los rangos, y no hay ventaja atribuible al escalado por volatilidad.",
+    rationale="The Chandelier exit (Chuck LeBeau, 22/3): long while the close is above the "
+              "22-candle low plus 3·ATR-22, short while it is below the 22-candle high minus "
+              "3·ATR-22. The volatility content lies in the invalidation distance being scaled by "
+              "the ATR: the position survives exactly the noise the current regime produces and "
+              "not a bit more. It is the operational translation of volatility clustering: if "
+              "variance is autocorrelated, tomorrow's noise is well estimated by today's, and a "
+              "threshold fixed as a percentage would be too close in an agitated regime and too "
+              "far in a quiet one.",
+    prior="We expect a positive edge in a trending regime and a NEGATIVE one in a range: the "
+          "signal is always in the market, so in a range it pays for every turn. The falsifiable "
+          "claim specific to this family is not 'trend following works' —that is what the trend "
+          "family tests— but that SCALING the threshold by the ATR beats the same structure with a "
+          "fixed threshold — an arm that was NOT registered and that the 2026-09-08 audit has "
+          "added as `volatility.chandelier_fixed_pct`, without which this criterion could not be "
+          "run. If the net result across the whole history were indistinguishable from zero, the "
+          "correct conclusion is that in BTC the gain from the trends exactly offsets the cost of "
+          "the ranges, and there is no edge attributable to volatility scaling.",
     fn=_chandelier_trail,
-    params={"ventana": 22, "atr_periodo": 22, "mult": 3.0},
+    params={"window": 22, "atr_period": 22, "mult": 3.0},
     timeframes=("4h", "1d"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 11 y 12. Partición por la mediana de NATR sobre la MISMA señal de tendencia.
+# 11 and 12. Median split on NATR over the SAME trend signal.
 # --------------------------------------------------------------------------------------------
 
 
-def _natr_regime_trend(s: Series, alto: bool) -> np.ndarray:
+def _natr_regime_trend(s: Series, high_vol: bool) -> np.ndarray:
     _, h, l, c = _ohlc(s)
     natr = talib.NATR(h, l, c, 14)
     rank = _rolling_rank(natr, 252)
     e21, e55 = talib.EMA(c, 21), talib.EMA(c, 55)
     out = np.zeros(c.size, dtype=np.int8)
     ok = ~(np.isnan(rank) | np.isnan(e21) | np.isnan(e55))
-    gate = ok & ((rank >= 0.50) if alto else (rank < 0.50))
+    gate = ok & ((rank >= 0.50) if high_vol else (rank < 0.50))
     out[gate & (e21 > e55)] = 1
     out[gate & (e21 < e55)] = -1
     return out
 
 
 def _natr_low_regime_trend(s: Series) -> np.ndarray:
-    return _natr_regime_trend(s, alto=False)
+    return _natr_regime_trend(s, high_vol=False)
 
 
 def _natr_high_regime_trend(s: Series) -> np.ndarray:
-    return _natr_regime_trend(s, alto=True)
+    return _natr_regime_trend(s, high_vol=True)
 
 
 register(Hypothesis(
     name="volatility.natr_low_regime_trend",
     family="volatility",
-    rationale="El ATR normalizado (NATR-14, ATR en porcentaje del precio) situado en su percentil "
-              "móvil de 252 clasifica el régimen sin depender del nivel de precio. Por debajo de "
-              "su mediana, el recorrido diario típico es pequeño frente al tamaño de posición que "
-              "cualquiera puede sostener: no hay barridos de stops ni liquidaciones en cadena, así "
-              "que quien está en el lado correcto de la EMA-21/EMA-55 no es expulsado antes de que "
-              "la deriva se materialice. La señal de tendencia es aquí un instrumento fijo; lo que "
-              "se contrasta es el régimen.",
-    prior="Esperamos ventaja positiva y superior a la de la misma señal EMA-21/55 sin filtrar. "
-          "Esperamos que falle si la volatilidad baja en BTC corresponde principalmente a rangos "
-          "de acumulación largos y no a tendencias suaves: entonces el cruce de medias dará "
-          "señales falsas encadenadas y la ventaja será negativa. Es la mitad baja de la partición "
-          "por la mediana: junto a `natr_high_regime_trend` reconstruye la señal sin filtrar, de "
-          "modo que las dos no pueden ser ambas mejores que ella.",
+    rationale="The normalised ATR (NATR-14, the ATR as a percentage of price) placed in its "
+              "252-period rolling percentile classifies the regime without depending on the price "
+              "level. Below its median, the typical travel per period is small relative to the "
+              "position size anyone can hold: there are no stop sweeps and no liquidation chains, "
+              "so whoever is on the right side of the EMA-21/EMA-55 is not shaken out before the "
+              "drift materialises. The trend signal is a fixed instrument here; what is being "
+              "tested is the regime.",
+    prior="We expect a positive edge, and a greater one than that of the same unfiltered "
+          "EMA-21/55 signal. We expect it to fail if low volatility in BTC corresponds mainly to "
+          "long accumulation ranges rather than to smooth trends: in that case the moving-average "
+          "cross will give strings of false signals and the edge will be negative. It is the low "
+          "half of the median split: together with `natr_high_regime_trend` it reconstructs the "
+          "unfiltered signal, so the two cannot both be better than it.",
     fn=_natr_low_regime_trend,
-    params={"natr_periodo": 14, "percentil_ventana": 252, "corte": 0.50, "ema_rapida": 21,
-            "ema_lenta": 55},
+    params={"natr_period": 14, "percentile_window": 252, "cutoff": 0.50, "ema_fast": 21,
+            "ema_slow": 55},
     timeframes=("1h", "4h", "1d"),
     min_warmup=300,
 ))
@@ -642,49 +644,49 @@ register(Hypothesis(
 register(Hypothesis(
     name="volatility.natr_high_regime_trend",
     family="volatility",
-    rationale="La mitad complementaria, registrada para que la afirmación anterior sea falsable y "
-              "no una selección posterior. Por encima de la mediana de NATR-14, la misma señal de "
-              "tendencia opera cuando el recorrido típico es grande: cada vela puede recorrer "
-              "varias veces la distancia entre las dos medias, de modo que el cruce se produce y "
-              "se deshace por ruido de amplitud, y además la horquilla y el deslizamiento son "
-              "máximos precisamente ahí.",
-    prior="Esperamos ventaja NULA O NEGATIVA aquí, y positiva en `natr_low_regime_trend`. Ese es "
-          "el contraste, y estamos comprometidos con ese signo por adelantado. Si saliera al "
-          "revés —la tendencia paga en volatilidad alta y no en baja— el mecanismo que hemos "
-          "descrito para toda esta familia estaría equivocado: significaría que en BTC la "
-          "volatilidad alta acompaña a la tendencia direccional en lugar de destruirla, y las "
-          "hipótesis de compresión de este fichero deberían leerse con mucha más desconfianza "
-          "aunque alguna diera un número favorable.",
+    rationale="The complementary half, registered so that the previous claim is falsifiable and "
+              "not a selection made after the fact. Above the NATR-14 median, the same trend "
+              "signal trades when the typical travel is large: a single candle can cover the "
+              "distance between the two averages several times over, so the cross happens and "
+              "unwinds through amplitude noise, and on top of that spread and slippage are at "
+              "their worst precisely there.",
+    prior="We expect a NIL OR NEGATIVE edge here, and a positive one in `natr_low_regime_trend`. "
+          "That is the contrast, and we are committed to that sign in advance. If it came out the "
+          "other way round —trend paying in high volatility and not in low— the mechanism we have "
+          "described for this entire family would be wrong: it would mean that in BTC high "
+          "volatility accompanies directional trend instead of destroying it, and the compression "
+          "hypotheses in this file would have to be read with far more suspicion even if one of "
+          "them gave a favourable number.",
     fn=_natr_high_regime_trend,
-    params={"natr_periodo": 14, "percentil_ventana": 252, "corte": 0.50, "ema_rapida": 21,
-            "ema_lenta": 55},
+    params={"natr_period": 14, "percentile_window": 252, "cutoff": 0.50, "ema_fast": 21,
+            "ema_slow": 55},
     timeframes=("1h", "4h", "1d"),
     min_warmup=300,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 13 y 14. CONTROLES AÑADIDOS EN AUDITORÍA (2026-09-08).
+# 13 and 14. CONTROLS ADDED IN THE AUDIT (2026-09-08).
 #
-# Qué estaba mal. Tres hipótesis de este fichero declaraban su criterio de falsación contra un
-# control que NO estaba registrado en ninguna parte del registro previo:
+# What was wrong. Three hypotheses in this file declared their falsification criterion against a
+# control that was NOT registered anywhere in the pre-registration:
 #
-#   - `rs_vol_pct_low_carry` y `bbw_pct_low_carry` dicen que su ventaja debe ser "MAYOR que la de
-#     la misma regla de dirección sin filtrar" y que "si la ventaja fuese igual o menor que la de
-#     la EMA-55 sin filtrar, la puerta de volatilidad no aporta nada". El precio contra la EMA-55
-#     sin filtro no existía como hipótesis registrada.
-#   - `chandelier_atr_trail` dice explícitamente que "la afirmación falsable propia de esta familia
-#     [...] es que ESCALAR el umbral con el ATR bate a la misma estructura con umbral fijo". La
-#     estructura con umbral fijo no existía.
+#   - `rs_vol_pct_low_carry` and `bbw_pct_low_carry` say their edge must be "GREATER than that of
+#     the same direction rule unfiltered" and that "if the edge were equal to or smaller than that
+#     of the unfiltered EMA-55, the volatility gate adds nothing". Price against the EMA-55 with no
+#     filter did not exist as a registered hypothesis.
+#   - `chandelier_atr_trail` says explicitly that "the falsifiable claim specific to this family
+#     [...] is that SCALING the threshold by the ATR beats the same structure with a fixed
+#     threshold". The structure with a fixed threshold did not exist.
 #
-# Por qué importaba. Un prior cuyo criterio de fracaso nombra un objeto inexistente no se puede
-# ejecutar, y lo que no se puede ejecutar no puede fallar: en la práctica esas tres hipótesis solo
-# podían ser juzgadas por su rentabilidad absoluta, que es justo el juicio que el registro previo
-# existe para prohibir (en un activo que multiplicó por veinte, cualquier regla mayoritariamente
-# larga "gana"). Se registran aquí los dos controles que faltaban, con su propio prior y contando
-# como dos ensayos más en la corrección por contraste múltiple. Se prefiere ampliar el número de
-# ensayos —que es la dirección conservadora— antes que rebajar los criterios de falsación ya
-# escritos, que sería reescribir el registro después de haberlo cerrado.
+# Why it mattered. A prior whose failure criterion names an object that does not exist cannot be
+# run, and what cannot be run cannot fail: in practice those three hypotheses could only be judged
+# on their absolute profitability, which is exactly the judgement the pre-registration exists to
+# forbid (in an asset that went up twentyfold, any predominantly long rule "wins"). The two missing
+# controls are registered here, with their own priors and counting as two more trials in the
+# multiple-comparisons correction. Widening the number of trials —which is the conservative
+# direction— is preferred to watering down falsification criteria that were already written, which
+# would amount to rewriting the registry after closing it.
 # --------------------------------------------------------------------------------------------
 
 
@@ -701,33 +703,33 @@ def _ema55_side_unfiltered(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="volatility.ema55_side_unfiltered",
     family="volatility",
-    rationale="Control incondicional de `rs_vol_pct_low_carry` y `bbw_pct_low_carry`: exactamente "
-              "su misma regla de dirección —cierre por encima o por debajo de la EMA-55— sin "
-              "ninguna puerta de volatilidad. No afirma un mecanismo propio, y ese es el punto: "
-              "las dos hipótesis de compresión no apuestan a que seguir la EMA-55 gane, sino a que "
-              "gane MÁS cuando la volatilidad realizada está en el quintil inferior. Esa es una "
-              "afirmación sobre una diferencia, y una diferencia no se puede medir con un solo "
-              "brazo. Se registra en `volatility` y no en `trend` porque su única razón de existir "
-              "es servir de denominador a la puerta de volatilidad de esta familia.",
-    prior="Esperamos ventaja positiva pequeña, dominada por la deriva secular de BTC, y "
-          "esperamos que sea MENOR que la de `rs_vol_pct_low_carry`. Esa comparación es todo el "
-          "contenido: si este control iguala o supera a las dos versiones filtradas, la puerta de "
-          "volatilidad no aporta nada y ambas quedan refutadas aunque su número absoluto sea "
-          "bueno; si las dos filtradas lo superan, la afirmación de agrupamiento de volatilidad se "
-          "sostiene. Por sí solo, un resultado positivo de este control NO es un hallazgo: es la "
-          "deriva del activo repartida por el lado de una media, y así debe publicarse.",
+    rationale="Unconditional control for `rs_vol_pct_low_carry` and `bbw_pct_low_carry`: exactly "
+              "their same direction rule —close above or below the EMA-55— with no volatility gate "
+              "at all. It claims no mechanism of its own, and that is the point: the two "
+              "compression hypotheses do not bet that following the EMA-55 wins, but that it wins "
+              "MORE when realised volatility is in the bottom quintile. That is a claim about a "
+              "difference, and a difference cannot be measured with a single arm. It is registered "
+              "in `volatility` and not in `trend` because its only reason to exist is to serve as "
+              "the denominator for this family's volatility gate.",
+    prior="We expect a small positive edge, dominated by BTC's secular drift, and we expect it to "
+          "be SMALLER than `rs_vol_pct_low_carry`'s. That comparison is the whole content: if this "
+          "control matches or beats the two filtered versions, the volatility gate adds nothing "
+          "and both are refuted even if their absolute number is good; if the two filtered ones "
+          "beat it, the volatility-clustering claim holds. On its own, a positive result for this "
+          "control is NOT a finding: it is the asset's drift split by which side of a moving "
+          "average you are on, and it must be published as such.",
     fn=_ema55_side_unfiltered,
-    params={"ema_direccion": 55, "puerta_volatilidad": "ninguna"},
+    params={"ema_direction": 55, "volatility_gate": "none"},
     timeframes=("1h", "4h", "1d"),
     min_warmup=300,
 ))
 
 
 def _chandelier_fixed_pct(s: Series) -> np.ndarray:
-    """Idéntica a `_chandelier_trail` salvo que el colchón es un 6 % fijo del nivel en vez de
-    3·ATR-22. El 6 % no se ha buscado: es el valor que iguala a 3·ATR-22 en un régimen de
-    volatilidad típico de BTC en 4h, elegido de antemano para que el control difiera de la
-    hipótesis en el ESCALADO y no en la agresividad media del umbral."""
+    """Identical to `_chandelier_trail` except that the buffer is a fixed 6% of the level instead
+    of 3·ATR-22. The 6% was not searched for: it is the value that matches 3·ATR-22 in a typical
+    BTC volatility regime on 4h, chosen in advance so that the control differs from the hypothesis
+    in the SCALING and not in the average aggressiveness of the threshold."""
     _, h, low, c = _ohlc(s)
     hh = talib.MAX(h, 22)
     ll = talib.MIN(low, 22)
@@ -735,36 +737,36 @@ def _chandelier_fixed_pct(s: Series) -> np.ndarray:
     long_stop = hh * (1.0 - 0.06)
     short_stop = ll * (1.0 + 0.06)
     entry = np.zeros(c.size, dtype=np.int8)
-    largo = ok & (c > short_stop)
-    corto = ok & (c < long_stop)
-    ambiguo = largo & corto          # misma regla de desempate que la hipótesis que controla
-    entry[largo & ~ambiguo] = 1
-    entry[corto & ~ambiguo] = -1
+    long_side = ok & (c > short_stop)
+    short_side = ok & (c < long_stop)
+    ambiguous = long_side & short_side    # same tie-break rule as the hypothesis it controls
+    entry[long_side & ~ambiguous] = 1
+    entry[short_side & ~ambiguous] = -1
     return _hold(entry, np.zeros(c.size, dtype=bool))
 
 
 register(Hypothesis(
     name="volatility.chandelier_fixed_pct",
     family="volatility",
-    rationale="Control de `chandelier_atr_trail`. Misma estructura exacta —largo mientras el cierre "
-              "esté por encima del mínimo de 22 velas más un colchón, corto mientras esté por "
-              "debajo del máximo de 22 menos ese colchón— con una única diferencia: el colchón es "
-              "un porcentaje FIJO del nivel en vez de 3·ATR-22. Es el brazo que hace comprobable la "
-              "afirmación central de la familia, que no es 'seguir tendencias funciona' sino que "
-              "medir la distancia de invalidación en unidades de la volatilidad VIGENTE bate a "
-              "medirla en unidades de precio. Si el agrupamiento de volatilidad es real, el umbral "
-              "escalado debería estar demasiado cerca en régimen agitado y demasiado lejos en "
-              "régimen tranquilo justo cuando el fijo se equivoca, y no antes.",
-    prior="Esperamos ventaja positiva y MENOR que la de `chandelier_atr_trail`, con la diferencia "
-          "concentrada en los cambios de régimen de volatilidad —los meses posteriores a marzo de "
-          "2020 y a mayo de 2021— y prácticamente nula en el resto de la muestra. Si las dos "
-          "resultan indistinguibles, el escalado por ATR no compra nada y `chandelier_atr_trail` "
-          "queda refutada en su afirmación propia aunque gane dinero; si este control resulta "
-          "MEJOR, el agrupamiento de volatilidad opera en el sentido contrario al que describe el "
-          "encabezado de esta familia y todas las hipótesis de compresión de este fichero deben "
-          "releerse con desconfianza. El 6 % queda congelado: si falla no se prueba otro valor.",
+    rationale="Control for `chandelier_atr_trail`. Exactly the same structure —long while the "
+              "close is above the 22-candle low plus a buffer, short while it is below the "
+              "22-candle high minus that buffer— with a single difference: the buffer is a FIXED "
+              "percentage of the level instead of 3·ATR-22. It is the arm that makes the family's "
+              "central claim testable, which is not 'trend following works' but that measuring the "
+              "invalidation distance in units of the PREVAILING volatility beats measuring it in "
+              "units of price. If volatility clustering is real, the scaled threshold should be "
+              "too close in an agitated regime and too far in a quiet one exactly when the fixed "
+              "one gets it wrong, and not before.",
+    prior="We expect a positive edge and a SMALLER one than `chandelier_atr_trail`'s, with the "
+          "difference concentrated in the volatility regime changes —the months after March 2020 "
+          "and May 2021— and practically nil over the rest of the sample. If the two turn out "
+          "indistinguishable, the ATR scaling buys nothing and `chandelier_atr_trail` is refuted "
+          "in its own claim even if it makes money; if this control turns out BETTER, volatility "
+          "clustering operates in the opposite direction to the one described in this family's "
+          "header and every compression hypothesis in this file must be reread with suspicion. The "
+          "6% is frozen: if it fails, no other value is tried.",
     fn=_chandelier_fixed_pct,
-    params={"ventana": 22, "colchon_pct": 0.06, "escalado": "ninguno"},
+    params={"window": 22, "buffer_pct": 0.06, "scaling": "none"},
     timeframes=("4h", "1d"),
     min_warmup=200,
 ))

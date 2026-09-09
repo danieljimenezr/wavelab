@@ -1,12 +1,13 @@
-"""Cliente REST de Binance con gobernador de peso.
+"""Binance REST client with a weight governor.
 
-El presupuesto es de 6000 de peso por minuto y por IP, y la respuesta lo dice en la cabecera
-``x-mbx-used-weight-1m``. Pasarse escala así: **429** (con ``Retry-After``) y luego **418**, que es
-un baneo de IP de dos minutos a **tres días**. Para una aplicación que vive de un feed público, un
-418 es una caída total, así que el gobernador frena al 70% en vez de correr hasta el borde.
+The budget is 6000 weight per minute per IP, and the response reports it in the
+``x-mbx-used-weight-1m`` header. Going over escalates like this: **429** (with ``Retry-After``) and
+then **418**, which is an IP ban lasting from two minutes to **three days**. For an application that
+lives off a public feed, a 418 is total downtime, so the governor brakes at 70% instead of running
+all the way to the edge.
 
-El 418 NO se reintenta: se trata como conmutador a feed de reserva. Reintentar un baneo alarga el
-baneo.
+The 418 is NOT retried: it is treated as a switch to the fallback feed. Retrying a ban extends the
+ban.
 """
 
 from __future__ import annotations
@@ -23,8 +24,8 @@ from wavelab.feeds.base import FeedCaps
 
 __all__ = ["BinanceREST", "RateLimitCircuitOpen", "WeightGovernor"]
 
-#: Mirror oficial de solo-datos. Los documentos de Binance dicen literalmente que no requiere
-#: autenticación. Se usa por defecto para no rozar siquiera la superficie con cuentas.
+#: Official data-only mirror. Binance's own docs say in as many words that it needs no
+#: authentication. It is the default so that we never so much as brush against the account surface.
 SPOT_BASE = "https://data-api.binance.vision"
 SPOT_FALLBACK = "https://api.binance.com"
 FAPI_BASE = "https://fapi.binance.com"
@@ -35,11 +36,11 @@ MAX_LIMIT = 1000
 
 
 class RateLimitCircuitOpen(RuntimeError):
-    """418: IP baneada. No se reintenta — se conmuta de feed."""
+    """418: IP banned. Not retried — we switch feeds instead."""
 
 
 class WeightGovernor:
-    """Frena antes del borde, no en él."""
+    """Brakes before the edge, not at it."""
 
     __slots__ = ("banned_until", "brake_at", "budget", "used")
 
@@ -60,14 +61,14 @@ class WeightGovernor:
     async def wait_if_needed(self) -> None:
         if self.banned_until > time.monotonic():
             raise RateLimitCircuitOpen(
-                f"IP baneada por Binance durante {self.banned_until - time.monotonic():.0f} s más. "
-                "Conmuta a feed de reserva; reintentar alarga el baneo."
+                f"IP banned by Binance for another {self.banned_until - time.monotonic():.0f} s. "
+                "Switch to the fallback feed; retrying extends the ban."
             )
         if self.used >= self.brake_at:
-            # El contador se reinicia cada minuto natural. Esperar al siguiente es más barato
-            # que arriesgar un 418 de hasta tres días.
-            espera = 60 - (time.time() % 60) + 0.5
-            await asyncio.sleep(espera)
+            # The counter resets on every wall-clock minute. Waiting for the next one is cheaper
+            # than risking a 418 that can last three days.
+            wait_s = 60 - (time.time() % 60) + 0.5
+            await asyncio.sleep(wait_s)
             self.used = 0
 
     @property
@@ -77,7 +78,7 @@ class WeightGovernor:
 
 @dataclass(slots=True)
 class BinanceREST:
-    """Klines y datos de derivados. Sin clave, sin cuenta, sin órdenes."""
+    """Klines and derivatives data. No key, no account, no orders."""
 
     name: str = "binance_rest"
     base: str = SPOT_BASE
@@ -94,7 +95,7 @@ class BinanceREST:
             has_websocket=True,
             max_klines_per_request=MAX_LIMIT,
             weight_budget_per_min=WEIGHT_BUDGET,
-            deep_history_from_ms=1_502_942_400_000,  # 2017-08-17, listado de BTCUSDT
+            deep_history_from_ms=1_502_942_400_000,  # 2017-08-17, BTCUSDT listing
             supports_aux=frozenset({"funding", "open_interest", "long_short", "liquidation"}),
         )
 
@@ -107,25 +108,25 @@ class BinanceREST:
             await self._client.aclose()
 
     async def _get(self, url: str, params: dict, weight: int = 1) -> object:
-        assert self._client is not None, "usa BinanceREST como context manager"
-        for intento in range(4):
+        assert self._client is not None, "use BinanceREST as a context manager"
+        for attempt in range(4):
             await self.gov.wait_if_needed()
             r = await self._client.get(url, params=params)
             self.gov.observe(r.headers)
 
             if r.status_code == 418:
                 self.gov.banned_until = time.monotonic() + 3600
-                raise RateLimitCircuitOpen(f"418 de {url}: IP baneada. NO reintentar.")
+                raise RateLimitCircuitOpen(f"418 from {url}: IP banned. Do NOT retry.")
             if r.status_code == 429:
-                espera = float(r.headers.get("Retry-After", 2 ** intento))
-                await asyncio.sleep(espera)
+                wait_s = float(r.headers.get("Retry-After", 2 ** attempt))
+                await asyncio.sleep(wait_s)
                 continue
             if r.status_code >= 500:
-                await asyncio.sleep(2 ** intento)
+                await asyncio.sleep(2 ** attempt)
                 continue
             r.raise_for_status()
             return r.json()
-        raise RuntimeError(f"{url}: agotados los reintentos")
+        raise RuntimeError(f"{url}: retries exhausted")
 
     # ------------------------------------------------------------------ klines
 
@@ -150,33 +151,33 @@ class BinanceREST:
         return out
 
     async def heal_gap(self, symbol: str, tf: Timeframe, start_ms: int, end_ms: int) -> list[Bar]:
-        """Rellena un hueco paginando. Se ejecuta en CADA reconexión, no solo tras la de 24 h:
-        el corte puede venir de la red, de un reinicio del servicio o de un despliegue."""
+        """Fill a gap by paginating. Runs on EVERY reconnect, not only after the 24 h one: the cut
+        can come from the network, from a service restart or from a deploy."""
         out: list[Bar] = []
         cur = start_ms
         while cur <= end_ms:
-            lote = await self.fetch_klines(symbol, tf, cur, end_ms)
-            if not lote:
+            batch = await self.fetch_klines(symbol, tf, cur, end_ms)
+            if not batch:
                 break
-            out.extend(lote)
-            nxt = lote[-1].open_time_ms + tf.ms
+            out.extend(batch)
+            nxt = batch[-1].open_time_ms + tf.ms
             if nxt <= cur:
                 break
             cur = nxt
-            if len(lote) < MAX_LIMIT:
+            if len(batch) < MAX_LIMIT:
                 break
         return out
 
-    # ------------------------------------------------------------------ derivados
+    # ------------------------------------------------------------------ derivatives
 
     async def funding_rate(self, symbol: str, limit: int = 1000) -> list[dict]:
         return await self._get(f"{FAPI_BASE}/fapi/v1/fundingRate",
                                {"symbol": symbol.upper(), "limit": limit})  # type: ignore[return-value]
 
     async def open_interest_hist(self, symbol: str, period: str = "5m", limit: int = 500) -> list[dict]:
-        """OJO: /futures/data/* retiene solo ~30 DÍAS y para fechas anteriores devuelve el error
-        -1130 ('parameter startTime is invalid'), NO una lista vacía. Un bucle de backfill ingenuo
-        se rompe o se traga el error en silencio. El histórico profundo solo está en el archivo."""
+        """WATCH OUT: /futures/data/* keeps only ~30 DAYS and for earlier dates returns error -1130
+        ('parameter startTime is invalid'), NOT an empty list. A naive backfill loop either breaks
+        or swallows the error in silence. Deep history exists only in the archive."""
         return await self._get(f"{FAPI_BASE}/futures/data/openInterestHist",
                                {"symbol": symbol.upper(), "period": period, "limit": limit})  # type: ignore[return-value]
 

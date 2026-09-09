@@ -1,17 +1,17 @@
-"""Cliente WebSocket resiliente para Binance.
+"""Resilient WebSocket client for Binance.
 
-Límites reales del servicio, no supuestos:
-  - Una conexión es válida **24 horas exactas**. Binance la cierra por diseño: no es un fallo,
-    es el funcionamiento normal, y hay que planificarlo.
-  - El servidor manda un ping cada 20 s y desconecta si no hay pong en 1 minuto. Por eso el bucle
-    de recepción no puede bloquearse NUNCA: la librería responde al pong desde ese mismo bucle.
-  - Máximo 5 mensajes ENTRANTES por segundo y conexión (suscripciones, pongs manuales...). Pasarse
-    desconecta, y reincidir banea la IP.
-  - Máximo 300 conexiones por cada 5 minutos y por IP: la reconexión lleva jitter para no crear
-    una tormenta si el corte es del lado de Binance.
+Real service limits, not assumptions:
+  - A connection is valid for **exactly 24 hours**. Binance closes it by design: that is not a
+    failure, it is normal operation, and it has to be planned for.
+  - The server sends a ping every 20 s and disconnects if there is no pong within 1 minute. That is
+    why the receive loop can NEVER block: the library answers the pong from that same loop.
+  - At most 5 INCOMING messages per second per connection (subscriptions, manual pongs...). Going
+    over disconnects you, and doing it again bans the IP.
+  - At most 300 connections per 5 minutes per IP: reconnection carries jitter so as not to create a
+    storm when the outage is on Binance's side.
 
-Los símbolos van en MINÚSCULAS en la ruta del stream. En mayúsculas la conexión se abre y no
-llega ni un solo mensaje: un fallo silencioso perfecto.
+Symbols go LOWERCASE in the stream path. In uppercase the connection opens and not a single message
+arrives: a perfect silent failure.
 """
 
 from __future__ import annotations
@@ -26,12 +26,12 @@ import websockets
 
 __all__ = ["FAPI_WS", "MAX_CONNECTION_SECONDS", "SPOT_WS", "stream_json"]
 
-#: Mirror de solo-datos: no expone streams de usuario, que es justo lo que queremos.
+#: Data-only mirror: it exposes no user streams, which is exactly what we want.
 SPOT_WS = "wss://data-stream.binance.vision"
 FAPI_WS = "wss://fstream.binance.com"
 
-#: Binance cierra a las 24 h. Nos adelantamos para que el corte sea nuestro y controlado,
-#: en vez de una excepción a mitad de un mensaje.
+#: Binance closes at 24 h. We get there first so the cut is ours and controlled, instead of an
+#: exception in the middle of a message.
 MAX_CONNECTION_SECONDS = 23 * 3600 + 30 * 60
 
 
@@ -43,47 +43,47 @@ async def stream_json(
     on_disconnect: Callable[[str], None] | None = None,
     max_seconds: int = MAX_CONNECTION_SECONDS,
 ) -> AsyncIterator[dict]:
-    """Itera mensajes decodificados, reconectando indefinidamente.
+    """Iterate decoded messages, reconnecting indefinitely.
 
-    Cada mensaje sale enriquecido con ``_ts_ingest_ms``: cuándo nos enteramos, frente a cuándo
-    ocurrió. Esa distinción no se puede reconstruir después, así que se registra desde el principio
-    aunque hoy no la consuma nadie.
+    Every message comes out enriched with ``_ts_ingest_ms``: when we found out, as against when it
+    happened. That distinction cannot be reconstructed afterwards, so it is recorded from the start
+    even though nothing consumes it today.
     """
     if any(s != s.lower() for s in streams):
         raise ValueError(
-            f"los nombres de stream deben ir en MINÚSCULAS: {streams}. "
-            "En mayúsculas la conexión se abre y no llega ningún mensaje."
+            f"stream names must be LOWERCASE: {streams}. "
+            "In uppercase the connection opens and no message ever arrives."
         )
     path = "/ws/" + streams[0] if len(streams) == 1 else "/stream?streams=" + "/".join(streams)
     url = base + path
-    intento = 0
+    attempt = 0
 
     while True:
         try:
             async with websockets.connect(
-                url, ping_interval=None,      # es Binance quien hace ping; no añadimos tráfico
+                url, ping_interval=None,      # Binance does the pinging; we do not add traffic
                 ping_timeout=None, close_timeout=5, max_queue=2048,
             ) as ws:
-                intento = 0
+                attempt = 0
                 if on_connect:
                     on_connect()
                 deadline = time.monotonic() + max_seconds
                 while True:
-                    restante = deadline - time.monotonic()
-                    if restante <= 0:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
                         if on_disconnect:
-                            on_disconnect("rotación preventiva antes del corte de 24 h")
+                            on_disconnect("pre-emptive rotation ahead of the 24 h cut")
                         break
                     try:
-                        raw = await asyncio.wait_for(ws.recv(), timeout=min(restante, 90))
+                        raw = await asyncio.wait_for(ws.recv(), timeout=min(remaining, 90))
                     except TimeoutError:
-                        # 90 s sin nada teniendo ping cada 20 s: la conexión está muerta
-                        # aunque el socket no lo sepa todavía.
+                        # 90 s of nothing when there is a ping every 20 s: the connection is dead
+                        # even if the socket does not know it yet.
                         if on_disconnect:
-                            on_disconnect("sin mensajes en 90 s")
+                            on_disconnect("no messages in 90 s")
                         break
                     msg = json.loads(raw)
-                    if "stream" in msg and "data" in msg:   # formato combinado
+                    if "stream" in msg and "data" in msg:   # combined format
                         msg = {**msg["data"], "_stream": msg["stream"]}
                     msg["_ts_ingest_ms"] = int(time.time() * 1000)
                     yield msg
@@ -93,8 +93,8 @@ async def stream_json(
             if on_disconnect:
                 on_disconnect(f"{type(e).__name__}: {e}")
 
-        intento += 1
-        # Retroceso exponencial con jitter: si el corte es de Binance, mil clientes reconectando
-        # a la vez crean la tormenta que dispara el límite de 300 conexiones / 5 min.
-        espera = min(60.0, 1.5 ** min(intento, 10)) * (0.5 + random.random())
-        await asyncio.sleep(espera)
+        attempt += 1
+        # Exponential backoff with jitter: if the outage is Binance's, a thousand clients
+        # reconnecting at once create the storm that trips the 300 connections / 5 min limit.
+        wait_s = min(60.0, 1.5 ** min(attempt, 10)) * (0.5 + random.random())
+        await asyncio.sleep(wait_s)

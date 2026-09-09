@@ -1,19 +1,20 @@
-"""Grabadores en sombra: liquidaciones y métricas de derivados.
+"""Shadow recorders: liquidations and derivatives metrics.
 
-**Nada consume esto todavía, y aun así es lo primero que se arranca.** El motivo no es técnico:
+**Nothing consumes this yet, and it is still the first thing that gets started.** The reason is not
+technical:
 
-- ``@forceOrder`` (liquidaciones) **no tiene ninguna fuente histórica gratuita** y no se puede
-  rellenar hacia atrás. Cada hora sin grabar es una hora perdida para siempre.
-- ``/futures/data/*`` (open interest, ratios long/short, agresión de takers) retiene **solo ~30
-  días** en la API, y para fechas anteriores devuelve el error -1130, no una lista vacía.
+- ``@forceOrder`` (liquidations) **has no free historical source** and cannot be backfilled. Every
+  hour not recorded is an hour lost forever.
+- ``/futures/data/*`` (open interest, long/short ratios, taker aggression) keeps **only ~30 days**
+  in the API, and for earlier dates it returns error -1130, not an empty list.
 
-CAVEAT QUE HAY QUE ESCRIBIR AHORA, MIENTRAS SE ENTIENDE EL PORQUÉ: ``@forceOrder`` está
-**muestreado**. Binance limita la frecuencia de emisión por símbolo, así que el fichero es una
-MUESTRA de las liquidaciones, sesgada precisamente contra las cascadas agrupadas — que son el
-motivo por el que uno querría este dato. Grabarlo sigue siendo correcto porque no hay alternativa,
-pero cualquier feature de v2 que lo trate como registro completo subestimará la magnitud de las
-cascadas justo en la cola donde importa. El proxy histórico real para cascadas es una caída brusca
-de sumOpenInterest en el archivo de métricas coincidiendo con un desequilibrio grande de takers.
+CAVEAT THAT HAS TO BE WRITTEN NOW, WHILE THE WHY IS STILL FRESH: ``@forceOrder`` is **sampled**.
+Binance rate-limits how often it emits per symbol, so the file is a SAMPLE of the liquidations,
+biased precisely against the clustered cascades -- which are the whole reason anyone would want this
+data. Recording it is still the right call because there is no alternative, but any v2 feature that
+treats it as a complete record will underestimate the size of the cascades exactly in the tail where
+it matters. The real historical proxy for cascades is a sharp drop in sumOpenInterest in the metrics
+archive coinciding with a large taker imbalance.
 """
 
 from __future__ import annotations
@@ -31,14 +32,14 @@ from wavelab.feeds.binance_ws import FAPI_WS, stream_json
 __all__ = ["SAMPLING_CAVEAT", "DerivativesPoller", "LiquidationRecorder"]
 
 SAMPLING_CAVEAT = (
-    "@forceOrder está MUESTREADO por Binance (limita la frecuencia de emisión por símbolo). "
-    "Este fichero es una muestra, sesgada contra las cascadas agrupadas. No lo trates como un "
-    "registro completo de liquidaciones."
+    "@forceOrder is SAMPLED by Binance (it rate-limits how often it emits per symbol). "
+    "This file is a sample, biased against clustered cascades. Do not treat it as a complete "
+    "record of liquidations."
 )
 
 
 class LiquidationRecorder:
-    """Vuelca ``@forceOrder`` a JSONL, un fichero por día UTC. Append-only, nunca se borra."""
+    """Dumps ``@forceOrder`` to JSONL, one file per UTC day. Append-only, never deleted."""
 
     def __init__(self, root: Path | str, symbols: list[str]) -> None:
         self.root = Path(root)
@@ -48,9 +49,9 @@ class LiquidationRecorder:
         self.reconnects = 0
         self._fh = None
         self._day: str | None = None
-        # El caveat vive junto a los datos, no solo en el código: dentro de un año, quien lea
-        # estos ficheros no va a abrir este módulo.
-        (self.root / "LEEME.txt").write_text(SAMPLING_CAVEAT + "\n", encoding="utf-8")
+        # The caveat lives next to the data, not only in the code: a year from now, whoever reads
+        # these files is not going to open this module.
+        (self.root / "README.txt").write_text(SAMPLING_CAVEAT + "\n", encoding="utf-8")
 
     def _file_for(self, ts_ms: int):
         day = datetime.fromtimestamp(ts_ms / 1000, UTC).strftime("%Y-%m-%d")
@@ -64,24 +65,24 @@ class LiquidationRecorder:
     async def run(self) -> None:
         streams = [f"{s}@forceOrder" for s in self.symbols]
         def _up() -> None:
-            print(f"[liq] conectado a {len(streams)} stream(s)", flush=True)
-        def _down(motivo: str) -> None:
+            print(f"[liq] connected to {len(streams)} stream(s)", flush=True)
+        def _down(reason: str) -> None:
             self.reconnects += 1
-            print(f"[liq] desconectado ({motivo}); reconectando", flush=True)
+            print(f"[liq] disconnected ({reason}); reconnecting", flush=True)
 
         async for msg in stream_json(FAPI_WS, streams, on_connect=_up, on_disconnect=_down):
             fh = self._file_for(msg["_ts_ingest_ms"])
             fh.write(json.dumps(msg, separators=(",", ":")) + "\n")
             self.n += 1
             if self.n % 20 == 0:
-                fh.flush()   # durabilidad frente a coste: 20 líneas es un compromiso razonable
+                fh.flush()   # durability against cost: 20 lines is a reasonable compromise
 
 
 class DerivativesPoller:
-    """Sondea fapi con presupuesto de peso PROPIO y estrecho.
+    """Polls fapi on its OWN, deliberately narrow weight budget.
 
-    Deliberadamente separado del feed de velas: si el sondeo de derivados se desmadra, no puede
-    consumir el presupuesto del que depende el gráfico en vivo.
+    Kept apart from the bar feed on purpose: if the derivatives polling runs away, it must not be
+    able to eat the budget the live chart depends on.
     """
 
     def __init__(self, root: Path | str, symbol: str = "BTCUSDT", every_s: int = 300) -> None:
@@ -111,10 +112,10 @@ class DerivativesPoller:
                     self._append("taker", await c.taker_ratio(self.symbol, "5m", 12))
                     self.n += 1
                     if self.n % 12 == 0:
-                        print(f"[deriv] {self.n} sondeos, margen de peso {c.gov.headroom:.0%}",
+                        print(f"[deriv] {self.n} polls, weight headroom {c.gov.headroom:.0%}",
                               flush=True)
                 except RateLimitCircuitOpen as e:
-                    print(f"[deriv] circuito abierto: {e}", flush=True)
+                    print(f"[deriv] circuit open: {e}", flush=True)
                     await asyncio.sleep(3600)
                 except Exception as e:  # noqa: BLE001
                     print(f"[deriv] error {type(e).__name__}: {e}", flush=True)

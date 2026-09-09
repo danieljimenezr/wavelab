@@ -1,32 +1,32 @@
-"""Familia `trend`: seguimiento de tendencia. REGISTRO PREVIO — escrito antes de mirar un número.
+"""`trend` family: trend following. PRE-REGISTRATION — written before looking at a single number.
 
-Ninguna de estas doce hipótesis se ha ejecutado. Los parámetros son los convencionales de la
-literatura (EMA 21/55/200, MACD 12/26/9, ADX/DMI 14, ATR 14, Donchian 55/20 del Sistema 2 de las
-Turtles, Ichimoku 9/26/52, Aroon 25, SAR 0.02/0.2). No hay variantes del mismo parámetro: donde
-aparecen dos números (55/20 de Donchian, 3xATR de Supertrend) son un par publicado como unidad, y
-se justifica en el `rationale` por qué son una hipótesis y no una rejilla.
+None of these twelve hypotheses has been run. The parameters are the conventional ones from the
+literature (EMA 21/55/200, MACD 12/26/9, ADX/DMI 14, ATR 14, Donchian 55/20 from Turtle System 2,
+Ichimoku 9/26/52, Aroon 25, SAR 0.02/0.2). There are no variants of the same parameter: where two
+numbers appear (Donchian's 55/20, Supertrend's 3xATR) they are a pair published as a unit, and the
+`rationale` says why they are one hypothesis and not a grid.
 
-La pregunta común de la familia es una sola: **¿por qué persistiría una tendencia?** Cada hipótesis
-propone un mecanismo DISTINTO (troceo de órdenes, acuerdo entre horizontes, punto focal reflexivo,
-aceleración de flujo, resolución de dispersión, cascada de stops, distancia del stop, renovación de
-extremos, deriva sobre ruido, horizonte de asignación). Varias predicen resultados que se
-CONTRADICEN entre sí (p. ej. `supertrend` vs `psar` sobre si conviene dar aire o apretar el stop).
-Eso es deliberado: si todas pudieran ganar a la vez, ninguna sería falsable.
+The family shares a single question: **why would a trend persist?** Each hypothesis proposes a
+DIFFERENT mechanism (order slicing, agreement across horizons, a reflexive focal point, flow
+acceleration, the resolution of disagreement, a stop cascade, stop distance, renewal of extremes,
+drift over noise, the allocation horizon). Several of them predict results that CONTRADICT one
+another (e.g. `supertrend` vs `psar` on whether to give the position room or tighten the stop).
+That is deliberate: if they could all win at once, none of them would be falsifiable.
 
-Causalidad. Todo indicador aquí es una función de ventana hacia atrás. El único desplazamiento que
-se usa es `_lag(a, k)` con k >= 1, que trae el valor de hace k barras al índice actual; no existe
-ningún desplazamiento negativo, ningún `np.roll`, ningún detector de extremos definido contra el
-array entero. Dos sitios lo merecen por escrito:
+Causality. Every indicator here is a backward-looking window function. The only shift used is
+`_lag(a, k)` with k >= 1, which brings the value from k bars ago to the current index; there is no
+negative shift, no `np.roll`, and no extreme detector defined against the whole array. Two places
+deserve to be spelled out:
 
-  - Donchian: `talib.MAX(high, 55)[i]` INCLUYE la barra i, así que comparar `close[i]` contra él
-    no rompería, pero no rompe nada por el motivo equivocado (`high[i] >= close[i]` siempre). El
-    canal de referencia se retrasa una barra para que sea el máximo de las 55 barras ANTERIORES.
-  - Ichimoku: la nube va desplazada +26. Eso significa que el nivel de HOY se calculó con datos de
-    hace 26 barras. Es información pasada dibujada hacia adelante, jamás futura.
+  - Donchian: `talib.MAX(high, 55)[i]` INCLUDES bar i, so comparing `close[i]` against it would not
+    break — but it fails to break for the wrong reason (`high[i] >= close[i]` always). The
+    reference channel is lagged by one bar so that it is the maximum of the 55 PRECEDING bars.
+  - Ichimoku: the cloud is displaced by +26. That means TODAY's level was computed from data 26
+    bars old. It is past information drawn forward, never future information.
 
-NaN. talib devuelve NaN durante el calentamiento. Aquí no se usa `nan_to_num` en ningún sitio: se
-construye una máscara explícita con `np.isfinite` y las señales solo se escriben donde TODOS los
-insumos son finitos. Rellenar un NaN con 0 o con 1e18 inventa señales en el arranque de la serie.
+NaN. talib returns NaN during warm-up. `nan_to_num` is used nowhere here: an explicit mask is built
+with `np.isfinite` and signals are written only where ALL the inputs are finite. Filling a NaN with
+0 or with 1e18 invents signals at the start of the series.
 """
 
 from __future__ import annotations
@@ -37,23 +37,23 @@ import talib
 from wavelab.hypotheses.base import Hypothesis, Series, register
 
 # --------------------------------------------------------------------------------------------
-# utilidades
+# utilities
 # --------------------------------------------------------------------------------------------
 
 
 def _f64(a: np.ndarray) -> np.ndarray:
-    """talib exige float64 contiguo."""
+    """talib requires contiguous float64."""
     return np.ascontiguousarray(a, dtype=np.float64)
 
 
 def _lag(a: np.ndarray, k: int) -> np.ndarray:
-    """Valor de hace `k` barras, leído en la barra actual. k >= 1, SIEMPRE hacia el pasado.
+    """The value from `k` bars ago, read at the current bar. k >= 1, ALWAYS into the past.
 
-    La cabeza queda en NaN a propósito: no hay valor pasado que traer, y cualquier relleno
-    fabricaría señal donde no hay información.
+    The head is left as NaN on purpose: there is no past value to bring forward, and any fill
+    would manufacture signal where there is no information.
     """
     if k < 1:
-        raise ValueError("_lag solo desplaza hacia el pasado (k >= 1)")
+        raise ValueError("_lag only shifts into the past (k >= 1)")
     out = np.full(a.shape, np.nan, dtype=np.float64)
     if k < a.size:
         out[k:] = a[: a.size - k]
@@ -61,7 +61,7 @@ def _lag(a: np.ndarray, k: int) -> np.ndarray:
 
 
 def _ok(*arrays: np.ndarray) -> np.ndarray:
-    """Máscara de posiciones donde todos los insumos son finitos."""
+    """Mask of the positions where every input is finite."""
     m = np.isfinite(arrays[0])
     for a in arrays[1:]:
         m &= np.isfinite(a)
@@ -69,7 +69,7 @@ def _ok(*arrays: np.ndarray) -> np.ndarray:
 
 
 # --------------------------------------------------------------------------------------------
-# 1. cruce de dos medias: troceo de órdenes
+# 1. two-moving-average cross: order slicing
 # --------------------------------------------------------------------------------------------
 
 
@@ -87,26 +87,27 @@ def _ema_cross_21_55(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="trend.ema_cross_21_55",
     family="trend",
-    rationale="La información nueva no se incorpora en una vela porque el participante grande no "
-              "puede ejecutar en una vela: un mandato de tamaño se trocea durante días para no "
-              "mover el precio contra uno mismo, de modo que el comprador de hoy es también el "
-              "comprador de mañana. Ese troceo deja autocorrelación positiva de la deriva a escala "
-              "de semanas. El cruce EMA21/EMA55 no predice nada: solo declara que el desequilibrio "
-              "de flujo sigue activo, y cobra mientras el mismo participante siga ejecutando.",
-    prior="Esperamos ventaja positiva en régimen tendencial y NEGATIVA en lateral, con la pérdida "
-          "concentrada en pocas semanas de sierra. Si el edge también fuese positivo en lateral, "
-          "el mecanismo del troceo sería falso y estaríamos midiendo otra cosa. Predicción cruzada "
-          "falsable: el efecto debe degradarse al bajar de timeframe, porque la ejecución "
-          "institucional troceada no vive a escala de 15m.",
+    rationale="New information is not incorporated within one candle because the large participant "
+              "cannot execute within one candle: a mandate of any size is sliced over days so as "
+              "not to move the price against itself, so today's buyer is also tomorrow's buyer. "
+              "That slicing leaves positive autocorrelation in the drift at the scale of weeks. "
+              "The EMA21/EMA55 cross predicts nothing: it merely declares that the flow imbalance "
+              "is still live, and it gets paid for as long as the same participant keeps "
+              "executing.",
+    prior="We expect a positive edge in a trending regime and a NEGATIVE one in a range, with the "
+          "loss concentrated in a few weeks of whipsaw. If the edge were positive in ranges too, "
+          "the slicing mechanism would be false and we would be measuring something else. "
+          "Falsifiable cross-prediction: the effect must degrade as the timeframe drops, because "
+          "sliced institutional execution does not live at the 15m scale.",
     fn=_ema_cross_21_55,
-    params={"rapida": 21, "lenta": 55},
+    params={"fast": 21, "slow": 55},
     timeframes=("15m", "1h", "4h", "1d"),
     min_warmup=250,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 2. alineación de tres horizontes: retirada de la liquidez contraria
+# 2. three horizons aligned: the opposing liquidity withdraws
 # --------------------------------------------------------------------------------------------
 
 
@@ -125,26 +126,27 @@ def _ema_stack_21_55_200(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="trend.ema_stack_21_55_200",
     family="trend",
-    rationale="Cada horizonte pertenece a un participante distinto: intradía, swing y asignador. "
-              "Mientras discrepan, el que está en contra provee la liquidez que absorbe al que "
-              "está a favor y el precio revierte. Cuando los tres coinciden no queda nadie "
-              "estructuralmente obligado a vender contra la subida, la profundidad del lado "
-              "contrario se retira y el MISMO flujo mueve más precio. La hipótesis no es sobre "
-              "medias sino sobre ausencia de contraparte natural.",
-    prior="Esperamos muchas menos barras en mercado que trend.ema_cross_21_55 y mejor rendimiento "
-          "POR BARRA. Falsable de dos maneras: si el tiempo en mercado no cae de forma clara, la "
-          "condición de acuerdo no está filtrando nada; y si el rendimiento por barra no supera al "
-          "del cruce simple, la 'ausencia de contraparte' no aporta. Esperamos que quede plana y "
-          "pierda todo el arranque en los cambios de régimen, porque la EMA200 se alinea tarde.",
+    rationale="Each horizon belongs to a different participant: intraday, swing and allocator. "
+              "While they disagree, whoever is positioned against the move provides the liquidity "
+              "that absorbs whoever is positioned with it, and price reverts. When all three "
+              "agree, nobody is left structurally obliged to sell into the advance, depth on the "
+              "opposite side withdraws and the SAME flow moves more price. The hypothesis is not "
+              "about moving averages but about the absence of a natural counterparty.",
+    prior="We expect far fewer bars in the market than trend.ema_cross_21_55 and better "
+          "performance PER BAR. Falsifiable in two ways: if time in market does not fall clearly, "
+          "the agreement condition is filtering nothing; and if per-bar performance does not beat "
+          "the plain cross, the 'absence of counterparty' adds nothing. We expect it to go flat "
+          "and give up the whole opening move at every regime change, because the EMA200 aligns "
+          "late.",
     fn=_ema_stack_21_55_200,
-    params={"corta": 21, "media": 55, "larga": 200},
+    params={"short": 21, "medium": 55, "long": 200},
     timeframes=("15m", "1h", "4h", "1d"),
     min_warmup=600,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 3. la media de 200: punto focal reflexivo
+# 3. the 200 average: a reflexive focal point
 # --------------------------------------------------------------------------------------------
 
 
@@ -161,26 +163,28 @@ def _ema200_filter(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="trend.ema200_filter",
     family="trend",
-    rationale="La media de 200 no mide ninguna propiedad física del mercado: es un punto focal "
-              "público que mesas de riesgo, medios y bots de asignación citan a diario. Su poder, "
-              "si existe, es enteramente reflexivo — hay mandatos reales que reducen exposición "
-              "'por debajo de la 200', y esa reducción es flujo de verdad ejecutado en el nivel. "
-              "Se registra el nivel puro y no la pendiente porque para una EMA200 la pendiente es "
-              "casi una función del propio cruce, y añadirla sería el mismo ensayo dos veces.",
-    prior="La predicción que importa es cruzada, no de rentabilidad: si el mecanismo es reflexivo, "
-          "el efecto debe ser MAYOR en 1d, que es donde el nivel se publica y se mira, y casi nulo "
-          "en 15m y 1h. Un edge igual o superior en 15m falsaría la explicación aunque el número "
-          "saliera rentable, y en ese caso la hipótesis debe darse por fallida pese a ganar "
-          "dinero. Esperamos edge nulo o negativo en periodos sin tendencia secular.",
+    rationale="The 200 average measures no physical property of the market: it is a public focal "
+              "point that risk desks, the financial press and allocation bots quote daily. Its "
+              "power, if it has any, is entirely reflexive — there are real mandates that cut "
+              "exposure 'below the 200', and that cut is genuine flow executed at the level. We "
+              "register the bare level and not the slope because for an EMA200 the slope is very "
+              "nearly a function of the cross itself, and adding it would be the same trial run "
+              "twice.",
+    prior="The prediction that matters is a cross-prediction, not one about profit: if the "
+          "mechanism is reflexive, the effect must be LARGER on 1d, which is where the level is "
+          "published and watched, and close to nil on 15m and 1h. An edge equal to or greater on "
+          "15m would falsify the explanation even if the number came out profitable, and in that "
+          "case the hypothesis must be declared failed despite making money. We expect a nil or "
+          "negative edge in periods without a secular trend.",
     fn=_ema200_filter,
-    params={"periodo": 200},
+    params={"period": 200},
     timeframes=("15m", "1h", "4h", "1d"),
     min_warmup=600,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 4. MACD: aceleración del desequilibrio
+# 4. MACD: acceleration of the imbalance
 # --------------------------------------------------------------------------------------------
 
 
@@ -197,25 +201,27 @@ def _macd_12_26_9(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="trend.macd_12_26_9",
     family="trend",
-    rationale="El MACD contra su línea de señal mide la ACELERACIÓN del desequilibrio de flujo, no "
-              "su nivel. Los programas sistemáticos de momento escalan tamaño de forma continua en "
-              "función de la señal, no binaria: cuando la deriva se acelera añaden posición, y ese "
-              "añadido es literalmente la deriva de mañana. La apuesta es que ese bucle de "
-              "realimentación se detecta en la segunda derivada antes que en el precio.",
-    prior="Esperamos más cambios de posición y menor acierto por operación que "
-          "trend.ema_cross_21_55, y una ventaja BRUTA similar que puede desaparecer en neto tras "
-          "costes. Falsable de forma directa: si el MACD no supera al cruce de medias en neto, "
-          "'anticipar por aceleración' no tiene contenido y es una media cara. Esperamos edge "
-          "claramente negativo en lateral de baja volatilidad, donde la aceleración es solo ruido.",
+    rationale="The MACD against its signal line measures the ACCELERATION of the flow imbalance, "
+              "not its level. Systematic momentum programmes scale size continuously as a "
+              "function of the signal rather than in binary fashion: when the drift accelerates "
+              "they add to the position, and that addition is literally tomorrow's drift. The bet "
+              "is that this feedback loop shows up in the second derivative before it shows up in "
+              "price.",
+    prior="We expect more position changes and a lower hit rate per trade than "
+          "trend.ema_cross_21_55, and a similar GROSS edge that may disappear net of costs. "
+          "Directly falsifiable: if the MACD does not beat the moving-average cross net, "
+          "'anticipating through acceleration' has no content and it is an expensive moving "
+          "average. We expect a clearly negative edge in a low-volatility range, where "
+          "acceleration is only noise.",
     fn=_macd_12_26_9,
-    params={"rapida": 12, "lenta": 26, "senal": 9},
+    params={"fast": 12, "slow": 26, "signal": 9},
     timeframes=("15m", "1h", "4h", "1d"),
     min_warmup=250,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 5. ADX/DMI: la dispersión de opiniones se ha resuelto
+# 5. ADX/DMI: the dispersion of opinion has resolved
 # --------------------------------------------------------------------------------------------
 
 
@@ -226,37 +232,37 @@ def _adx_dmi_14(s: Series) -> np.ndarray:
     pdi = talib.PLUS_DI(h, l, c, 14)
     mdi = talib.MINUS_DI(h, l, c, 14)
     ok = _ok(adx, pdi, mdi)
-    fuerte = ok & (adx >= 25.0)
-    out[fuerte & (pdi > mdi)] = 1
-    out[fuerte & (mdi > pdi)] = -1
+    strong = ok & (adx >= 25.0)
+    out[strong & (pdi > mdi)] = 1
+    out[strong & (mdi > pdi)] = -1
     return out
 
 
 register(Hypothesis(
     name="trend.adx_dmi_14",
     family="trend",
-    rationale="Separa dos preguntas que las medias mezclan: ¿hay tendencia? (ADX) y ¿en qué "
-              "dirección? (DMI). El mecanismo propuesto es que la persistencia solo aparece "
-              "cuando la dispersión de opiniones ya se ha resuelto: si la mayor parte del volumen "
-              "agresivo llega por el mismo lado, el creador de mercado acumula inventario "
-              "direccional y se cubre EN LA MISMA DIRECCIÓN, amplificando el movimiento que le "
-              "perjudica. Por debajo de ADX 25 hay dos bandos de tamaño parecido y el flujo se "
-              "cancela sin dejar deriva.",
-    prior="Esperamos que la ventaja venga de EVITAR el lateral, no de acertar mejor la dirección. "
-          "Contraste falsable y explícito: el rendimiento por barra DENTRO del filtro debe superar "
-          "al de las barras que el filtro descarta; si no lo hace, el ADX no aporta información y "
-          "la hipótesis muere aunque el resultado global sea positivo. Esperamos que entre tarde y "
-          "ceda una parte grande del inicio de cada tendencia, porque el ADX necesita movimiento "
-          "consumado para subir de 25.",
+    rationale="Separates two questions that moving averages run together: is there a trend? (ADX) "
+              "and in which direction? (DMI). The proposed mechanism is that persistence only "
+              "appears once the dispersion of opinion has already resolved: if most of the "
+              "aggressive volume arrives on the same side, the market maker accumulates "
+              "directional inventory and hedges IN THE SAME DIRECTION, amplifying the very move "
+              "that is hurting him. Below ADX 25 there are two camps of similar size and the flow "
+              "cancels out without leaving any drift.",
+    prior="We expect the edge to come from AVOIDING the range, not from getting the direction "
+          "right more often. Explicit falsifiable test: per-bar performance INSIDE the filter must "
+          "beat that of the bars the filter discards; if it does not, the ADX carries no "
+          "information and the hypothesis dies even if the overall result is positive. We expect "
+          "it to enter late and give up a large part of the start of every trend, because the ADX "
+          "needs a move that has already happened in order to climb above 25.",
     fn=_adx_dmi_14,
-    params={"periodo": 14, "umbral_adx": 25},
+    params={"period": 14, "adx_threshold": 25},
     timeframes=("15m", "1h", "4h", "1d"),
     min_warmup=250,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 6. Donchian 55/20: cascada de stops
+# 6. Donchian 55/20: stop cascade
 # --------------------------------------------------------------------------------------------
 
 
@@ -264,12 +270,12 @@ def _donchian_turtle_55_20(s: Series) -> np.ndarray:
     h, l, c = _f64(s.high), _f64(s.low), _f64(s.close)
     n = c.size
     out = np.zeros(n, dtype=np.int8)
-    # +1 barra de retraso: canal de las 55 (o 20) barras ANTERIORES, sin incluir la actual.
-    hh_ent = _lag(talib.MAX(h, 55), 1)
-    ll_ent = _lag(talib.MIN(l, 55), 1)
-    hh_sal = _lag(talib.MAX(h, 20), 1)
-    ll_sal = _lag(talib.MIN(l, 20), 1)
-    ok = _ok(hh_ent, ll_ent, hh_sal, ll_sal, c)
+    # +1 bar of lag: channel of the 55 (or 20) PRECEDING bars, excluding the current one.
+    hh_entry = _lag(talib.MAX(h, 55), 1)
+    ll_entry = _lag(talib.MIN(l, 55), 1)
+    hh_exit = _lag(talib.MAX(h, 20), 1)
+    ll_exit = _lag(talib.MIN(l, 20), 1)
+    ok = _ok(hh_entry, ll_entry, hh_exit, ll_exit, c)
     pos = 0
     for i in range(n):
         if not ok[i]:
@@ -277,16 +283,16 @@ def _donchian_turtle_55_20(s: Series) -> np.ndarray:
             out[i] = 0
             continue
         if pos == 0:
-            if c[i] > hh_ent[i]:
+            if c[i] > hh_entry[i]:
                 pos = 1
-            elif c[i] < ll_ent[i]:
+            elif c[i] < ll_entry[i]:
                 pos = -1
         elif pos == 1:
-            if c[i] < ll_sal[i]:
-                pos = -1 if c[i] < ll_ent[i] else 0
+            if c[i] < ll_exit[i]:
+                pos = -1 if c[i] < ll_entry[i] else 0
         else:
-            if c[i] > hh_sal[i]:
-                pos = 1 if c[i] > hh_ent[i] else 0
+            if c[i] > hh_exit[i]:
+                pos = 1 if c[i] > hh_entry[i] else 0
         out[i] = pos
     return out
 
@@ -294,27 +300,27 @@ def _donchian_turtle_55_20(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="trend.donchian_turtle_55_20",
     family="trend",
-    rationale="Por encima de un máximo de 55 barras se acumulan stops de cortos y órdenes de "
-              "compra por rotura. Su ejecución es un shock de demanda mecánico e insensible al "
-              "precio, y el libro está fino justo ahí precisamente porque nadie ha querido vender "
-              "a ese nivel todavía; cada stop ejecutado empuja hacia el siguiente. El par 55/20 es "
-              "el Sistema 2 de las Turtles publicado como unidad, no una rejilla: la salida corta "
-              "existe para que la posición muera antes que el capital, y separar los dos números "
-              "sería otra hipótesis distinta.",
-    prior="Esperamos una distribución muy asimétrica: mayoría de operaciones perdedoras pequeñas y "
-          "una cola derecha que sostiene todo el resultado, es decir MEDIA positiva con MEDIANA "
-          "negativa. Si la mediana sale positiva, lo que actúa no es la cascada de stops sino otra "
-          "cosa, y el mecanismo declarado queda refutado. Esperamos fracaso claro en mercados de "
-          "alta volatilidad sin dirección, donde la rotura falsa es la norma.",
+    rationale="Above a 55-bar high, short sellers' stops and breakout buy orders pile up. Their "
+              "execution is a mechanical demand shock, insensitive to price, and the book is thin "
+              "right there precisely because nobody has been willing to sell at that level yet; "
+              "every stop that fills pushes into the next one. The 55/20 pair is Turtle System 2 "
+              "published as a unit, not a grid: the shorter exit exists so that the position dies "
+              "before the capital does, and separating the two numbers would be a different "
+              "hypothesis.",
+    prior="We expect a very asymmetric distribution: mostly small losing trades and a right tail "
+          "that carries the whole result — that is, a positive MEAN with a negative MEDIAN. If the "
+          "median comes out positive, what is at work is not the stop cascade but something else, "
+          "and the declared mechanism is refuted. We expect clear failure in high-volatility "
+          "markets without direction, where the false breakout is the norm.",
     fn=_donchian_turtle_55_20,
-    params={"entrada": 55, "salida": 20},
+    params={"entry": 55, "exit": 20},
     timeframes=("15m", "1h", "4h", "1d"),
     min_warmup=250,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 7. Supertrend: el stop donde lo pondría una mesa de riesgo
+# 7. Supertrend: the stop where a risk desk would put it
 # --------------------------------------------------------------------------------------------
 
 
@@ -324,26 +330,26 @@ def _supertrend_atr14_x3(s: Series) -> np.ndarray:
     out = np.zeros(n, dtype=np.int8)
     atr = talib.ATR(h, l, c, 14)
     hl2 = (h + l) / 2.0
-    banda_sup = hl2 + 3.0 * atr
-    banda_inf = hl2 - 3.0 * atr
-    ok = _ok(banda_sup, banda_inf, c)
-    sup = np.nan
-    inf = np.nan
+    upper_band = hl2 + 3.0 * atr
+    lower_band = hl2 - 3.0 * atr
+    ok = _ok(upper_band, lower_band, c)
+    upper = np.nan
+    lower = np.nan
     pos = 0
     for i in range(1, n):
         if not ok[i]:
             continue
-        if not np.isfinite(sup):
-            sup, inf = banda_sup[i], banda_inf[i]
+        if not np.isfinite(upper):
+            upper, lower = upper_band[i], lower_band[i]
             continue
-        # trinquete: la banda solo se aprieta, y se libera únicamente cuando el precio la rompe.
-        if banda_sup[i] < sup or c[i - 1] > sup:
-            sup = banda_sup[i]
-        if banda_inf[i] > inf or c[i - 1] < inf:
-            inf = banda_inf[i]
-        if c[i] > sup:
+        # ratchet: the band only tightens, and is released only when price breaks through it.
+        if upper_band[i] < upper or c[i - 1] > upper:
+            upper = upper_band[i]
+        if lower_band[i] > lower or c[i - 1] < lower:
+            lower = lower_band[i]
+        if c[i] > upper:
             pos = 1
-        elif c[i] < inf:
+        elif c[i] < lower:
             pos = -1
         out[i] = pos
     return out
@@ -352,29 +358,29 @@ def _supertrend_atr14_x3(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="trend.supertrend_atr14_x3",
     family="trend",
-    rationale="Un umbral de invalidación fijo en porcentaje es incoherente entre regímenes de "
-              "volatilidad: el mismo 2% es ruido en un régimen y una señal en otro. Supertrend "
-              "coloca el giro a 3 ATR del punto medio, que es aproximadamente donde una mesa de "
-              "riesgo pone el stop — lo bastante lejos para que el ruido normal no lo toque. Si "
-              "los stops reales se agrupan a esa distancia, el nivel deja de ser una línea "
-              "dibujada y pasa a tener flujo detrás. El trinquete de la banda es la hipótesis de "
-              "que conviene DAR AIRE a la posición.",
-    prior="Esperamos el mismo signo que el cruce de medias en tendencia, pero muchos menos cambios "
-          "de posición por la histéresis de la banda, y que TODA la ventaja frente al cruce venga "
-          "de esa reducción y no de mejor acierto. Falsable: si el número de cambios de posición "
-          "no cae claramente respecto a trend.ema_cross_21_55, la histéresis no está haciendo "
-          "nada. Esperamos devolver mucho beneficio en los giros bruscos, justo por lo lejos que "
-          "está el nivel; predecimos que pierde frente a trend.psar_002_020 en mercados que giran "
-          "en V.",
+    rationale="An invalidation threshold fixed as a percentage is incoherent across volatility "
+              "regimes: the same 2% is noise in one regime and a signal in another. Supertrend "
+              "puts the flip 3 ATR away from the midpoint, which is roughly where a risk desk "
+              "places the stop — far enough that ordinary noise does not touch it. If real stops "
+              "cluster at that distance, the level stops being a drawn line and starts having flow "
+              "behind it. The band's ratchet is the hypothesis that it pays to GIVE the position "
+              "room.",
+    prior="We expect the same sign as the moving-average cross in a trend, but far fewer position "
+          "changes thanks to the band's hysteresis, and that ALL the edge over the cross comes "
+          "from that reduction and not from better accuracy. Falsifiable: if the number of "
+          "position changes does not fall clearly relative to trend.ema_cross_21_55, the "
+          "hysteresis is doing nothing. We expect it to give back a lot of profit on sharp "
+          "reversals, precisely because of how far away the level sits; we predict it loses to "
+          "trend.psar_002_020 in markets that turn in a V.",
     fn=_supertrend_atr14_x3,
-    params={"atr": 14, "multiplicador": 3.0},
+    params={"atr": 14, "multiplier": 3.0},
     timeframes=("15m", "1h", "4h", "1d"),
     min_warmup=250,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 8. SAR parabólico: la hipótesis contraria — apretar el stop
+# 8. parabolic SAR: the opposing hypothesis — tighten the stop
 # --------------------------------------------------------------------------------------------
 
 
@@ -391,69 +397,70 @@ def _psar_002_020(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="trend.psar_002_020",
     family="trend",
-    rationale="El SAR aprieta el stop conforme la tendencia madura, acelerando con cada nuevo "
-              "extremo. Reproduce un comportamiento observable: el gestor sube el stop tras cada "
-              "máximo nuevo para proteger beneficio no realizado, y esa escalera de stops es "
-              "oferta latente que, al tocarse, se ejecuta en cascada. Está registrada "
-              "explícitamente como la hipótesis OPUESTA a trend.supertrend_atr14_x3 sobre la misma "
-              "pregunta: si conviene apretar o dar aire.",
-    prior="Predecimos que SAR y Supertrend discrepan de forma sistemática en la duración de la "
-          "posición y que UNO de los dos es claramente peor; apostamos por que el SAR pierde en "
-          "neto por exceso de operaciones. El resultado que refutaría la pregunta entera es que "
-          "ambos rindan igual: eso significaría que la distancia del stop no es una variable "
-          "relevante y que las dos racionalizaciones son ruido. El SAR está siempre en mercado, "
-          "así que esperamos daño severo en lateral.",
+    rationale="The SAR tightens the stop as the trend matures, accelerating with every new "
+              "extreme. It reproduces an observable behaviour: the manager raises the stop after "
+              "each new high to protect unrealised profit, and that staircase of stops is latent "
+              "supply which, once touched, executes as a cascade. It is registered explicitly as "
+              "the OPPOSITE hypothesis to trend.supertrend_atr14_x3 on the same question: whether "
+              "to tighten the stop or to give it room.",
+    prior="We predict that SAR and Supertrend disagree systematically about how long the position "
+          "is held and that ONE of the two is clearly worse; we bet on the SAR losing net through "
+          "excess trading. The result that would refute the whole question is that both perform "
+          "the same: that would mean stop distance is not a relevant variable and that both "
+          "rationalisations are noise. The SAR is always in the market, so we expect severe damage "
+          "in a range.",
     fn=_psar_002_020,
-    params={"aceleracion": 0.02, "maximo": 0.2},
+    params={"acceleration": 0.02, "maximum": 0.2},
     timeframes=("15m", "1h", "4h", "1d"),
     min_warmup=250,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 9. pendiente de regresión sobre ATR: deriva medida en unidades de ruido
+# 9. regression slope over ATR: drift measured in units of noise
 # --------------------------------------------------------------------------------------------
 
 
 def _linreg_slope_55_atr14(s: Series) -> np.ndarray:
     h, l, c = _f64(s.high), _f64(s.low), _f64(s.close)
     out = np.zeros(c.size, dtype=np.int8)
-    pendiente = talib.LINEARREG_SLOPE(c, 55)
+    slope = talib.LINEARREG_SLOPE(c, 55)
     atr = talib.ATR(h, l, c, 14)
-    ok = _ok(pendiente, atr) & (atr > 0.0)
-    # desplazamiento acumulado de la ventana, en ATR: exigir > 1 es exigir que la deriva
-    # domine al ruido en su propia unidad. No es un umbral ajustado: es el cambio de unidad.
-    razon = np.full(c.size, np.nan, dtype=np.float64)
-    razon[ok] = (pendiente[ok] * 55.0) / atr[ok]
-    out[ok & (razon > 1.0)] = 1
-    out[ok & (razon < -1.0)] = -1
+    ok = _ok(slope, atr) & (atr > 0.0)
+    # cumulative displacement of the window, in ATR: requiring > 1 is requiring that the drift
+    # dominate the noise in the noise's own unit. It is not a tuned threshold: it is a change of
+    # unit.
+    ratio = np.full(c.size, np.nan, dtype=np.float64)
+    ratio[ok] = (slope[ok] * 55.0) / atr[ok]
+    out[ok & (ratio > 1.0)] = 1
+    out[ok & (ratio < -1.0)] = -1
     return out
 
 
 register(Hypothesis(
     name="trend.linreg_slope_55_atr14",
     family="trend",
-    rationale="La deriva solo es explotable en comparación con el ruido que hay que atravesar para "
-              "cobrarla; un mercado que sube despacio en medio de un vendaval no es operable. La "
-              "pendiente de regresión de 55 barras estima la deriva y el ATR14 el ruido por barra, "
-              "y exigir que el desplazamiento acumulado de la ventana supere 1 ATR es un cambio de "
-              "unidad, no un umbral ajustado a datos. Es la formulación más literal de 'tendencia' "
-              "de toda la familia: sin cruces, sin puntos focales y sin memoria de extremos.",
-    prior="Esperamos que sea el detector con MENOS operaciones y, sobre todo, el más estable entre "
-          "timeframes, porque el umbral es adimensional. Ese es el contraste falsable: si su "
-          "ventaja no sobrevive al cambio de timeframe mejor que la de trend.ema_cross_21_55, la "
-          "normalización por volatilidad no aporta nada. Esperamos que falle justo en los saltos "
-          "de volatilidad, porque el ATR reacciona tarde y el umbral se relaja precisamente cuando "
-          "debería endurecerse.",
+    rationale="Drift is only exploitable relative to the noise you have to wade through to collect "
+              "it; a market that grinds higher in the middle of a gale is not tradeable. The "
+              "55-bar regression slope estimates the drift and the ATR14 the noise per bar, and "
+              "requiring the window's cumulative displacement to exceed 1 ATR is a change of unit, "
+              "not a threshold fitted to data. It is the most literal formulation of 'trend' in "
+              "the whole family: no crosses, no focal points and no memory of extremes.",
+    prior="We expect this to be the detector with the FEWEST trades and, above all, the most "
+          "stable one across timeframes, because the threshold is dimensionless. That is the "
+          "falsifiable test: if its edge does not survive a change of timeframe better than "
+          "trend.ema_cross_21_55's does, normalising by volatility adds nothing. We expect it to "
+          "fail exactly at volatility jumps, because the ATR reacts late and the threshold "
+          "loosens precisely when it should be tightening.",
     fn=_linreg_slope_55_atr14,
-    params={"ventana": 55, "atr": 14, "umbral_en_atr": 1.0},
+    params={"window": 55, "atr": 14, "threshold_in_atr": 1.0},
     timeframes=("15m", "1h", "4h", "1d"),
     min_warmup=250,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 10. Ichimoku: la única construcción popular con GROSOR de equilibrio
+# 10. Ichimoku: the only popular construction with THICKNESS of equilibrium
 # --------------------------------------------------------------------------------------------
 
 
@@ -462,111 +469,114 @@ def _ichimoku_kumo(s: Series) -> np.ndarray:
     out = np.zeros(c.size, dtype=np.int8)
     tenkan = (talib.MAX(h, 9) + talib.MIN(l, 9)) / 2.0
     kijun = (talib.MAX(h, 26) + talib.MIN(l, 26)) / 2.0
-    # +26 de desplazamiento: el nivel de HOY sale de datos de hace 26 barras. Pasado, no futuro.
+    # +26 displacement: TODAY's level comes out of data from 26 bars ago. Past, not future.
     span_a = _lag((tenkan + kijun) / 2.0, 26)
     span_b = _lag((talib.MAX(h, 52) + talib.MIN(l, 52)) / 2.0, 26)
     ok = _ok(tenkan, kijun, span_a, span_b, c)
-    techo = np.maximum(span_a, span_b)
-    suelo = np.minimum(span_a, span_b)
-    out[ok & (c > techo) & (tenkan > kijun)] = 1
-    out[ok & (c < suelo) & (tenkan < kijun)] = -1
+    cloud_top = np.maximum(span_a, span_b)
+    cloud_bottom = np.minimum(span_a, span_b)
+    out[ok & (c > cloud_top) & (tenkan > kijun)] = 1
+    out[ok & (c < cloud_bottom) & (tenkan < kijun)] = -1
     return out
 
 
 register(Hypothesis(
     name="trend.ichimoku_kumo",
     family="trend",
-    rationale="La nube es la única construcción popular que declara la zona de equilibrio con "
-              "GROSOR: entre Senkou A y B no hay señal, y el grosor crece justo cuando los "
-              "extremos recientes discrepan entre sí. Codifica la memoria de los rangos de 9, 26 y "
-              "52 barras, los horizontes de revisión de una mesa japonesa, y su valor —si lo "
-              "tiene— es reflexivo por la enorme adopción del sistema en Asia. El desplazamiento "
-              "+26 es lo que la hace interesante y también lo que la hace fácil de implementar "
-              "mal: es información de hace 26 barras dibujada adelante, nunca información futura.",
-    prior="Esperamos edge parecido al del cruce de medias pero con bastante MÁS tiempo fuera de "
-          "mercado, porque la nube declara explícitamente el equilibrio. Falsable: si el tiempo "
-          "fuera de mercado no aumenta de forma clara respecto a trend.ema_cross_21_55, la nube no "
-          "filtra nada y es una media lenta con dos capas de pintura. Esperamos que falle en las "
-          "tendencias que arrancan desde compresión, donde la nube es fina y no detiene nada.",
+    rationale="The cloud is the only popular construction that declares the equilibrium zone with "
+              "THICKNESS: between Senkou A and B there is no signal, and the thickness grows "
+              "exactly when the recent extremes disagree with each other. It encodes the memory of "
+              "the 9-, 26- and 52-bar ranges, the review horizons of a Japanese desk, and its "
+              "value — if it has any — is reflexive, given how enormously the system is adopted in "
+              "Asia. The +26 displacement is what makes it interesting and also what makes it easy "
+              "to implement wrong: it is information from 26 bars ago drawn forward, never future "
+              "information.",
+    prior="We expect an edge similar to the moving-average cross but with considerably MORE time "
+          "out of the market, because the cloud declares equilibrium explicitly. Falsifiable: if "
+          "time out of the market does not increase clearly relative to trend.ema_cross_21_55, the "
+          "cloud filters nothing and is a slow moving average with two coats of paint. We expect "
+          "it to fail on trends that start from compression, where the cloud is thin and stops "
+          "nothing.",
     fn=_ichimoku_kumo,
-    params={"tenkan": 9, "kijun": 26, "senkou_b": 52, "desplazamiento": 26},
+    params={"tenkan": 9, "kijun": 26, "senkou_b": 52, "displacement": 26},
     timeframes=("15m", "1h", "4h", "1d"),
     min_warmup=250,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 11. Aroon: la tendencia como proceso de renovación
+# 11. Aroon: the trend as a renewal process
 # --------------------------------------------------------------------------------------------
 
 
 def _aroon_25(s: Series) -> np.ndarray:
     h, l = _f64(s.high), _f64(s.low)
     out = np.zeros(h.size, dtype=np.int8)
-    abajo, arriba = talib.AROON(h, l, 25)
-    ok = _ok(arriba, abajo)
-    out[ok & (arriba > 70.0) & (abajo < 30.0)] = 1
-    out[ok & (abajo > 70.0) & (arriba < 30.0)] = -1
+    down, up = talib.AROON(h, l, 25)
+    ok = _ok(up, down)
+    out[ok & (up > 70.0) & (down < 30.0)] = 1
+    out[ok & (down > 70.0) & (up < 30.0)] = -1
     return out
 
 
 register(Hypothesis(
     name="trend.aroon_25",
     family="trend",
-    rationale="Aroon no mide precio sino TIEMPO desde el último extremo, y esa es una variable "
-              "distinta de todo lo demás en esta familia. La tesis es que la tendencia es un "
-              "proceso de renovación: mientras sigan apareciendo máximos nuevos con frecuencia, "
-              "hay compradores dispuestos a pagar precios que nunca se han pagado, algo que solo "
-              "ocurre si la información todavía se está incorporando. Cuando la frecuencia de "
-              "extremos nuevos cae, el flujo se ha agotado aunque el precio aún no haya girado.",
-    prior="Esperamos que salga ANTES que las medias en los techos —que devuelva menos beneficio en "
-          "el giro— y que pague ese seguro con entradas claramente peores. Falsable: si su patrón "
-          "de resultados es indistinguible del de trend.ema_cross_21_55 en todos los regímenes, la "
-          "información de tiempo es redundante con la de precio y la hipótesis no aporta nada "
-          "nuevo a la familia. Esperamos edge nulo o negativo en lateral con extremos alternos, "
-          "donde ambos brazos se mantienen altos y la señal se apaga.",
+    rationale="Aroon measures not price but TIME since the last extreme, and that is a different "
+              "variable from everything else in this family. The thesis is that a trend is a "
+              "renewal process: as long as new highs keep appearing frequently, there are buyers "
+              "willing to pay prices that have never been paid, which only happens if information "
+              "is still being incorporated. When the rate of new extremes falls, the flow has "
+              "exhausted itself even if price has not turned yet.",
+    prior="We expect it to exit BEFORE the moving averages at tops — giving back less profit on "
+          "the turn — and to pay for that insurance with clearly worse entries. Falsifiable: if "
+          "its pattern of results is indistinguishable from trend.ema_cross_21_55's across every "
+          "regime, the time information is redundant with the price information and the hypothesis "
+          "adds nothing new to the family. We expect a nil or negative edge in a range with "
+          "alternating extremes, where both arms stay high and the signal switches off.",
     fn=_aroon_25,
-    params={"periodo": 25, "umbral_alto": 70, "umbral_bajo": 30},
+    params={"period": 25, "high_threshold": 70, "low_threshold": 30},
     timeframes=("15m", "1h", "4h", "1d"),
     min_warmup=250,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 12. momento de series temporales a 12 meses: horizonte de asignación
+# 12. twelve-month time-series momentum: the allocation horizon
 # --------------------------------------------------------------------------------------------
 
 
 def _tsmom_365d(s: Series) -> np.ndarray:
     c = _f64(s.close)
     out = np.zeros(c.size, dtype=np.int8)
-    hace_un_ano = _lag(c, 365)
-    ok = _ok(c, hace_un_ano) & (hace_un_ano > 0.0)
-    out[ok & (c > hace_un_ano)] = 1
-    out[ok & (c < hace_un_ano)] = -1
+    a_year_ago = _lag(c, 365)
+    ok = _ok(c, a_year_ago) & (a_year_ago > 0.0)
+    out[ok & (c > a_year_ago)] = 1
+    out[ok & (c < a_year_ago)] = -1
     return out
 
 
 register(Hypothesis(
     name="trend.tsmom_365d",
     family="trend",
-    rationale="Es la hipótesis de tendencia con más respaldo académico transversal (Moskowitz, Ooi "
-              "y Pedersen): el signo del rendimiento de los últimos doce meses predice el del "
-              "periodo siguiente en casi todas las clases de activo y en más de un siglo de datos. "
-              "El mecanismo propuesto es infrarreacción inicial por anclaje y difusión lenta, "
-              "seguida de sobrerreacción por flujo de seguidores. En BTC se suma el ciclo de "
-              "asignación: un comité aprueba mandatos con trimestres de retraso respecto a la "
-              "decisión que los motivó, y ese retraso es exactamente la persistencia. Se registra "
-              "solo en 1d porque 'doce meses' es una escala del calendario de asignación, no un "
-              "número de barras: a 365 velas de 1h el mecanismo declarado no existe.",
-    prior="Esperamos el edge más pequeño POR BARRA de toda la familia y a la vez el más estable, "
-          "positivo también en los años fuera de muestra. Contraste falsable frente a un hermano: "
-          "si el signo a 365 días no aporta nada sobre lo que ya da trend.linreg_slope_55_atr14, "
-          "el argumento del horizonte de asignación es falso y solo estamos midiendo deriva a "
-          "cualquier escala. Esperamos un drawdown muy grande en cada giro de ciclo, porque tarda "
-          "meses en cambiar de signo.",
+    rationale="This is the trend hypothesis with the broadest cross-asset academic support "
+              "(Moskowitz, Ooi and Pedersen): the sign of the last twelve months' return predicts "
+              "the sign of the following period in almost every asset class and across more than a "
+              "century of data. The proposed mechanism is initial underreaction through anchoring "
+              "and slow diffusion, followed by overreaction driven by trend-follower flow. In BTC "
+              "the allocation cycle adds to it: a committee approves mandates quarters after the "
+              "decision that motivated them, and that lag is exactly the persistence. It is "
+              "registered on 1d only because 'twelve months' is a scale of the allocation "
+              "calendar, not a number of bars: over 365 1h candles the declared mechanism does not "
+              "exist.",
+    prior="We expect the smallest edge PER BAR in the whole family and, at the same time, the most "
+          "stable one, positive in the out-of-sample years as well. Falsifiable test against a "
+          "sibling: if the 365-day sign adds nothing on top of what trend.linreg_slope_55_atr14 "
+          "already gives, the allocation-horizon argument is false and all we are measuring is "
+          "drift at any scale whatsoever. We expect a very large drawdown at every cycle turn, "
+          "because it takes months to change sign.",
     fn=_tsmom_365d,
-    params={"retraso_dias": 365},
+    params={"lag_days": 365},
     timeframes=("1d",),
     min_warmup=420,
 ))

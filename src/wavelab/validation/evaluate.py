@@ -1,20 +1,20 @@
-"""Evalúa TODAS las hipótesis registradas con disciplina fuera de muestra.
+"""Evaluates EVERY registered hypothesis with out-of-sample discipline.
 
-Cuatro controles, y ninguno es opcional:
+Four controls, and not one of them is optional:
 
-1. **Walk-forward con purga.** Se parte el histórico en tramos y solo se reporta lo que cae FUERA
-   de la muestra de ajuste. Entre tramos se PURGA una ventana igual al horizonte de tenencia: sin
-   purgar, una operación abierta al final del tramo de entrenamiento se resuelve dentro del de
-   prueba y filtra información entre ambos.
+1. **Walk-forward with purging.** The history is cut into segments and only what falls OUTSIDE the
+   fitting sample is reported. Between segments a window equal to the holding horizon is PURGED:
+   without purging, a trade opened at the end of the training segment resolves inside the test
+   segment and leaks information from one into the other.
 
-2. **Tasa base.** No se mide "¿acierta?" sino "¿acierta MÁS que estar dentro sin criterio?". En un
-   activo que subió un 1.748%, cualquier estrategia larga acierta mucho, y eso no es una ventaja:
-   es la deriva del mercado.
+2. **Base rate.** The question is not "is it right?" but "is it right MORE often than simply being
+   in the market with no criterion at all?". In an asset that rose 1,748%, any long strategy is
+   right a lot, and that is not an edge: it is the market's drift.
 
-3. **n efectivo.** Señales que se solapan dentro del horizonte son UNA observación, no varias.
+3. **Effective n.** Signals that overlap inside the horizon are ONE observation, not several.
 
-4. **Reality Check de White** sobre el conjunto completo, incluidas las hipótesis fracasadas.
-   Ocultar las fallidas es lo que convierte un estudio en un folleto.
+4. **White's Reality Check** over the whole set, failed hypotheses included. Hiding the failures
+   is what turns a study into a brochure.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ __all__ = ["HypResult", "evaluate_all", "forward_returns"]
 
 
 def forward_returns(close: np.ndarray, horizon: int) -> np.ndarray:
-    """Retorno logarítmico a ``horizon`` velas vista. NaN donde no hay futuro suficiente."""
+    """Log return ``horizon`` bars ahead. NaN wherever there is not enough future left."""
     fwd = np.full(close.size, np.nan)
     if close.size > horizon:
         fwd[:-horizon] = np.log(close[horizon:] / close[:-horizon])
@@ -48,9 +48,9 @@ class HypResult:
     base_rate: float
     mean_ret: float
     base_ret: float
-    edge: float                # exceso de retorno sobre la tasa base
-    oos_edge: float            # el MISMO exceso, pero solo fuera de muestra
-    exposure: float            # fracción del tiempo dentro de mercado
+    edge: float                # excess return over the base rate
+    oos_edge: float            # the SAME excess, but out of sample only
+    exposure: float            # fraction of the time spent in the market
     per_bar: np.ndarray = field(repr=False, default=None)
 
     @property
@@ -59,16 +59,16 @@ class HypResult:
 
 
 def _walk_forward_mask(n: int, folds: int, horizon: int) -> np.ndarray:
-    """True en las posiciones FUERA de muestra, con purga en las fronteras.
+    """True at the OUT-OF-SAMPLE positions, purged at the boundaries.
 
-    Se reservan los primeros 1/folds como entrenamiento inicial y todo lo posterior es OOS por
-    tramos, purgando `horizon` velas en cada frontera para que ninguna operación abierta cruce.
+    The first 1/folds is held back as the initial training set and everything after it is OOS in
+    segments, purging `horizon` bars at each boundary so that no open trade can cross one.
     """
     m = np.zeros(n, dtype=bool)
-    paso = n // folds
+    step = n // folds
     for k in range(1, folds):
-        ini, fin = k * paso, min((k + 1) * paso, n)
-        m[ini + horizon: fin] = True     # purga al principio de cada tramo OOS
+        start, end = k * step, min((k + 1) * step, n)
+        m[start + horizon: end] = True     # purge at the start of each OOS segment
     return m
 
 
@@ -82,7 +82,7 @@ def evaluate_all(
     min_signals: int = 60,
 ) -> tuple[list[HypResult], RealityCheckResult | None]:
     horizon_bars = horizon_bars or {"15m": 32, "1h": 24, "4h": 12, "1d": 5}
-    resultados: list[HypResult] = []
+    results: list[HypResult] = []
     series_ret: dict[str, np.ndarray] = {}
 
     for name, h in sorted(hyps.items()):
@@ -99,47 +99,47 @@ def evaluate_all(
                 print(f"  [!] {name}@{tf}: {type(e).__name__}: {e}")
                 continue
 
-            activo = val & (sig != 0)
-            if activo.sum() < min_signals:
+            active = val & (sig != 0)
+            if active.sum() < min_signals:
                 continue
 
             base_ret = float(fwd[val].mean())
 
-            # ★ RETORNO EN EXCESO DE LA DERIVA, no retorno bruto.
+            # ★ RETURN IN EXCESS OF THE DRIFT, not raw return.
             #
-            # Si el Reality Check se alimenta con `sig * fwd`, la estrategia ganadora será siempre
-            # la que MÁS TIEMPO pase larga, porque BTC subió un 1.748% en la muestra. Eso no es
-            # habilidad de temporización: es beta, y comprarla cuesta cero.
+            # If the Reality Check is fed `sig * fwd`, the winning strategy will always be the one
+            # that spends the MOST TIME long, because BTC rose 1,748% over the sample. That is not
+            # timing skill: it is beta, and buying beta costs nothing.
             #
-            # Restando la deriva media (`fwd - base_ret`) la pregunta pasa a ser la correcta:
-            # "¿acertó ESTE momento mejor que un momento cualquiera?". Un largo solo puntúa si el
-            # retorno superó a la media, y un corto solo si quedó por debajo — que es justo el
-            # coste de ponerse corto en un activo alcista.
+            # Subtracting the mean drift (`fwd - base_ret`) turns it into the right question:
+            # "did THIS moment do better than any old moment?". A long only scores if the return
+            # beat the average, and a short only if it came in below — which is exactly the cost
+            # of being short in a rising asset.
             per_bar = np.zeros(s.close.size)
-            per_bar[activo] = sig[activo] * (fwd[activo] - base_ret)
+            per_bar[active] = sig[active] * (fwd[active] - base_ret)
             base_hit = float((fwd[val] > 0).mean())
-            r = fwd[activo] * sig[activo]
+            r = fwd[active] * sig[active]
             oos = _walk_forward_mask(s.close.size, folds, H)
-            oos_act = activo & oos
+            oos_act = active & oos
             oos_edge = (float((fwd[oos_act] * sig[oos_act]).mean()
                               - fwd[val & oos].mean()) if oos_act.sum() >= 20 else float("nan"))
 
             bar_ms = int(np.median(np.diff(s.ts))) if s.ts.size > 1 else 1
-            resultados.append(HypResult(
+            results.append(HypResult(
                 name=name, family=h.family, tf=tf,
-                n_signals=int(activo.sum()),
-                n_effective=effective_n(s.ts[activo], H, bar_ms),
+                n_signals=int(active.sum()),
+                n_effective=effective_n(s.ts[active], H, bar_ms),
                 hit_rate=float((r > 0).mean()), base_rate=base_hit,
                 mean_ret=float(r.mean()), base_ret=base_ret,
                 edge=float(r.mean() - base_ret), oos_edge=oos_edge,
-                exposure=float(activo.sum() / val.sum()), per_bar=per_bar,
+                exposure=float(active.sum() / val.sum()), per_bar=per_bar,
             ))
             series_ret[f"{name}@{tf}"] = per_bar
 
-    # El Reality Check exige series ALINEADAS en el tiempo, así que solo tiene sentido dentro de
-    # un mismo timeframe: series de 1h y de 1d no se pueden apilar ni comparar vela a vela.
-    # Con varios timeframes, el llamante lo ejecuta por separado para cada uno.
-    largos = {len(v) for v in series_ret.values()}
+    # The Reality Check demands series ALIGNED in time, so it only makes sense within one and the
+    # same timeframe: 1h and 1d series cannot be stacked or compared bar by bar. With several
+    # timeframes, the caller runs it separately for each one.
+    lengths = {len(v) for v in series_ret.values()}
     rc = (reality_check(series_ret, n_boot=n_boot)
-          if n_boot > 0 and len(series_ret) >= 2 and len(largos) == 1 else None)
-    return resultados, rc
+          if n_boot > 0 and len(series_ret) >= 2 and len(lengths) == 1 else None)
+    return results, rc

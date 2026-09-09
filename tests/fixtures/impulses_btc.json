@@ -1,0 +1,279 @@
+{
+  "_readme": [
+    "Hand-labelled fixtures over real BTCUSDT 4h, pivots extracted with k=3.0 ATR.",
+    "",
+    "PROVENANCE WARNING: these labels were put there by the same head that wrote the algorithm,",
+    "so as an oracle they are WEAK. The user is not an Elliott analyst and cannot supply the",
+    "independent contrast, so it is replaced by three weaker oracles that at least do not share",
+    "my bias:",
+    "  1. `taew` (a published, independent Elliott implementation) as a differential oracle",
+    "  2. the purged walk-forward over 9 years (route A of the maturity ladder)",
+    "  3. the negative controls: sequences that MUST be rejected",
+    "None of them replaces a human expert. Noted here as a known limitation of the project.",
+    "",
+    "A fact about the process: of 7 sequences that looked like five-wave impulses by eye, only 3",
+    "survived the hard rules. The 4 rejected ones are here as NEGATIVE cases: an engine that does",
+    "not reject is as useless as one that does not accept, and these are real market violations."
+  ],
+  "symbol": "BTCUSDT",
+  "timeframe": "4h",
+  "k_atr": 3.0,
+  "cases": [
+    {
+      "id": "2025-04_bullish_impulse",
+      "from": "2025-04-09",
+      "to": "2025-05-19",
+      "direction": "long",
+      "points": [
+        74620,
+        97896,
+        93377,
+        105819,
+        100718,
+        107109
+      ],
+      "labels": [
+        "P0",
+        "w1",
+        "w2",
+        "w3",
+        "w4",
+        "w5"
+      ],
+      "expect_valid": true,
+      "confidence": "medium",
+      "notes": "Bounce off the April low. It satisfies all four rules, but w3/w1=0.53 and w5/w1=0.27: wave 3 is MUCH shorter than wave 1. That is legal (R2 only forbids wave 3 from being the SHORTEST, and the shortest here is wave 5) but it is atypical of a healthy impulse. An experienced counter would probably read it as a leading diagonal or as part of a corrective of higher degree. Confidence deliberately set to medium."
+    },
+    {
+      "id": "2025-04_impulse_extended_w5",
+      "from": "2025-04-09",
+      "to": "2025-05-22",
+      "direction": "long",
+      "points": [
+        74620,
+        97896,
+        93377,
+        105819,
+        100718,
+        111980
+      ],
+      "labels": [
+        "P0",
+        "w1",
+        "w2",
+        "w3",
+        "w4",
+        "w5"
+      ],
+      "expect_valid": true,
+      "confidence": "medium",
+      "notes": "The same structure carrying w5 up to the May high. REAL ambiguity, not manufactured: the same stretch admits two different endings for wave 5 and both readings are valid. It is precisely the case that forces the product to be an ORDERED set of hypotheses rather than a single answer."
+    },
+    {
+      "id": "2025-10_selloff_extended_w3",
+      "from": "2025-10-06",
+      "to": "2025-11-21",
+      "direction": "short",
+      "points": [
+        126200,
+        102000,
+        116400,
+        80600
+      ],
+      "labels": [
+        "P0",
+        "w1",
+        "w2",
+        "w3"
+      ],
+      "expect_valid": true,
+      "confidence": "high",
+      "state": "impulse@3",
+      "notes": "Collapse from October's all-time high. w2 retraces 59.5% of w1 (a classic retracement) and w3/w1=1.48, close to 1.618. INCOMPLETE IMPULSE: exactly the case a parser without partial non-terminals would not know how to label, and where R3 and R2 are not yet evaluable."
+    },
+    {
+      "id": "2025-10_selloff_short_w3_REJECT",
+      "from": "2025-10-06",
+      "to": "2025-11-11",
+      "direction": "short",
+      "points": [
+        126200,
+        102000,
+        116400,
+        98944,
+        107500
+      ],
+      "labels": [
+        "P0",
+        "w1",
+        "w2",
+        "w3",
+        "w4"
+      ],
+      "expect_valid": false,
+      "breaks": [
+        "R3"
+      ],
+      "confidence": "high",
+      "notes": "The ALTERNATIVE reading of the same stretch, with a short w3. Wave 4 rises to 107,500, inside w1 territory (102,000-126,200). The engine has to reject it and keep the extended-w3 reading instead. That discrimination is what justifies the whole apparatus."
+    },
+    {
+      "id": "2026-02_recovery_REJECT",
+      "from": "2026-02-06",
+      "to": "2026-03-17",
+      "direction": "long",
+      "points": [
+        60000,
+        72271,
+        65118,
+        74050,
+        65618,
+        76000
+      ],
+      "labels": [
+        "P0",
+        "w1",
+        "w2",
+        "w3",
+        "w4",
+        "w5"
+      ],
+      "expect_valid": false,
+      "breaks": [
+        "R3",
+        "R2"
+      ],
+      "confidence": "high",
+      "notes": "Recovery after the February collapse. By eye it looks like a perfect five. It breaks TWO rules: w4 enters w1 territory, and w3 is the shortest of the three. It is almost certainly a corrective of higher degree, not an impulse. It is the case that taught me most while labelling."
+    },
+    {
+      "id": "2026-02_recovery_complex_w2_REJECT",
+      "from": "2026-02-06",
+      "to": "2026-03-17",
+      "direction": "long",
+      "points": [
+        60000,
+        72271,
+        62510,
+        74050,
+        65618,
+        76000
+      ],
+      "labels": [
+        "P0",
+        "w1",
+        "w2",
+        "w3",
+        "w4",
+        "w5"
+      ],
+      "expect_valid": false,
+      "breaks": [
+        "R3"
+      ],
+      "confidence": "high",
+      "notes": "Second attempt at the same stretch, reading w2 as a complex corrective down to 62,510. It fixes R2 but R3 is still broken. Two different readings of the same stretch, both rejected: the stretch is NOT an impulse at this degree, and no amount of relabelling fixes that."
+    },
+    {
+      "id": "2025-06_rally_REJECT",
+      "from": "2025-06-22",
+      "to": "2025-07-14",
+      "direction": "long",
+      "points": [
+        98200,
+        108790,
+        105100,
+        110529,
+        107245,
+        123218
+      ],
+      "labels": [
+        "P0",
+        "w1",
+        "w2",
+        "w3",
+        "w4",
+        "w5"
+      ],
+      "expect_valid": false,
+      "breaks": [
+        "R3",
+        "R2"
+      ],
+      "confidence": "high",
+      "notes": "w4 drops to 107,245, inside w1 territory (98,200-108,790), and w3 is the shortest. The final leg of +14.9% up to 123,218 is real and large, but that does not turn what came before it into an impulse."
+    },
+    {
+      "id": "2025-03_selloff_REJECT",
+      "from": "2025-03-02",
+      "to": "2025-04-07",
+      "direction": "short",
+      "points": [
+        95000,
+        81500,
+        92811,
+        76606,
+        87454,
+        74508
+      ],
+      "labels": [
+        "P0",
+        "w1",
+        "w2",
+        "w3",
+        "w4",
+        "w5"
+      ],
+      "expect_valid": false,
+      "breaks": [
+        "R3"
+      ],
+      "confidence": "high",
+      "notes": "The March decline. w4 bounces to 87,454, inside w1 territory (81,500-95,000). Rejected."
+    },
+    {
+      "id": "synthetic_w2_exceeds_origin_REJECT",
+      "direction": "long",
+      "points": [
+        100,
+        120,
+        99
+      ],
+      "labels": [
+        "P0",
+        "w1",
+        "w2"
+      ],
+      "expect_valid": false,
+      "breaks": [
+        "R1"
+      ],
+      "state": "impulse@2",
+      "notes": "The minimal R1 case, in a PARTIAL state. With only three vertices, R2b, R3 and R2 are not evaluable and must not invalidate anything. Checks that a partial non-terminal does not invent verdicts."
+    },
+    {
+      "id": "synthetic_truncation_LEGAL",
+      "direction": "long",
+      "points": [
+        100,
+        130,
+        115,
+        160,
+        140,
+        155
+      ],
+      "labels": [
+        "P0",
+        "w1",
+        "w2",
+        "w3",
+        "w4",
+        "w5"
+      ],
+      "expect_valid": true,
+      "expect_truncated": true,
+      "confidence": "high",
+      "notes": "w5 (155) does not exceed w3 (160): a TRUNCATED fifth. No rule forbids it. It is flagged as exhaustion and NEVER rejected — rejecting it would throw away exactly the counts you most want near a top."
+    }
+  ]
+}

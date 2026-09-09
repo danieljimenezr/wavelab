@@ -1,8 +1,8 @@
-"""El reloj es una dependencia inyectada, nunca una llamada directa a ``time``.
+"""The clock is an injected dependency, never a direct call to ``time``.
 
-Si el motor consultase la hora del sistema, el replay no sería reproducible y el arnés de
-determinismo — la prueba que sostiene la afirmación de que backtest y live son el mismo código —
-sería imposible de escribir.
+If the engine asked the system for the time, replay would not be reproducible and the determinism
+harness — the test that backs the claim that backtest and live are the same code — would be
+impossible to write.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ class Clock(Protocol):
 
 
 class LiveClock:
-    """Reloj de pared. El único sitio del proyecto donde se llama a ``time``."""
+    """Wall clock. The only place in the project where ``time`` is called."""
 
     __slots__ = ()
 
@@ -28,10 +28,10 @@ class LiveClock:
 
 
 class SimClock:
-    """Reloj controlado, avanzado explícitamente por el arnés de replay.
+    """Controlled clock, advanced explicitly by the replay harness.
 
-    Es monótono a propósito: retroceder en el tiempo durante un replay significa que se ha alimentado
-    una vela fuera de orden, y eso debe explotar, no corregirse en silencio.
+    It is monotonic on purpose: going backwards in time during a replay means a bar has been fed
+    out of order, and that has to blow up, not be quietly patched over.
     """
 
     __slots__ = ("_t",)
@@ -46,12 +46,12 @@ class SimClock:
         ts_ms = int(ts_ms)
         if ts_ms < self._t:
             raise ValueError(
-                f"SimClock: intento de retroceder de {self._t} a {ts_ms}. "
-                "Durante un replay eso significa una vela fuera de orden."
+                f"SimClock: attempt to go backwards from {self._t} to {ts_ms}. "
+                "During a replay that means a bar arrived out of order."
             )
         self._t = ts_ms
 
     def advance(self, ms: int) -> None:
         if ms < 0:
-            raise ValueError("SimClock.advance no acepta valores negativos")
+            raise ValueError("SimClock.advance does not accept negative values")
         self._t += int(ms)

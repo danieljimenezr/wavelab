@@ -1,4 +1,4 @@
-"""Carga todas las familias de hipótesis registradas."""
+"""Loads every registered hypothesis family."""
 from __future__ import annotations
 
 import importlib

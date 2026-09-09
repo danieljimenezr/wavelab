@@ -1,4 +1,4 @@
-"""Añadir un activo debe ser UN fichero TOML y cero código. Aquí se demuestra."""
+"""Adding an asset must be ONE TOML file and zero code. This is where that gets proved."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import pytest
 from wavelab.config import AppConfig, AssetConfig, EngineConfig, config_hash, load_config
 
 
-def test_carga_la_configuracion_real():
+def test_loads_the_real_config():
     c = load_config(Path(__file__).parent.parent / "config")
     assert "BTCUSDT" in c.assets
     btc = c.assets["BTCUSDT"]
@@ -17,13 +17,13 @@ def test_carga_la_configuracion_real():
     assert btc.price_space == "log"
 
 
-def test_separacion_de_roles():
+def test_separation_of_roles():
     c = load_config(Path(__file__).parent.parent / "config")
-    assert c.trigger_tf == "15m", "solo el timeframe de disparo dibuja entradas"
+    assert c.trigger_tf == "15m", "only the trigger timeframe draws entries"
     assert c.regime_tf not in c.gate_tfs
 
 
-def test_anadir_un_activo_no_requiere_codigo(tmp_path: Path):
+def test_adding_an_asset_requires_no_code(tmp_path: Path):
     root = tmp_path / "config"
     (root / "assets").mkdir(parents=True)
     (root / "wavelab.toml").write_text('trigger_tf = "15m"\n')
@@ -36,18 +36,18 @@ def test_anadir_un_activo_no_requiere_codigo(tmp_path: Path):
     assert c.assets["SOLUSDT"].tick_size == 0.001
 
 
-def test_metadata_de_instrumento_es_obligatoria():
-    """Sin tick_size el stop no está definido; sin comisiones se hereda la economía de BTC."""
+def test_instrument_metadata_is_mandatory():
+    """With no tick_size the stop is undefined; with no fees you inherit BTC's economics."""
     with pytest.raises(Exception):
         AssetConfig(symbol="X")
 
 
-class TestInvariantes:
-    def test_spot_no_paga_funding(self):
+class TestInvariants:
+    def test_spot_pays_no_funding(self):
         with pytest.raises(ValueError, match="funding"):
             AssetConfig(symbol="X", instrument="spot", has_funding=True, tick_size=1, qty_step=1)
 
-    def test_cripto_es_24x7(self):
+    def test_crypto_is_24x7(self):
         with pytest.raises(ValueError, match="24/7"):
             AssetConfig(symbol="X", asset_class="crypto", session="us_equity_rth",
                         tick_size=1, qty_step=1)
@@ -55,26 +55,26 @@ class TestInvariantes:
     @pytest.mark.parametrize("kw", [
         {"er_trend_exit": 0.9}, {"er_chop_exit": 0.01}, {"min_stop_atr": 9.0},
     ])
-    def test_histeresis_incoherente_lanza(self, kw):
+    def test_incoherent_hysteresis_raises(self, kw):
         with pytest.raises(ValueError):
             EngineConfig(**kw)
 
 
-class TestHashDeConfiguracion:
-    """El hash alimenta el N efectivo del Deflated Sharpe. Si no cambia al tocar un parámetro,
-    la contabilidad de ensayos miente y el DSR sale anti-conservador."""
+class TestConfigHash:
+    """The hash feeds the effective N of the Deflated Sharpe. If it does not change when a
+    parameter is touched, the trial accounting lies and the DSR comes out anti-conservative."""
 
-    def test_es_estable(self):
+    def test_it_is_stable(self):
         a, b = AppConfig(), AppConfig()
         assert config_hash(a) == config_hash(b)
 
-    def test_cambia_con_cualquier_parametro_del_motor(self):
+    def test_it_changes_with_any_engine_parameter(self):
         base = AppConfig()
         for kw in ({"zigzag_k_atr": 1.6}, {"er_trend_enter": 0.36}, {"ev_min_r": 0.16}):
-            otro = AppConfig(engine=EngineConfig(**kw))
-            assert config_hash(base) != config_hash(otro), (
-                f"tocar {kw} no cambió el hash: ese ensayo no se contaría"
+            other = AppConfig(engine=EngineConfig(**kw))
+            assert config_hash(base) != config_hash(other), (
+                f"touching {kw} did not change the hash: that trial would go uncounted"
             )
 
-    def test_no_cambia_con_la_ruta_de_datos(self):
-        assert config_hash(AppConfig()) == config_hash(AppConfig(data_dir=Path("/otro")))
+    def test_it_does_not_change_with_the_data_path(self):
+        assert config_hash(AppConfig()) == config_hash(AppConfig(data_dir=Path("/elsewhere")))

@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="es">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Assay — ¿tu estrategia es real?</title>
+<title data-i18n="assay.title">Assay — is your strategy real?</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>🔬</text></svg>">
 <style>
   :root{--bg:#0d1117;--panel:#161b22;--line:#21262d;--txt:#e6edf3;--dim:#8b949e;
@@ -12,10 +12,17 @@
   body{margin:0;background:var(--bg);color:var(--txt);
        font:14px/1.6 ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif}
   header{padding:14px 28px 20px;background:var(--panel);border-bottom:1px solid var(--line)}
-  .pages{display:flex;gap:2px;margin-bottom:12px}
+  .topbar{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+  .pages{display:flex;gap:2px}
   .pages a{color:var(--dim);text-decoration:none;padding:5px 12px;border-radius:6px;font-size:12.5px}
   .pages a:hover{color:var(--txt);background:rgba(255,255,255,.05)}
   .pages a.on{color:var(--txt);background:rgba(88,166,255,.14)}
+  .lang{display:flex;align-items:center;gap:1px;margin-left:auto}
+  .lang button{background:transparent;border:0;color:var(--dim);font:inherit;font-size:11.5px;
+       letter-spacing:.5px;padding:4px 7px;border-radius:5px;cursor:pointer;font-weight:400}
+  .lang button:hover{color:var(--txt);background:rgba(255,255,255,.05)}
+  .lang button[aria-pressed=true]{color:var(--txt);background:rgba(88,166,255,.14);font-weight:600}
+  .lang .sep{color:var(--line)}
   h1{margin:0;font-size:20px;font-weight:650}
   h1 small{display:block;color:var(--dim);font-size:13px;font-weight:400;margin-top:4px}
   main{max-width:1180px;margin:0 auto;padding:22px 28px 60px}
@@ -25,54 +32,54 @@
        padding:9px 16px;border-radius:0;cursor:pointer;font-size:13.5px}
   .tab:hover{color:var(--txt)}
   .tab.on{color:var(--txt);border-bottom-color:var(--accent);font-weight:600}
-  .pane.oculto{display:none}
+  .pane.hidden{display:none}
   .hint{color:var(--dim);font-size:12.5px;margin:0 0 12px;max-width:760px}
-  .hint code,pre.ejemplo{background:#0d1117;border:1px solid var(--line);border-radius:5px;
+  .hint code,pre.example{background:#0d1117;border:1px solid var(--line);border-radius:5px;
        padding:1px 6px;font-size:12px}
-  pre.ejemplo{padding:11px 14px;color:var(--dim);margin:10px 0 0;display:inline-block;line-height:1.5}
+  pre.example{padding:11px 14px;color:var(--dim);margin:10px 0 0;display:inline-block;line-height:1.5}
   input[type=file]{color:var(--dim);font-size:12.5px}
   .lab{display:block;color:var(--dim);font-size:11.5px;margin:10px 0 4px;
        text-transform:uppercase;letter-spacing:.4px}
   .expr{width:100%;max-width:760px;background:#0d1117;color:var(--txt);border:1px solid var(--line);
         border-radius:7px;padding:10px 13px;font:13px ui-monospace,SFMono-Regular,Menlo,monospace}
   .expr:focus{outline:1px solid var(--accent)}
-  .ayuda{margin-top:16px;font-size:12px;color:var(--dim);display:grid;
+  .help{margin-top:16px;font-size:12px;color:var(--dim);display:grid;
          grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:5px 22px;max-width:900px}
-  .ayuda code{color:var(--accent)}
-  .ejemplos{display:flex;gap:7px;flex-wrap:wrap;align-items:center;margin:6px 0 14px;
+  .help code{color:var(--accent)}
+  .examples{display:flex;gap:7px;flex-wrap:wrap;align-items:center;margin:6px 0 14px;
             font-size:12px;color:var(--dim)}
-  .ej{background:#0d1117;border:1px solid var(--line);color:var(--accent);padding:5px 11px;
+  .ex{background:#0d1117;border:1px solid var(--line);color:var(--accent);padding:5px 11px;
       border-radius:14px;font-size:12px;cursor:pointer}
-  .ej:hover{border-color:var(--accent);background:rgba(88,166,255,.08)}
-  .plegable{margin-top:16px;border-top:1px solid var(--line);padding-top:10px}
-  .plegable summary{cursor:pointer;color:var(--dim);font-size:12.5px;user-select:none}
-  .plegable summary:hover{color:var(--txt)}
-  .plegable[open] summary{margin-bottom:10px}
-  .dos-ejemplos{display:flex;gap:24px;flex-wrap:wrap;font-size:12px;color:var(--dim)}
-  .cargando{background:var(--panel);border:1px solid var(--line);border-radius:9px;
+  .ex:hover{border-color:var(--accent);background:rgba(88,166,255,.08)}
+  .collapsible{margin-top:16px;border-top:1px solid var(--line);padding-top:10px}
+  .collapsible summary{cursor:pointer;color:var(--dim);font-size:12.5px;user-select:none}
+  .collapsible summary:hover{color:var(--txt)}
+  .collapsible[open] summary{margin-bottom:10px}
+  .two-examples{display:flex;gap:24px;flex-wrap:wrap;font-size:12px;color:var(--dim)}
+  .loading{background:var(--panel);border:1px solid var(--line);border-radius:9px;
             padding:16px 20px;margin:16px 0}
-  .cargando .paso{color:var(--dim);font-size:12.5px;padding:2px 0}
-  .cargando .paso.ya{color:var(--ok)}
-  .barra{height:3px;background:var(--line);border-radius:2px;overflow:hidden;margin-top:11px}
-  .barra i{display:block;height:100%;width:35%;background:var(--accent);border-radius:2px;
-           animation:desliza 1.15s ease-in-out infinite}
-  @keyframes desliza{0%{margin-left:-35%}100%{margin-left:100%}}
-  .acciones{display:flex;gap:8px;margin:16px 0 4px}
-  .acciones button{background:#0d1117;border:1px solid var(--line);color:var(--dim);
+  .loading .step{color:var(--dim);font-size:12.5px;padding:2px 0}
+  .loading .step.done{color:var(--ok)}
+  .bar{height:3px;background:var(--line);border-radius:2px;overflow:hidden;margin-top:11px}
+  .bar i{display:block;height:100%;width:35%;background:var(--accent);border-radius:2px;
+           animation:slide 1.15s ease-in-out infinite}
+  @keyframes slide{0%{margin-left:-35%}100%{margin-left:100%}}
+  .actions{display:flex;gap:8px;margin:16px 0 4px}
+  .actions button{background:#0d1117;border:1px solid var(--line);color:var(--dim);
                    font-size:12.5px;padding:7px 13px;border-radius:7px;cursor:pointer}
-  .acciones button:hover{color:var(--txt);border-color:var(--accent)}
-  .informe{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);
+  .actions button:hover{color:var(--txt);border-color:var(--accent)}
+  .report{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);
            border-radius:8px;padding:11px 15px;margin:14px 0;font-size:12.5px;color:var(--dim)}
-  .informe b{color:var(--txt)}
+  .report b{color:var(--txt)}
   select,button{background:#0d1117;color:var(--txt);border:1px solid var(--line);
                 border-radius:7px;padding:9px 13px;font:inherit;font-size:13px}
   select{min-width:290px} select:focus,button:focus{outline:1px solid var(--accent)}
   button{background:var(--accent);color:#06121f;border-color:var(--accent);font-weight:600;
          cursor:pointer} button:disabled{opacity:.5;cursor:default}
   .verdict{padding:16px 20px;border-radius:10px;margin:18px 0;border:1px solid}
-  .v-sobrevive{background:rgba(63,185,80,.09);border-color:#238636}
-  .v-dudosa{background:rgba(210,153,34,.09);border-color:#9e6a03}
-  .v-no_sobrevive,.v-fuga{background:rgba(248,81,73,.09);border-color:#8b2c26}
+  .v-survives{background:rgba(63,185,80,.09);border-color:#238636}
+  .v-doubtful{background:rgba(210,153,34,.09);border-color:#9e6a03}
+  .v-fails,.v-lookahead{background:rgba(248,81,73,.09);border-color:#8b2c26}
   .verdict b{font-size:16px;display:block;margin-bottom:3px}
   .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:10px;margin:16px 0}
   .kpi{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:11px 13px}
@@ -83,13 +90,13 @@
          border-radius:9px;margin:16px 0}
   .test{background:var(--panel);border:1px solid var(--line);border-left-width:4px;
         border-radius:9px;padding:13px 16px;margin:9px 0}
-  .test.pasa{border-left-color:var(--ok)} .test.falla{border-left-color:var(--bad)}
-  .test.no_concluyente{border-left-color:var(--dim)}
+  .test.pass{border-left-color:var(--ok)} .test.fail{border-left-color:var(--bad)}
+  .test.inconclusive{border-left-color:var(--dim)}
   .test h3{margin:0 0 4px;font-size:14px;font-weight:600;display:flex;gap:9px;align-items:baseline}
   .tag{font-size:10.5px;padding:2px 8px;border-radius:11px;font-weight:600;letter-spacing:.3px}
-  .pasa .tag{background:rgba(63,185,80,.16);color:var(--ok)}
-  .falla .tag{background:rgba(248,81,73,.16);color:var(--bad)}
-  .no_concluyente .tag{background:rgba(139,148,158,.16);color:var(--dim)}
+  .pass .tag{background:rgba(63,185,80,.16);color:var(--ok)}
+  .fail .tag{background:rgba(248,81,73,.16);color:var(--bad)}
+  .inconclusive .tag{background:rgba(139,148,158,.16);color:var(--dim)}
   .test .det{font-variant-numeric:tabular-nums;font-size:12.5px;color:var(--txt);margin:5px 0}
   .test .exp{color:var(--dim);font-size:12.5px}
   .meta{background:var(--panel);border:1px solid var(--line);border-radius:9px;
@@ -101,92 +108,112 @@
 </head>
 <body>
 <header>
-  <nav class="pages">
-    <a href="./index.html">Gráfico</a>
-    <a href="./assay.html" class="on">Assay</a>
-  </nav>
+  <div class="topbar">
+    <nav class="pages">
+      <a href="./index.html" data-i18n="nav.chart">Chart</a>
+      <a href="./assay.html" class="on" data-i18n="nav.assay">Assay</a>
+    </nav>
+    <nav class="lang" id="lang" data-i18n-label="lang.aria" aria-label="Language"></nav>
+  </div>
   <h1>Assay
-    <small>Un <i>assay</i> es el ensayo que determina si un mineral es oro o pirita. Esto hace lo
-      mismo con una estrategia de trading: cinco pruebas que casi ninguna supera. No te dice cuándo
-      comprar — te dice si lo que crees que funciona resiste.</small></h1>
+    <small data-i18n-html="assay.tagline">An <i>assay</i> is the test that decides whether an ore
+      is gold or pyrite. This does the same to a trading strategy: five tests that almost nothing
+      passes. It does not tell you when to buy — it tells you whether what you believe works holds
+      up.</small></h1>
 </header>
 <main>
   <div class="tabs">
-    <button class="tab on" data-t="catalogo">Catálogo</button>
-    <button class="tab" data-t="csv">Mi CSV</button>
-    <button class="tab" data-t="regla">Escribir una regla</button>
+    <button class="tab on" data-t="catalog" data-i18n="tab.catalog">Catalogue</button>
+    <button class="tab" data-t="csv" data-i18n="tab.csv">My CSV</button>
+    <button class="tab" data-t="rule" data-i18n="tab.rule">Write a rule</button>
   </div>
 
-  <section class="pane" id="p-catalogo">
+  <section class="pane" id="p-catalog">
     <div class="controls">
-      <select id="hyp"><option>cargando…</option></select>
-      <select class="tf"><option value="1d">diario</option><option value="4h">4 horas</option>
-        <option value="1h">1 hora</option></select>
-      <button class="run" data-modo="catalogo">Someter a la batería</button>
+      <select id="hyp"><option data-i18n="sel.loading">loading…</option></select>
+      <select class="tf"><option value="1d" data-i18n="tf.1d">daily</option>
+        <option value="4h" data-i18n="tf.4h">4 hours</option>
+        <option value="1h" data-i18n="tf.1h">1 hour</option></select>
+      <button class="run" data-mode="catalog" data-i18n="btn.battery">Put it through the battery</button>
       <span id="status" style="color:var(--dim);font-size:12.5px"></span>
     </div>
   </section>
 
-  <section class="pane oculto" id="p-csv">
-    <p class="hint">Sube un CSV con <b>una columna de fecha</b> y <b>una de señal</b>. Acepta fechas
-      ISO o epoch, y señales como <code>1/0/-1</code>, <code>largo/fuera/corto</code> o
-      <code>buy/sell</code>. La posición se mantiene hasta que la cambies.<br>
-      <b>Si añades una columna de precio</b>, se valida contra <b>tu</b> activo — acciones, divisas,
-      la cripto que sea. Sin ella se usa nuestra serie de BTC.</p>
+  <section class="pane hidden" id="p-csv">
+    <p class="hint" data-i18n-html="csv.hint">Upload a CSV with <b>a date column</b> and <b>a signal
+      column</b>. It takes ISO dates or epochs, and signals like <code>1/0/-1</code>,
+      <code>long/flat/short</code> or <code>buy/sell</code>. A position is held until you change
+      it.<br><b>Add a price column</b> and it is validated against <b>your</b> asset — equities,
+      FX, whatever crypto. Without one, our BTC series is used.</p>
     <div class="controls">
-      <input type="file" id="fichero" accept=".csv,.txt">
-      <select class="tf"><option value="1d">diario</option><option value="4h">4 horas</option>
-        <option value="1h">1 hora</option></select>
-      <button class="run" data-modo="csv">Validar mi estrategia</button>
+      <input type="file" id="file" accept=".csv,.txt">
+      <select class="tf"><option value="1d" data-i18n="tf.1d">daily</option>
+        <option value="4h" data-i18n="tf.4h">4 hours</option>
+        <option value="1h" data-i18n="tf.1h">1 hour</option></select>
+      <button class="run" data-mode="csv" data-i18n="btn.validate_csv">Validate my strategy</button>
     </div>
-    <div class="dos-ejemplos">
-      <div><b>solo señales</b> (se valida contra BTC)
-        <pre class="ejemplo">fecha,señal
-2024-01-15,largo
-2024-03-02,fuera
-2024-04-10,corto</pre></div>
-      <div><b>con tu propio activo</b>
-        <pre class="ejemplo">fecha,precio,señal
-2024-01-15,185.50,largo
-2024-01-16,187.20,largo
-2024-01-17,183.10,fuera</pre></div>
+    <!-- The header and value words in these examples follow the chosen language on purpose: the
+         importer accepts English, Spanish and Catalan vocabulary because a spreadsheet is USER
+         DATA, and showing an English header to someone whose file says «fecha» teaches them the
+         wrong thing about what we accept. -->
+    <div class="two-examples">
+      <div><span data-i18n-html="csv.ex1"><b>signals only</b> (validated against BTC)</span>
+        <pre class="example" data-i18n="csv.code1">date,signal
+2024-01-15,long
+2024-03-02,flat
+2024-04-10,short</pre></div>
+      <div><span data-i18n-html="csv.ex2"><b>with your own asset</b></span>
+        <pre class="example" data-i18n="csv.code2">date,price,signal
+2024-01-15,185.50,long
+2024-01-16,187.20,long
+2024-01-17,183.10,flat</pre></div>
     </div>
   </section>
 
-  <section class="pane oculto" id="p-regla">
-    <p class="hint">Escribe cuándo estar <b>largo</b> y, si quieres, cuándo estar <b>corto</b>.
-      Si ninguna se cumple, estás fuera del mercado.</p>
-    <div class="ejemplos">
-      <span>Empieza por un ejemplo:</span>
-      <button class="ej" data-l="cierre > ema(cierre, 200)">tendencia simple</button>
-      <button class="ej" data-l="rsi(cierre, 14) < 30" data-c="rsi(cierre, 14) > 70">RSI extremos</button>
-      <button class="ej" data-l="cruza_arriba(ema(cierre,21), ema(cierre,55))"
-              data-c="cruza_abajo(ema(cierre,21), ema(cierre,55))">cruce de medias</button>
-      <button class="ej" data-l="cierre > maximo(desplazar(maximo_,1), 20)"
-              data-c="cierre < minimo(desplazar(minimo_,1), 20)">ruptura de canal</button>
-      <button class="ej" data-l="rango > 2 * sma(rango, 20) and cuerpo > 0">expansión de rango</button>
+  <section class="pane hidden" id="p-rule">
+    <p class="hint" data-i18n-html="rule.hint">Write when to be <b>long</b> and, if you want, when
+      to be <b>short</b>. When neither holds, you are out of the market.</p>
+    <!-- The DSL keywords are code, never translated: close, ema, rsi, crosses_above, shift. Only
+         the human label on each chip changes with the language. -->
+    <div class="examples">
+      <span data-i18n="rule.start">Start from an example:</span>
+      <button class="ex" data-l="close > ema(close, 200)" data-i18n="ex.trend">simple trend</button>
+      <button class="ex" data-l="rsi(close, 14) < 30" data-c="rsi(close, 14) > 70"
+              data-i18n="ex.rsi">RSI extremes</button>
+      <button class="ex" data-l="crosses_above(ema(close,21), ema(close,55))"
+              data-c="crosses_below(ema(close,21), ema(close,55))"
+              data-i18n="ex.cross">moving-average cross</button>
+      <button class="ex" data-l="close > highest(shift(high,1), 20)"
+              data-c="close < lowest(shift(low,1), 20)"
+              data-i18n="ex.breakout">channel breakout</button>
+      <button class="ex" data-l="range > 2 * sma(range, 20) and body > 0"
+              data-i18n="ex.range">range expansion</button>
     </div>
-    <label class="lab">Largo cuando…</label>
-    <input class="expr" id="largo" value="cierre > ema(cierre, 200)">
-    <label class="lab">Corto cuando… <span style="color:var(--dim)">(opcional)</span></label>
-    <input class="expr" id="corto" placeholder="p. ej.: cierre < ema(cierre, 200)">
+    <label class="lab" data-i18n="rule.long">Long when…</label>
+    <input class="expr" id="long" value="close > ema(close, 200)">
+    <label class="lab" data-i18n-html="rule.short">Short when…
+      <span style="color:var(--dim)">(optional)</span></label>
+    <input class="expr" id="short" data-i18n-placeholder="rule.short_ph"
+           placeholder="e.g. close < ema(close, 200)">
     <div class="controls">
-      <select class="tf"><option value="1d">diario</option><option value="4h">4 horas</option>
-        <option value="1h">1 hora</option></select>
-      <button class="run" data-modo="regla">Validar mi regla</button>
+      <select class="tf"><option value="1d" data-i18n="tf.1d">daily</option>
+        <option value="4h" data-i18n="tf.4h">4 hours</option>
+        <option value="1h" data-i18n="tf.1h">1 hour</option></select>
+      <button class="run" data-mode="rule" data-i18n="btn.validate_rule">Validate my rule</button>
     </div>
-    <details class="plegable">
-      <summary>Series y funciones disponibles</summary>
-      <div id="ayuda" class="ayuda"></div>
+    <details class="collapsible">
+      <summary data-i18n="rule.help">Series and functions available</summary>
+      <div id="help" class="help"></div>
     </details>
   </section>
   <div id="out"></div>
-  <div class="foot">
-    <b>Assay</b> es una herramienta de <b>validación</b>, no de recomendación de inversión. Que una estrategia sobreviva a la batería
-    no demuestra que gane dinero: demuestra que no es ninguno de los cinco errores conocidos que
-    hacen que un backtest bonito pierda dinero en real.
+  <div class="foot" data-i18n-html="assay.foot">
+    <b>Assay</b> is a <b>validation</b> tool, not investment advice. A strategy surviving the
+    battery does not prove it makes money: it proves it is not one of the five known mistakes that
+    make a beautiful backtest lose money live.
   </div>
 </main>
+<script type="module" src="./i18n.js"></script>
 <script type="module" src="./assay.js"></script>
 </body>
 </html>

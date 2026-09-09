@@ -1,17 +1,17 @@
-"""Almacén de pivotes cuyo único accesor alcanzable es ``as_of``.
+"""Pivot store whose only reachable accessor is ``as_of``.
 
-``__getitem__`` **lanza**. No devuelve nada, no avisa: lanza. Una regla de linter se puede silenciar
-con un comentario; un ``raise`` no se puede silenciar sin borrarlo, y borrarlo sale en el diff.
+``__getitem__`` **raises**. It does not return anything, it does not warn: it raises. A lint rule
+can be silenced with a comment; a ``raise`` cannot be silenced without deleting it, and deleting it
+shows up in the diff.
 
-La propiedad que sostiene todo lo demás: **los pivotes confirmados nunca cambian, así que el
-histórico solo puede CRECER**. De ahí salen tres cosas gratis: el conteo es genuinamente append-only,
-la instantánea «como estaba en la vela t» no cuesta nada, y el arnés de replay es O(n) en vez de
-O(n²).
+The property that holds up everything else: **confirmed pivots never change, so the history can only
+GROW**. Three things come out of that for free: the count is genuinely append-only, the "as it stood
+at bar t" snapshot costs nothing, and the replay harness is O(n) instead of O(n²).
 
-Esa propiedad solo se sostiene si el umbral de confirmación está CONGELADO en la vela del extremo
-(``Pivot.thr_at_extreme``). Si se recalculase con el ATR de hoy, un pivote confirmado con volatilidad
-baja podría dejar de cumplir la desigualdad mañana con volatilidad expandida, y un conteo que el
-usuario ya vio desaparecería sin evento de invalidación.
+That property only holds if the confirmation threshold is FROZEN at the extreme bar
+(``Pivot.thr_at_extreme``). If it were recomputed with today's ATR, a pivot confirmed under low
+volatility could stop satisfying the inequality tomorrow under expanded volatility, and a count the
+user had already seen would disappear with no invalidation event.
 """
 
 from __future__ import annotations
@@ -24,23 +24,23 @@ from wavelab.core.types import Pivot
 __all__ = ["PivotStore"]
 
 _FORBIDDEN = (
-    "PivotStore no es indexable ni iterable a propósito. Usa `as_of(now_ms)`, que es el único "
-    "accesor que respeta la causalidad. Si necesitas «todos los pivotes», la pregunta correcta es "
-    "«todos los pivotes conocibles en qué instante»."
+    "PivotStore is deliberately neither indexable nor iterable. Use `as_of(now_ms)`, the only "
+    "accessor that respects causality. If you need 'all the pivots', the right question is "
+    "'all the pivots knowable at which instant'."
 )
 
 
 class PivotStore:
-    """Pivotes confirmados (append-only) más, como mucho, un pivote provisional."""
+    """Confirmed pivots (append-only) plus, at most, one provisional pivot."""
 
     __slots__ = ("_conf_ts", "_confirmed", "_provisional")
 
     def __init__(self) -> None:
         self._confirmed: list[Pivot] = []
-        self._conf_ts: list[int] = []          # paralelo, para bisect
+        self._conf_ts: list[int] = []          # parallel list, for bisect
         self._provisional: Pivot | None = None
 
-    # ------------------------------------------------------------------ prohibido
+    # ------------------------------------------------------------------ forbidden
 
     def __getitem__(self, _i):
         raise CausalityError(_FORBIDDEN)
@@ -49,26 +49,26 @@ class PivotStore:
         raise CausalityError(_FORBIDDEN)
 
     def __len__(self):
-        # También lanza: el número total de pivotes incluye los confirmados DESPUÉS de `now_ms`,
-        # así que es información del futuro por mucho que parezca inocente.
-        raise CausalityError(_FORBIDDEN + " Para contar, usa `n_as_of(now_ms)`.")
+        # Raises too: the total number of pivots includes the ones confirmed AFTER `now_ms`, so it
+        # is information from the future however innocent it looks.
+        raise CausalityError(_FORBIDDEN + " To count, use `n_as_of(now_ms)`.")
 
-    # ------------------------------------------------------------------ escritura
+    # ------------------------------------------------------------------ writes
 
     def append_confirmed(self, pivot: Pivot) -> None:
         if not pivot.is_confirmed:
             raise ValueError(
-                f"append_confirmed recibió un pivote sin confirmar en idx={pivot.idx}. "
-                "Los pivotes provisionales van por set_provisional()."
+                f"append_confirmed got an unconfirmed pivot at idx={pivot.idx}. "
+                "Provisional pivots go through set_provisional()."
             )
         if self._conf_ts and pivot.confirmed_ts_ms < self._conf_ts[-1]:
             raise ValueError(
-                f"confirmación fuera de orden: {pivot.confirmed_ts_ms} < {self._conf_ts[-1]}. "
-                "El orden de confirmación debe ser monótono o `as_of` dejaría de devolver un prefijo."
+                f"out-of-order confirmation: {pivot.confirmed_ts_ms} < {self._conf_ts[-1]}. "
+                "Confirmation order must be monotone or `as_of` would stop returning a prefix."
             )
         if self._confirmed and pivot.idx <= self._confirmed[-1].idx:
             raise ValueError(
-                f"pivote confirmado fuera de orden posicional: idx={pivot.idx} <= "
+                f"confirmed pivot out of positional order: idx={pivot.idx} <= "
                 f"{self._confirmed[-1].idx}"
             )
         self._confirmed.append(pivot)
@@ -76,17 +76,17 @@ class PivotStore:
 
     def set_provisional(self, pivot: Pivot | None) -> None:
         if pivot is not None and pivot.is_confirmed:
-            raise ValueError("set_provisional recibió un pivote ya confirmado")
+            raise ValueError("set_provisional got an already-confirmed pivot")
         self._provisional = pivot
 
-    # ------------------------------------------------------------------ lectura causal
+    # ------------------------------------------------------------------ causal reads
 
     def as_of(self, now_ms: int) -> tuple[Pivot, ...]:
-        """Los pivotes que estaban CONFIRMADOS en ``now_ms``.
+        """The pivots that were CONFIRMED at ``now_ms``.
 
-        Por construcción esto es un prefijo del histórico completo, y el prefijo devuelto en
-        ``t`` es prefijo del devuelto en ``t+1``. Es la propiedad que verifica
-        ``test_pivot_monotonicity``.
+        By construction this is a prefix of the full history, and the prefix returned at ``t`` is a
+        prefix of the one returned at ``t+1``. That is the property ``test_pivot_monotonicity``
+        checks.
         """
         k = bisect_right(self._conf_ts, int(now_ms))
         return tuple(self._confirmed[:k])
@@ -99,10 +99,10 @@ class PivotStore:
         return self._confirmed[k - 1] if k else None
 
     def provisional_as_of(self, now_ms: int) -> Pivot | None:
-        """El pivote provisional, si su extremo ya había ocurrido en ``now_ms``.
+        """The provisional pivot, if its extreme had already happened at ``now_ms``.
 
-        Lo que sale de aquí solo puede producir anotación TENTATIVA: trazo discontinuo, etiqueta
-        hueca «?». Nunca una señal, nunca una fila de journal, nunca una tasa de acierto.
+        What comes out of here can only produce a TENTATIVE annotation: dashed stroke, hollow "?"
+        label. Never a signal, never a journal row, never a hit rate.
         """
         p = self._provisional
         if p is None or p.ts_ms > now_ms:

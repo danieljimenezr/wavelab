@@ -1,9 +1,9 @@
-"""La costura de los feeds: un Protocol con un método que importa.
+"""The feed seam: a Protocol with one method that matters.
 
-Regla anti-astronauta: si esta costura necesitase un segundo método significativo para ser útil,
-estaría dibujada en el sitio equivocado. ``fetch_aux`` no cuenta como segundo método porque devuelve
-vacío por defecto y existe para que la capa de noticias de v2 sea una línea de configuración en vez
-de un refactor del transporte.
+Anti-astronaut rule: if this seam needed a second meaningful method to be useful, it would be drawn
+in the wrong place. ``fetch_aux`` does not count as a second method because it returns empty by
+default and exists so that v2's news layer is one line of configuration instead of a rewrite of the
+transport.
 """
 
 from __future__ import annotations
@@ -20,11 +20,11 @@ __all__ = ["FeedAdapter", "FeedCaps", "Market"]
 
 @dataclass(frozen=True, slots=True)
 class FeedCaps:
-    """Qué sabe hacer un feed. El motor consulta esto en vez de asumir.
+    """What a feed can do. The engine asks this instead of assuming.
 
-    ``max_klines_per_request`` y ``weight_budget_per_min`` no son decoración: el gobernador de peso
-    los usa para frenar antes del 418, que es un baneo de IP de hasta 3 días y, para una aplicación
-    local, una caída total.
+    ``max_klines_per_request`` and ``weight_budget_per_min`` are not decoration: the weight
+    governor uses them to brake before the 418, which is an IP ban of up to 3 days and, for a
+    local application, total downtime.
     """
 
     timeframes: frozenset[str] = frozenset()
@@ -37,7 +37,7 @@ class FeedCaps:
 
 @runtime_checkable
 class FeedAdapter(Protocol):
-    """Un origen de velas normalizadas."""
+    """A source of normalised bars."""
 
     name: str
 
@@ -48,17 +48,17 @@ class FeedAdapter(Protocol):
     ) -> Sequence[Bar]: ...
 
     def stream(self, symbol: str, tf: Timeframe) -> AsyncIterator[Bar]:  # pragma: no cover
-        """Velas en vivo. Un feed sin WebSocket puede no implementarlo; `caps()` lo declara."""
+        """Live bars. A feed without a WebSocket may not implement this; `caps()` declares it."""
         raise NotImplementedError
 
     async def stream_events(self, symbol: str) -> AsyncIterator[AuxEvent]:  # pragma: no cover
-        """Todo lo que no es una vela. Vacío por defecto: es el gancho que hace que la capa de
-        noticias de v2 no obligue a redibujar la costura."""
+        """Everything that is not a bar. Empty by default: this is the hook that keeps v2's news
+        layer from forcing a redraw of the seam."""
         return
         yield  # type: ignore[unreachable]
 
 
 class Market:
     SPOT = "spot"
-    FUTURES_UM = "um"      # USD-M perpetuos
+    FUTURES_UM = "um"      # USD-M perpetuals
     FUTURES_CM = "cm"

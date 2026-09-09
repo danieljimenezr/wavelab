@@ -1,82 +1,84 @@
 #!/usr/bin/env bash
-# Despliegue continuo. Lo invoca GitHub Actions por ssh con una clave RESTRINGIDA a este script.
+# Continuous deployment. GitHub Actions invokes it over ssh with a key RESTRICTED to this script.
 #
-# Requisitos que se ha propuesto cumplir, porque es el piloto de lo que luego hará DR Solutions:
+# The requirements it sets out to meet, because this is the pilot for what DR Solutions will do later:
 #
-#   1. ATÓMICO respecto al SHA. Se despliega un commit concreto, no "lo último de main", que
-#      cambia entre que el pipeline empieza y termina.
-#   2. VERIFICA ANTES DE REINICIAR. Si el código nuevo ni siquiera importa, no se toca el servicio.
-#   3. COMPRUEBA LA SALUD DESPUÉS. Un servicio que arranca no es un servicio que funciona.
-#   4. REVIERTE SOLO. Si la comprobación falla, vuelve al SHA anterior y lo deja funcionando.
-#      Un pipeline que despliega pero no revierte solo traslada el trabajo manual a la peor hora.
-#   5. NO SE PISA. Un cerrojo impide que dos despliegues simultáneos se mezclen.
+#   1. ATOMIC with respect to the SHA. It deploys one specific commit, not "the latest on main",
+#      which changes between the pipeline starting and finishing.
+#   2. VERIFY BEFORE RESTARTING. If the new code does not even import, the service is left alone.
+#   3. CHECK HEALTH AFTERWARDS. A service that starts is not a service that works.
+#   4. ROLL BACK BY ITSELF. If the health check fails, it returns to the previous SHA and leaves it
+#      running. A pipeline that deploys but does not roll back just moves the manual work to the
+#      worst possible hour.
+#   5. NO TRAMPLING. A lock keeps two simultaneous deployments from getting mixed up.
 set -uo pipefail
 
 DEST=/opt/wavelab
 LOCK=/var/lock/wavelab-deploy.lock
-SHA_NUEVO=${1:-}
-SALUD_URL=http://127.0.0.1:8000/api/estado
-# El calentamiento de nueve años tarda ~120 s con CPUQuota=50%. El plazo se pone MUY por encima
-# a propósito: un plazo ajustado convierte cada despliegue en una moneda al aire, y ya pasó —
-# se agotó por dos segundos, revirtió un despliegue correcto y declaró un incidente inexistente.
-INTENTOS=120          # 6 minutos
+NEW_SHA=${1:-}
+HEALTH_URL=http://127.0.0.1:8000/api/status
+# The nine-year warm-up takes ~120 s with CPUQuota=50%. The deadline is set WAY above that on
+# purpose: a tight deadline turns every deployment into a coin flip, and that already happened —
+# it ran out by two seconds, rolled back a perfectly good deployment and declared an incident that
+# never existed.
+ATTEMPTS=120          # 6 minutes
 
 log() { printf '[cd] %s\n' "$*"; }
-fail() { log "FALLO: $*"; exit 1; }
+fail() { log "FAILED: $*"; exit 1; }
 
 exec 9>"$LOCK"
-flock -n 9 || fail "hay otro despliegue en marcha"
+flock -n 9 || fail "another deployment is already running"
 
-[ -n "$SHA_NUEVO" ] || fail "hace falta el SHA a desplegar"
-[ -d "$DEST/.git" ] || fail "$DEST no es un repositorio"
+[ -n "$NEW_SHA" ] || fail "the SHA to deploy is required"
+[ -d "$DEST/.git" ] || fail "$DEST is not a repository"
 
 cd "$DEST"
-SHA_VIEJO=$(git rev-parse HEAD)
-log "actual $SHA_VIEJO -> solicitado $SHA_NUEVO"
-[ "$SHA_VIEJO" = "$SHA_NUEVO" ] && { log "ya está desplegado; nada que hacer"; exit 0; }
+OLD_SHA=$(git rev-parse HEAD)
+log "current $OLD_SHA -> requested $NEW_SHA"
+[ "$OLD_SHA" = "$NEW_SHA" ] && { log "already deployed; nothing to do"; exit 0; }
 
-comprobar_salud() {
-    # Se espera a `listo`, no a `ok`. `ok` solo dice que el proceso vive; `listo` dice que ya
-    # puede trabajar. Confundirlos es dar por bueno un servicio que aún no sirve para nada.
-    local visto_ok=0
-    for i in $(seq 1 $INTENTOS); do
+check_health() {
+    # We wait for `ready`, not for `ok`. `ok` only says the process is alive; `ready` says it can
+    # actually do work. Confusing the two means signing off on a service that is not yet useful.
+    local seen_ok=0
+    for i in $(seq 1 $ATTEMPTS); do
         local r
-        r=$(curl -sf --max-time 5 "$SALUD_URL" 2>/dev/null || true)
-        if echo "$r" | grep -q '"listo":true'; then
-            log "sano tras $((i*3))s"
+        r=$(curl -sf --max-time 5 "$HEALTH_URL" 2>/dev/null || true)
+        if echo "$r" | grep -q '"ready":true'; then
+            log "healthy after $((i*3))s"
             return 0
         fi
         if echo "$r" | grep -q '"ok":true'; then
-            [ "$visto_ok" = 0 ] && log "responde y está calentando…"
-            visto_ok=1
+            [ "$seen_ok" = 0 ] && log "responding and warming up…"
+            seen_ok=1
         fi
         sleep 3
     done
     return 1
 }
 
-desplegar() {
+deploy() {
     local sha=$1
     git fetch --quiet origin || return 1
     git reset --hard --quiet "$sha" || return 1
     chown -R wavelab:wavelab "$DEST"
     uv sync --frozen 2>&1 | tail -2 || return 1
     chown -R wavelab:wavelab "$DEST"
-    # Comprobación EN FRÍO: si el código nuevo ni siquiera importa, no se toca el servicio vivo.
+    # COLD check: if the new code does not even import, the live service is left alone.
     sudo -u wavelab "$DEST/.venv/bin/python" -c "import wavelab.server.app" || return 1
     systemctl restart wavelab || return 1
-    comprobar_salud
+    check_health
 }
 
-log "desplegando $SHA_NUEVO"
-if desplegar "$SHA_NUEVO"; then
-    log "OK: $(git rev-parse --short HEAD) en marcha y respondiendo"
-    curl -s --max-time 5 "$SALUD_URL" | head -c 200; echo
+log "deploying $NEW_SHA"
+if deploy "$NEW_SHA"; then
+    log "OK: $(git rev-parse --short HEAD) running and responding"
+    curl -s --max-time 5 "$HEALTH_URL" | head -c 200; echo
     exit 0
 fi
 
-log "la comprobación de salud ha fallado; REVIRTIENDO a $SHA_VIEJO"
-if desplegar "$SHA_VIEJO"; then
-    fail "revertido a $SHA_VIEJO, que sí responde. El commit $SHA_NUEVO NO está desplegado."
+log "the health check failed; ROLLING BACK to $OLD_SHA"
+if deploy "$OLD_SHA"; then
+    fail "rolled back to $OLD_SHA, which does respond. Commit $NEW_SHA is NOT deployed."
 fi
-fail "CRÍTICO: ni el commit nuevo ni el anterior arrancan. Hace falta intervención manual."
+fail "CRITICAL: neither the new commit nor the previous one starts. Manual intervention required."

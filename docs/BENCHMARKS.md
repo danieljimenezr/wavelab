@@ -1,31 +1,31 @@
-# Mediciones reales (no razonadas)
+# Real measurements (not reasoned ones)
 
-El plan admitía que sus cifras de rendimiento eran *razonadas, no medidas*. Estas están medidas.
+The plan admitted its performance figures were *reasoned, not measured*. These are measured.
 
-## M5 — Apple M5, 10 núcleos, 32 GB, macOS 26.6.2, CPython 3.13.15
+## M5 — Apple M5, 10 cores, 32 GB, macOS 26.6.2, CPython 3.13.15
 
-Fecha: 2026-09-08 · numpy 2.5.3 · TA-Lib 0.7.1
+Date: 2026-09-08 · numpy 2.5.3 · TA-Lib 0.7.1
 
-| n velas | Batería TA-Lib (18 indicadores) | ATR-ZigZag (Python puro, O(n)) |
-|--------:|--------------------------------:|-------------------------------:|
-|   5.000 |    0,28 ms  (p95 0,32) |     1,19 ms  (p95 1,21) |
-|  20.000 |    1,27 ms  (p95 1,42) |     4,88 ms  (p95 5,91) |
-| 100.000 |    6,93 ms  (p95 7,26) |    24,51 ms  (p95 29,27) |
-| 500.000 |   34,05 ms  (p95 34,32) |   122,30 ms  (p95 122,80) |
+| n bars | TA-Lib battery (18 indicators) | ATR-ZigZag (pure Python, O(n)) |
+|-------:|------------------------------:|-------------------------------:|
+|   5,000 |    0.28 ms  (p95 0.32) |     1.19 ms  (p95 1.21) |
+|  20,000 |    1.27 ms  (p95 1.42) |     4.88 ms  (p95 5.91) |
+| 100,000 |    6.93 ms  (p95 7.26) |    24.51 ms  (p95 29.27) |
+| 500,000 |   34.05 ms  (p95 34.32) |   122.30 ms  (p95 122.80) |
 
-### Correcciones a lo que decía el plan
+### Corrections to what the plan said
 
-- La síntesis afirmaba «~5 ms sobre 500k velas en Python puro» para el ZigZag. **Es 122 ms: 25× optimista.**
-- El crítico de completitud estimó «200-400 ms» para lo mismo. **Es 2-3× pesimista.**
-- Sobre la ventana real de trabajo (5.000 velas) el presupuesto de 5 ms del plan se cumple con **18× de
-  margen** en la batería y **4×** en el ZigZag.
+- The synthesis claimed "~5 ms over 500k bars in pure Python" for the ZigZag. **It is 122 ms: 25x optimistic.**
+- The completeness critic estimated "200-400 ms" for the same thing. **That is 2-3x pessimistic.**
+- Over the real working window (5,000 bars) the plan's 5 ms budget is met with **18x of headroom**
+  on the battery and **4x** on the ZigZag.
 
-### Consecuencias de diseño
+### Design consequences
 
-1. **numba queda descartado definitivamente**, y por medición, no por corazonada. Recomputar entero cada
-   vela es holgadamente viable.
-2. El re-parseo offline sobre 9 años de 1m (~4,8 M velas) costará ~1,2 s de ZigZag y ~0,3 s de batería:
-   perfectamente asumible como trabajo por lotes.
-3. **Proyección al VPS** (x86_64, ~2-3× más lento en monohilo que un M5): la batería sobre 5.000 velas
-   quedaría en ~0,8 ms y el ZigZag en ~3,5 ms. Sigue sin ser un problema. Pendiente de medir *in situ*
-   en M0b y de anotar aquí la tabla real del nodo.
+1. **numba is ruled out for good**, and by measurement, not by hunch. Recomputing everything from
+   scratch on every bar is comfortably viable.
+2. Offline re-parsing over 9 years of 1m data (~4.8M bars) will cost ~1.2 s of ZigZag and ~0.3 s of
+   battery: perfectly acceptable as batch work.
+3. **Projection to the VPS** (x86_64, ~2-3x slower single-threaded than an M5): the battery over
+   5,000 bars would land around ~0.8 ms and the ZigZag around ~3.5 ms. Still not a problem. Still to
+   be measured *in situ* in M0b, and the node's real table recorded here.

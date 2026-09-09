@@ -1,8 +1,8 @@
-"""La puerta de CI de M0.
+"""The M0 CI gate.
 
-Un arnés que solo aprueba código correcto no vale nada: hay que demostrar que RECHAZA código
-incorrecto. Por eso aquí se construyen motores rotos a propósito y se exige que el arnés los cace y
-además nombre el campo culpable.
+A harness that only passes correct code is worth nothing: it has to be shown that it REJECTS
+incorrect code. So here engines are built broken on purpose, and the harness is required to catch
+them and to name the guilty field as well.
 """
 
 from __future__ import annotations
@@ -40,38 +40,38 @@ def _decision(bar: Bar, ema: float) -> Decision:
     )
 
 
-# --------------------------------------------------------------------- motores
+# --------------------------------------------------------------------- engines
 
-def correcto():
-    """Solo consume lo que `on_bar` le entrega. Definición operativa de causal."""
+def correct():
+    """Consumes only what `on_bar` hands it. The operational definition of causal."""
     def on_bar(state: StubState, bar: Bar) -> tuple[StubState, Decision]:
         ema = bar.close if state.ema is None else 0.2 * bar.close + 0.8 * state.ema
         return StubState(ema, state.n + 1), _decision(bar, ema)
     return streaming(on_bar, StubState)
 
 
-def con_lookahead(offset: int = 1):
-    """El bug clásico: precalcular sobre la serie ENTERA y luego servirla por posición.
+def with_lookahead(offset: int = 1):
+    """The classic bug: precompute over the WHOLE series and then serve it by position.
 
-    Es exactamente lo que pasa al llamar al detector de pivotes una vez sobre todo el array, o al
-    usar `scipy.find_peaks(prominence=...)`, cuya prominencia se define contra el array completo.
+    It is exactly what happens when you call the pivot detector once over the entire array, or when
+    you use `scipy.find_peaks(prominence=...)`, whose prominence is defined against the full array.
     """
     def factory(bars: Sequence[Bar]):
-        # Precálculo sobre TODO lo visible: aquí se cuela el futuro.
+        # Precomputed over EVERYTHING visible: this is where the future sneaks in.
         closes = [b.close for b in bars]
         pos = {b.open_time_ms: i for i, b in enumerate(bars)}
 
         def on_bar(state: StubState, bar: Bar) -> tuple[StubState, Decision]:
             i = pos[bar.open_time_ms]
-            futuro = closes[min(i + offset, len(closes) - 1)]
-            ema = futuro if state.ema is None else 0.2 * futuro + 0.8 * state.ema
+            future = closes[min(i + offset, len(closes) - 1)]
+            ema = future if state.ema is None else 0.2 * future + 0.8 * state.ema
             return StubState(ema, state.n + 1), _decision(bar, ema)
 
         return on_bar, StubState
     return factory
 
 
-def no_determinista():
+def nondeterministic():
     def on_bar(state: StubState, bar: Bar) -> tuple[StubState, Decision]:
         ema = bar.close * (1.0 + random.random() * 1e-9)
         return StubState(ema, state.n + 1), _decision(bar, ema)
@@ -80,51 +80,51 @@ def no_determinista():
 
 # --------------------------------------------------------------------- tests
 
-class TestArnes:
-    def test_motor_correcto_pasa_2000_velas(self, bars_2k):
-        """La verificación literal de M0."""
-        assert_replay_deterministic(correcto(), bars_2k)
+class TestHarness:
+    def test_a_correct_engine_passes_2000_bars(self, bars_2k):
+        """The literal M0 verification."""
+        assert_replay_deterministic(correct(), bars_2k)
 
-    def test_replay_es_reproducible(self, bars_2k):
-        assert replay(correcto(), bars_2k) == replay(correcto(), bars_2k)
+    def test_replay_is_reproducible(self, bars_2k):
+        assert replay(correct(), bars_2k) == replay(correct(), bars_2k)
 
-    def test_caza_el_lookahead_y_nombra_el_campo(self, bars_2k):
+    def test_it_catches_the_lookahead_and_names_the_field(self, bars_2k):
         with pytest.raises(ReplayDivergence) as ei:
-            assert_replay_deterministic(con_lookahead(), bars_2k)
+            assert_replay_deterministic(with_lookahead(), bars_2k)
         msg = str(ei.value)
-        assert "LOOKAHEAD DETECTADO" in msg
-        # Debe señalar la ruta exacta, no un genérico "las salidas difieren".
+        assert "LOOKAHEAD DETECTED" in msg
+        # It must point at the exact path, not a generic "the outputs differ".
         assert "reasons" in msg or "verdict" in msg, msg
-        assert "prefijo(k=" in msg
+        assert "prefix(k=" in msg
 
     @pytest.mark.parametrize("offset", [1, 2, 5, 20])
-    def test_caza_el_lookahead_a_cualquier_distancia(self, bars_small, offset):
+    def test_it_catches_the_lookahead_at_any_distance(self, bars_small, offset):
         with pytest.raises(ReplayDivergence, match="LOOKAHEAD"):
-            assert_replay_deterministic(con_lookahead(offset), bars_small)
+            assert_replay_deterministic(with_lookahead(offset), bars_small)
 
-    def test_caza_el_no_determinismo(self, bars_small):
-        with pytest.raises(ReplayDivergence, match="NO DETERMINISTA"):
-            assert_replay_deterministic(no_determinista(), bars_small)
+    def test_it_catches_the_nondeterminism(self, bars_small):
+        with pytest.raises(ReplayDivergence, match="NON-DETERMINISTIC"):
+            assert_replay_deterministic(nondeterministic(), bars_small)
 
-    def test_rechaza_velas_sin_cerrar(self, bars_small):
+    def test_it_rejects_unclosed_bars(self, bars_small):
         b = bars_small[0]
-        abierta = Bar(
+        unclosed = Bar(
             symbol=b.symbol, tf=b.tf, open_time_ms=b.open_time_ms, open=b.open, high=b.high,
             low=b.low, close=b.close, volume=b.volume, is_closed=False,
         )
-        with pytest.raises(ValueError, match="sin cerrar"):
-            replay(correcto(), [abierta])
+        with pytest.raises(ValueError, match="unclosed"):
+            replay(correct(), [unclosed])
 
 
 class TestDiffPath:
-    def test_nombra_la_ruta_anidada(self):
+    def test_it_names_the_nested_path(self):
         a = _decision(BAR := None, 1.0) if False else None  # noqa: F841
         assert diff_path((1, 2, 3), (1, 2, 3)) is None
         assert "[2]" in diff_path((1, 2, 3), (1, 2, 4))
-        assert "longitudes" in diff_path((1,), (1, 2))
-        assert "tipos distintos" in diff_path(1, "1")
+        assert "lengths" in diff_path((1,), (1, 2))
+        assert "different types" in diff_path(1, "1")
 
-    def test_recorre_dataclasses(self, bars_small):
+    def test_it_walks_into_dataclasses(self, bars_small):
         d1 = _decision(bars_small[0], 1.0)
         d2 = _decision(bars_small[0], 2.0)
         p = diff_path(d1, d2)

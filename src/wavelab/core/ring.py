@@ -1,13 +1,12 @@
-"""Buffer circular con marcas de tiempo, y las ventanas que salen de él.
+"""Circular buffer with timestamps, and the windows that come out of it.
 
-El error que este módulo existe para impedir: un buffer indexado por POSICIÓN sobre un almacén
-indexado por TIEMPO. Las series de 1m de Binance tienen agujeros (paradas, reconexiones, incidencias).
-Con indexación posicional, ``i-20`` para un ER(20) atraviesa un hueco de horas **en silencio** y
-devuelve un número seguro y equivocado. No lanza, no avisa, y el valor es un float perfectamente
-válido.
+The bug this module exists to prevent: a buffer indexed by POSITION on top of a store indexed by
+TIME. Binance's 1m series have holes (halts, reconnections, incidents). With positional indexing,
+``i-20`` for an ER(20) steps across a gap of hours **silently** and returns a safe, wrong number.
+It does not raise, it does not warn, and the value is a perfectly valid float.
 
-Por eso el ring guarda los timestamps JUNTO a los precios y cada ventana **asevera el paso** en vez de
-fiarse de la posición.
+That is why the ring stores the timestamps ALONGSIDE the prices and every window **asserts the
+step** instead of trusting position.
 """
 
 from __future__ import annotations
@@ -23,30 +22,30 @@ __all__ = ["GapError", "ProvisionalWindow", "Ring", "Window"]
 
 
 class GapError(ValueError):
-    """La ventana pedida contiene un hueco que invalida el cálculo solicitado."""
+    """The requested window contains a gap that invalidates the requested computation."""
 
 
 @dataclass(frozen=True, slots=True)
 class Window:
-    """Vista sobre velas CERRADAS, con la discontinuidad explícita.
+    """View over CLOSED bars, with the discontinuities made explicit.
 
-    ``end_closed_ts_ms`` se fija exclusivamente desde la última vela cerrada, nunca desde el cursor de
-    escritura del ring. Es la diferencia entre una guarda que funciona y una que se salta sola: si el
-    final de la ventana se calculase desde el cursor, incluiría la vela en curso y el ATR se movería
-    intra-vela → el umbral del ZigZag se movería intra-vela → la confirmación de pivotes se movería
-    intra-vela. Y nada lanzaría, porque los valores son float64 en ambos casos.
+    ``end_closed_ts_ms`` is set exclusively from the last closed bar, never from the ring's write
+    cursor. That is the difference between a guard that works and one that steps around itself: if
+    the end of the window were computed from the cursor, it would include the in-flight bar and the
+    ATR would move intra-bar → the ZigZag threshold would move intra-bar → pivot confirmation would
+    move intra-bar. And nothing would raise, because the values are float64 either way.
     """
 
     symbol: str
     tf: Timeframe
-    ts: np.ndarray            # open_time_ms de cada vela
+    ts: np.ndarray            # open_time_ms of each bar
     open: np.ndarray
     high: np.ndarray
     low: np.ndarray
     close: np.ndarray
     volume: np.ndarray
     n_source_bars: np.ndarray
-    is_gap: np.ndarray        # True si falta la vela ANTERIOR o su cobertura es insuficiente
+    is_gap: np.ndarray        # True if the PREVIOUS bar is missing or its coverage is too poor
     end_closed_ts_ms: int
 
     def __len__(self) -> int:
@@ -54,7 +53,7 @@ class Window:
 
     @property
     def complete(self) -> bool:
-        """Sin discontinuidades ni velas mal cubiertas en toda la ventana."""
+        """No discontinuities and no poorly covered bars anywhere in the window."""
         return not bool(self.is_gap.any())
 
     @property
@@ -62,24 +61,24 @@ class Window:
         return int(self.is_gap.sum())
 
     def require_complete(self, what: str) -> Window:
-        """Para cálculos que no toleran huecos. Falla ruidosamente en vez de mentir en silencio."""
+        """For computations that cannot tolerate gaps. Fails loudly instead of lying quietly."""
         if not self.complete:
             first = int(np.flatnonzero(self.is_gap)[0])
             raise GapError(
-                f"{what}: la ventana de {len(self)} velas de {self.tf} tiene {self.n_gaps} "
-                f"discontinuidad(es); la primera en ts={int(self.ts[first])}. "
-                "Rehúsa calcular en vez de devolver un número confiado y equivocado."
+                f"{what}: the window of {len(self)} {self.tf} bars has {self.n_gaps} "
+                f"discontinuity(ies); the first at ts={int(self.ts[first])}. "
+                "Refusing to compute rather than return a confident, wrong number."
             )
         return self
 
 
 @dataclass(frozen=True, slots=True)
 class ProvisionalWindow:
-    """La misma forma que ``Window`` pero un tipo DISTINTO, y a propósito.
+    """The same shape as ``Window`` but a DIFFERENT type, and deliberately so.
 
-    Incluye la vela en curso. ``@causal`` lo rechaza SIEMPRE, sin mirar fechas, así que el canal
-    provisional es estructuralmente incapaz de alimentar features causales, señales, journal o
-    estadísticas. Solo puede producir anotaciones tentativas: trazo discontinuo, etiqueta hueca «?».
+    It includes the in-flight bar. ``@causal`` rejects it ALWAYS, without even looking at dates, so
+    the provisional channel is structurally incapable of feeding causal features, signals, journal
+    or statistics. All it can produce is tentative annotations: dashed stroke, hollow "?" label.
     """
 
     __wavelab_provisional__ = True
@@ -94,7 +93,7 @@ class ProvisionalWindow:
     volume: np.ndarray
     n_source_bars: np.ndarray
     is_gap: np.ndarray
-    last_ts_ms: int           # deliberadamente NO se llama end_closed_ts_ms
+    last_ts_ms: int           # deliberately NOT called end_closed_ts_ms
 
     def __len__(self) -> int:
         return int(self.ts.size)
@@ -104,46 +103,46 @@ _FIELDS = ("open", "high", "low", "close", "volume")
 
 
 class Ring:
-    """Buffer circular de velas cerradas de un símbolo y timeframe, más la vela en curso."""
+    """Circular buffer of closed bars for one symbol and timeframe, plus the in-flight bar."""
 
     __slots__ = ("_cap", "_cols", "_gap", "_n", "_nsrc", "_prov", "_ts", "_w", "symbol", "tf")
 
     def __init__(self, symbol: str, tf: Timeframe, capacity: int = 8192) -> None:
         if capacity < 2:
-            raise ValueError("capacity debe ser >= 2")
+            raise ValueError("capacity must be >= 2")
         self.symbol = symbol
         self.tf = tf
         self._cap = int(capacity)
-        self._n = 0          # cuántas velas se han escrito en total
-        self._w = 0          # cursor de escritura
+        self._n = 0          # how many bars have been written in total
+        self._w = 0          # write cursor
         self._ts = np.zeros(capacity, dtype=np.int64)
         self._cols = {f: np.zeros(capacity, dtype=np.float64) for f in _FIELDS}
         self._nsrc = np.zeros(capacity, dtype=np.int32)
         self._gap = np.zeros(capacity, dtype=bool)
         self._prov: Bar | None = None
 
-    # ---------------------------------------------------------------- escritura
+    # ---------------------------------------------------------------------- writing
 
     def append(self, bar: Bar) -> None:
-        """Añade una vela CERRADA. Rechaza velas en curso, fuera de rejilla o fuera de orden."""
+        """Append a CLOSED bar. Rejects in-flight, off-grid or out-of-order bars."""
         if not bar.is_closed:
             raise ValueError(
-                f"Ring.append: {bar.symbol} {bar.tf} en {bar.open_time_ms} no está cerrada. "
-                "Usa set_provisional() para la vela en curso."
+                f"Ring.append: {bar.symbol} {bar.tf} at {bar.open_time_ms} is not closed. "
+                "Use set_provisional() for the in-flight bar."
             )
         if bar.tf is not self.tf or bar.symbol != self.symbol:
             raise ValueError(
-                f"Ring.append: esperaba {self.symbol} {self.tf}, recibido {bar.symbol} {bar.tf}"
+                f"Ring.append: expected {self.symbol} {self.tf}, got {bar.symbol} {bar.tf}"
             )
         if self._n:
             last = int(self._ts[(self._w - 1) % self._cap])
             if bar.open_time_ms <= last:
                 raise ValueError(
-                    f"Ring.append: vela fuera de orden o duplicada "
-                    f"(open_time_ms={bar.open_time_ms} <= última={last}). "
-                    "La deduplicación es responsabilidad del almacén, no del ring."
+                    f"Ring.append: out-of-order or duplicate bar "
+                    f"(open_time_ms={bar.open_time_ms} <= last={last}). "
+                    "Deduplication is the store's job, not the ring's."
                 )
-            # Discontinuidad: falta al menos una vela entre la anterior y ésta.
+            # Discontinuity: at least one bar is missing between the previous one and this one.
             discontinuous = (bar.open_time_ms - last) != self.tf.ms
         else:
             discontinuous = False
@@ -159,14 +158,14 @@ class Ring:
         self._gap[i] = discontinuous or bar.is_gap
         self._w = (i + 1) % self._cap
         self._n += 1
-        self._prov = None  # la vela en curso queda absorbida por su versión cerrada
+        self._prov = None  # the in-flight bar is absorbed by its closed version
 
     def set_provisional(self, bar: Bar) -> None:
         if bar.is_closed:
-            raise ValueError("set_provisional espera la vela EN CURSO (is_closed=False)")
+            raise ValueError("set_provisional expects the IN-FLIGHT bar (is_closed=False)")
         self._prov = bar
 
-    # ---------------------------------------------------------------- lectura
+    # ---------------------------------------------------------------------- reading
 
     def __len__(self) -> int:
         return min(self._n, self._cap)
@@ -178,20 +177,20 @@ class Ring:
         return int(self._ts[(self._w - 1) % self._cap])
 
     def _take(self, n: int) -> np.ndarray:
-        """Índices absolutos de las últimas ``n`` velas, resolviendo el envoltorio circular."""
+        """Absolute indices of the last ``n`` bars, resolving the circular wrap-around."""
         avail = len(self)
         n = min(n, avail)
         start = (self._w - n) % self._cap
         return (start + np.arange(n)) % self._cap
 
     def window(self, n: int) -> Window:
-        """Ventana de las últimas ``n`` velas CERRADAS.
+        """Window over the last ``n`` CLOSED bars.
 
-        Recalcula la máscara de huecos desde los timestamps reales en cada construcción: no se fía
-        de lo que se marcó al escribir, porque el ring puede haber dado la vuelta.
+        Recomputes the gap mask from the real timestamps on every construction: it does not trust
+        what was marked at write time, because the ring may have wrapped around since.
         """
         if not self._n:
-            raise ValueError("Ring vacío: no hay ninguna vela cerrada")
+            raise ValueError("Empty ring: there is not a single closed bar")
         idx = self._take(n)
         ts = self._ts[idx].copy()
 
@@ -199,11 +198,11 @@ class Ring:
         if (d <= 0).any():
             bad = int(np.flatnonzero(d <= 0)[0])
             raise ValueError(
-                f"Ring.window: timestamps no crecientes en la posición {bad} "
-                f"({int(ts[bad])} -> {int(ts[bad+1])}). El ring está corrupto."
+                f"Ring.window: non-increasing timestamps at position {bad} "
+                f"({int(ts[bad])} -> {int(ts[bad+1])}). The ring is corrupt."
             )
         gap = self._gap[idx].copy()
-        gap[1:] |= d != self.tf.ms  # el paso REAL manda sobre lo que se anotó al escribir
+        gap[1:] |= d != self.tf.ms  # the REAL step overrides whatever was noted at write time
 
         end_ts = int(ts[-1])
         return Window(
@@ -219,9 +218,9 @@ class Ring:
         )
 
     def provisional_window(self, n: int) -> ProvisionalWindow:
-        """Ventana que INCLUYE la vela en curso. Solo para anotación tentativa."""
+        """Window that INCLUDES the in-flight bar. For tentative annotation only."""
         if self._prov is None:
-            raise ValueError("no hay vela en curso: llama antes a set_provisional()")
+            raise ValueError("no in-flight bar: call set_provisional() first")
         w = self.window(max(0, n - 1))
         p = self._prov
         cat = lambda a, v: np.concatenate([a, np.array([v], dtype=a.dtype)])

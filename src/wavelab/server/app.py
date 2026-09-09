@@ -1,11 +1,11 @@
-"""Servidor: FastAPI + WebSocket, escuchando SOLO en 127.0.0.1.
+"""Server: FastAPI + WebSocket, listening ONLY on 127.0.0.1.
 
-Cero puertos nuevos expuestos, cero certificado TLS nuevo, cero superficie de autenticación nueva
-en una máquina que factura. Se accede por túnel ssh:
+Zero new exposed ports, zero new TLS certificates, zero new authentication surface on a machine
+that pays the bills. You reach it through an ssh tunnel:
 
-    ssh -L 8000:localhost:8000 root@<nodo>
+    ssh -L 8000:localhost:8000 root@<node>
 
-Un proceso, un bucle asyncio, un puerto, una pestaña.
+One process, one asyncio loop, one port, one browser tab.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from wavelab.store.bars import BarStore
 
 
 def _ip(request) -> str:
-    """IP real del cliente. Detrás de Caddy, la de la conexión es siempre 127.0.0.1."""
+    """The client's real IP. Behind Caddy, the connection's own address is always 127.0.0.1."""
     for h in ("x-forwarded-for", "x-real-ip"):
         v = request.headers.get(h)
         if v:
@@ -40,35 +40,41 @@ def _ip(request) -> str:
     return request.client.host if request.client else "?"
 
 
-def _limite(e: Exception) -> JSONResponse:
+def _rate_limited(e: Exception) -> JSONResponse:
     return JSONResponse({"error": str(e)}, status_code=429)
 
 
-def pd_fecha(ms: int) -> str:
+def _date_str(ms: int) -> str:
     import pandas as pd
     return str(pd.Timestamp(int(ms), unit="ms").date())
 
 
 WEB = Path(__file__).resolve().parents[3] / "web"
 
-#: En modo PÚBLICO solo se sirve Assay. El gráfico con las señales de Elliott es la
-#: herramienta privada del dueño y no tiene por qué estar en internet: menos superficie y menos
-#: dudas sobre si esto es o no una recomendación de inversión.
-PUBLICO = os.environ.get("WAVELAB_PUBLIC", "").lower() in ("1", "true", "si", "sí")
-LIMITES = RateLimiter(max_concurrent=2, per_hour=30, per_minute=6)
+#: In PUBLIC mode only Assay is served. The chart with the Elliott signals is the owner's private
+#: tool and has no business being on the internet: less surface area, and fewer questions about
+#: whether this is or is not investment advice.
+#: The accepted truthy values keep their Spanish spellings on purpose — the one place in this
+#: codebase that was not translated — and gain the English ones alongside them. This flag is read
+#: from the environment of a unit file already running on the VPS, and a value not on the list does
+#: not fail loudly: it just reads as false, which takes the gate off /api/decide, /api/history and
+#: /ws and puts the owner's private chart on the open internet. Accepting both vocabularies costs
+#: nothing; a `WAVELAB_PUBLIC=yes` that silently meant "no" would cost the whole point of the flag.
+PUBLIC = os.environ.get("WAVELAB_PUBLIC", "").lower() in ("1", "true", "yes", "on", "si", "sí")
+LIMITS = RateLimiter(max_concurrent=2, per_hour=30, per_minute=6)
 DATA = Path(os.environ.get("WAVELAB_DATA", "data"))
 
 
 def bar_json(b: Bar) -> dict:
-    """Lightweight Charts espera el tiempo en SEGUNDOS unix, no en milisegundos."""
+    """Lightweight Charts expects the time in unix SECONDS, not milliseconds."""
     return {"time": b.open_time_ms // 1000, "open": b.open, "high": b.high,
             "low": b.low, "close": b.close, "volume": b.volume,
             "n_source_bars": b.n_source_bars, "is_gap": b.is_gap}
 
 
 class Hub:
-    """Reparte a los navegadores conectados. Nunca bloquea al productor: un navegador lento
-    no puede parar el consumidor del WebSocket de Binance."""
+    """Fans out to the connected browsers. Never blocks the producer: one slow browser must not be
+    able to stall the consumer of Binance's WebSocket."""
 
     def __init__(self) -> None:
         self.clients: set[WebSocket] = set()
@@ -77,13 +83,13 @@ class Hub:
         if not self.clients:
             return
         raw = json.dumps(payload, separators=(",", ":"))
-        muertos = []
+        dead = []
         for ws in list(self.clients):
             try:
                 await ws.send_text(raw)
             except Exception:  # noqa: BLE001
-                muertos.append(ws)
-        for ws in muertos:
+                dead.append(ws)
+        for ws in dead:
             self.clients.discard(ws)
 
 
@@ -109,28 +115,28 @@ class App:
         self._warm_n = 0
         self._warm_month: str | None = None
         self._feed_task = None
-        self._tareas: list = []
-        #: False mientras calienta. Una sonda tiene que poder distinguir «arrancando» de «roto».
-        self.listo = False
+        self._tasks: list = []
+        #: False while warming up. A probe has to be able to tell "starting" from "broken".
+        self.ready = False
 
-    # ------------------------------------------------------------------ arranque
+    # ------------------------------------------------------------------ startup
 
-    def _iter_bars(self, hasta_ms: int):
-        """Genera velas leyendo el almacén MES A MES.
+    def _iter_bars(self, until_ms: int):
+        """Yields bars, reading the store MONTH BY MONTH.
 
-        Dos fugas de memoria distintas, y las dos matan al servicio contra su tope de 768 MB:
-        materializar 4,76 M de objetos Bar (~950 MB) y cargar el histórico entero en un solo
-        DataFrame (~340 MB más la concatenación de 110 ficheros Parquet). La primera se resuelve
-        con un generador; la segunda solo se resuelve paginando la LECTURA. Así el pico es de un
-        mes: ~44.000 filas.
+        Two distinct memory leaks, and both of them kill the service against its 768 MB cap:
+        materialising 4.76M Bar objects (~950 MB), and loading the whole history into a single
+        DataFrame (~340 MB plus the concatenation of 110 Parquet files). A generator solves the
+        first one; the second is only solved by paginating the READ. That way the peak is one
+        month: ~44,000 rows.
         """
-        # Señal de progreso: en el VPS, con CPUQuota=50%, calentar nueve años tarda ~2 minutos.
-        # Un arranque MUDO de dos minutos es indistinguible de uno colgado, y lo primero que hace
-        # cualquiera ante eso es reiniciar el servicio — con lo que nunca termina de arrancar.
-        for _key, df in self.store.iter_months(self.symbol, 0, hasta_ms):
+        # Progress signal: on the VPS, with CPUQuota=50%, warming up nine years takes ~2 minutes.
+        # A SILENT two-minute startup is indistinguishable from a hung one, and the first thing
+        # anybody does about that is restart the service — so it never finishes starting.
+        for _key, df in self.store.iter_months(self.symbol, 0, until_ms):
             self._warm_month = _key
             if self._warm_n % 20 == 0:
-                print(f"[server] calentando… {_key} ({self._warm_n + 1} meses)", flush=True)
+                print(f"[server] warming up… {_key} ({self._warm_n + 1} months)", flush=True)
             self._warm_n += 1
             for ts, r in zip(df.index, df.itertuples(index=False), strict=True):
                 yield Bar(symbol=self.symbol, tf=TF_1M, open_time_ms=int(ts),
@@ -139,55 +145,57 @@ class App:
                           is_closed=True, n_source_bars=1)
 
     def warmup(self) -> int:
-        """Calienta desde el PRINCIPIO del histórico, no desde una ventana móvil.
+        """Warms up from the BEGINNING of the history, not from a rolling window.
 
-        Es una decisión de correctitud, no de exhaustividad. El detector de pivotes es dependiente
-        del camino: arrancar desde un punto distinto produce pivotes distintos. Con una ventana
-        móvil, cada reinicio del servicio cambiaría la estructura mostrada al usuario sin ningún
-        evento de invalidación, y además el estado en vivo dejaría de coincidir con el que produce
-        un replay completo — que es la promesa central del diseño.
+        This is a correctness decision, not a completeness one. The pivot detector is path
+        dependent: starting from a different point produces different pivots. With a rolling
+        window, every restart of the service would change the structure shown to the user with no
+        invalidation event whatsoever, and the live state would stop matching the one a full replay
+        produces — which is the central promise of the design.
 
-        Coste medido: ~570.000 velas/s, unos 10-15 s para nueve años. Se paga una vez al arrancar.
+        Measured cost: ~570,000 bars/s, some 10-15 s for nine years. Paid once, at startup.
         """
-        hasta = int(time.time() * 1000)
-        meses = self.store.months(self.symbol)
-        if not meses:
-            print("[server] almacén vacío: ejecuta `python -m wavelab.store.hydrate`", flush=True)
+        until = int(time.time() * 1000)
+        months = self.store.months(self.symbol)
+        if not months:
+            print("[server] empty store: run `python -m wavelab.store.hydrate`", flush=True)
             return 0
         t0 = time.perf_counter()
-        n = self.engine.warmup(self._iter_bars(hasta))
+        n = self.engine.warmup(self._iter_bars(until))
         dt = time.perf_counter() - t0
-        print(f"[server] calentado con {n:,} velas de 1m desde {meses[0]} "
-              f"en {dt:.1f}s ({n/dt:,.0f}/s, {len(meses)} meses)", flush=True)
+        print(f"[server] warmed up with {n:,} 1m bars since {months[0]} "
+              f"in {dt:.1f}s ({n/dt:,.0f}/s, {len(months)} months)", flush=True)
         for tf in self.tfs:
             if tf != "1m":
-                print(f"[server]   {tf}: {self.engine.waves(tf)['n_confirmed']:,} pivotes",
+                print(f"[server]   {tf}: {self.engine.waves(tf)['n_confirmed']:,} pivots",
                       flush=True)
         return n
 
-    # ------------------------------------------------------------------ bucle vivo
+    # ------------------------------------------------------------------ live loop
 
     async def run_feed(self) -> None:
-        desde = self.engine.state.health.last_closed_ms
-        async for bar in self.feed.stream(desde_ms=desde):
+        since = self.engine.state.health.last_closed_ms
+        # Passed positionally on purpose: the feed owns the name of that parameter, and this call
+        # should not break the day it is renamed.
+        async for bar in self.feed.stream(since):
             self.engine.check_clock()
-            cerradas = self.engine.on_bar_1m(bar)
+            closed = self.engine.on_bar_1m(bar)
 
             if bar.is_closed:
                 self._pending.append(bar)
                 if len(self._pending) >= 5:
                     self._flush()
-                # Diff, no instantánea: solo lo que cambió.
+                # A diff, not a snapshot: only what changed.
                 await self.hub.send({"type": "bar", "tf": "1m", "bar": bar_json(bar)})
             else:
                 await self.hub.send({"type": "tick", "tf": "1m", "bar": bar_json(bar)})
 
-            for htf in cerradas:
+            for htf in closed:
                 await self.hub.send({"type": "bar", "tf": htf.tf.name, "bar": bar_json(htf)})
-                # Los tramos se recalculan solo cuando cierra una vela de ese timeframe: el
-                # detector no avanza entre medias, así que reenviar en cada tick sería ruido.
-                anillo = self.engine.state.rings[htf.tf.name]
-                vis = anillo.window(min(1500, len(anillo)))
+                # Legs are recomputed only when a bar of that timeframe closes: the detector does
+                # not advance in between, so resending them on every tick would be noise.
+                ring = self.engine.state.rings[htf.tf.name]
+                vis = ring.window(min(1500, len(ring)))
                 await self.hub.send({"type": "waves", "tf": htf.tf.name,
                                      **self.engine.waves(htf.tf.name,
                                                          since_ms=int(vis.ts[0]))})
@@ -203,47 +211,46 @@ class App:
              for b in self._pending],
             index=pd.Index([b.open_time_ms for b in self._pending], name="open_time_ms"),
         )
-        self.store.ingest(self.symbol, df)   # idempotente: el solape del curado no duplica
+        self.store.ingest(self.symbol, df)   # idempotent: the healing overlap does not duplicate
         self._pending.clear()
 
     async def supervise_feed(self) -> None:
-        """Vigila la tarea del feed y la resucita.
+        """Watches the feed task and resurrects it.
 
-        `Restart=always` de systemd solo actúa si muere el PROCESO. Una tarea asyncio que muere
-        dentro de un proceso vivo no lo dispara: el servidor HTTP sigue sirviendo tan ricamente
-        datos rancios, y la insignia de salud lo pinta en rojo mientras nadie hace nada.
-        Observado en vivo: 50 minutos "conectado pero MUDO" con el stream de Binance funcionando
-        perfectamente.
+        systemd's `Restart=always` only fires if the PROCESS dies. An asyncio task that dies inside
+        a living process does not trigger it: the HTTP server carries on happily serving stale
+        data, and the health badge paints it red while nobody does anything about it. Observed
+        live: 50 minutes "connected but MUTE" with Binance's stream working perfectly.
 
-        Dos condiciones de resurrección: la tarea termina (con o sin excepción), o lleva
-        `SILENCIO_MAX` segundos conectada sin entregar un solo mensaje — que es un modo de fallo
-        REAL y observado, no hipotético.
+        Two resurrection conditions: the task finishes (with or without an exception), or it has
+        spent `MAX_SILENCE` seconds connected without delivering a single message — which is a
+        REAL, observed failure mode, not a hypothetical one.
         """
-        SILENCIO_MAX = 300
-        intento = 0
+        MAX_SILENCE = 300
+        attempt = 0
         while True:
-            tarea = asyncio.create_task(self.run_feed(), name="feed")
-            self._feed_task = tarea
-            while not tarea.done():
+            task = asyncio.create_task(self.run_feed(), name="feed")
+            self._feed_task = task
+            while not task.done():
                 await asyncio.sleep(10)
-                if self.feed.silent_seconds > SILENCIO_MAX:
-                    print(f"[server] feed MUDO {self.feed.silent_seconds:.0f}s pese a estar "
-                          "conectado: reiniciando la tarea", flush=True)
-                    tarea.cancel()
+                if self.feed.silent_seconds > MAX_SILENCE:
+                    print(f"[server] feed MUTE for {self.feed.silent_seconds:.0f}s despite being "
+                          "connected: restarting the task", flush=True)
+                    task.cancel()
                     break
             with contextlib.suppress(asyncio.CancelledError, Exception):
-                await tarea
-            if tarea.cancelled() or tarea.exception() is not None:
-                motivo = "cancelada" if tarea.cancelled() else f"{tarea.exception()!r}"
+                await task
+            if task.cancelled() or task.exception() is not None:
+                reason = "was cancelled" if task.cancelled() else f"{task.exception()!r}"
             else:
-                motivo = "terminó sola"
-            intento += 1
-            espera = min(60, 2 ** min(intento, 6))
-            print(f"[server] la tarea del feed {motivo}; reintento {intento} en {espera}s",
+                reason = "finished on its own"
+            attempt += 1
+            delay = min(60, 2 ** min(attempt, 6))
+            print(f"[server] the feed task {reason}; retry {attempt} in {delay}s",
                   flush=True)
             self.feed.connected = False
             self.feed.last_msg_ms = 0
-            await asyncio.sleep(espera)
+            await asyncio.sleep(delay)
 
     async def run_health(self) -> None:
         while True:
@@ -257,61 +264,60 @@ class App:
 APP = App()
 
 
-async def _arrancar(app_: "App") -> None:
-    """Calienta en SEGUNDO PLANO y solo entonces enciende los feeds.
+async def _start(app_: "App") -> None:
+    """Warms up in the BACKGROUND and only then turns the feeds on.
 
-    Antes el calentamiento estaba en el arranque del servidor, y uvicorn no acepta conexiones hasta
-    que el arranque termina. Con nueve años de histórico eso son ~120 s en los que el puerto está
-    cerrado: `curl` da «conexión rechazada», que es indistinguible de un servicio roto.
+    The warm-up used to live in the server's startup hook, and uvicorn does not accept connections
+    until startup finishes. With nine years of history that is ~120 s during which the port is
+    closed: `curl` says "connection refused", which is indistinguishable from a broken service.
 
-    Lo descubrió el propio pipeline de despliegue continuo, y de la peor manera: la comprobación de
-    salud esperaba 120 s, el calentamiento tardó 117,8, se agotó por dos segundos, revirtió un
-    despliegue que estaba perfectamente y declaró un incidente crítico inexistente.
+    The continuous-deployment pipeline found this out itself, and in the worst possible way: the
+    health check waited 120 s, the warm-up took 117.8, it timed out by two seconds, rolled back a
+    deployment that was perfectly fine and declared a critical incident that did not exist.
 
-    Subir el plazo solo habría movido la frontera. Lo correcto es que el servidor RESPONDA desde el
-    primer segundo diciendo que está calentando: así una sonda puede distinguir «arrancando» de
-    «roto», que es justo para lo que existe una sonda.
+    Raising the timeout would only have moved the boundary. The right answer is for the server to
+    RESPOND from the very first second saying that it is warming up: that way a probe can tell
+    "starting" from "broken", which is exactly what a probe is for.
     """
     import anyio
     await anyio.to_thread.run_sync(app_.warmup)
-    app_.listo = True
-    app_._tareas = [asyncio.create_task(app_.supervise_feed(), name="feed-supervisor"),
-                    asyncio.create_task(app_.run_health(), name="health")]
+    app_.ready = True
+    app_._tasks = [asyncio.create_task(app_.supervise_feed(), name="feed-supervisor"),
+                   asyncio.create_task(app_.run_health(), name="health")]
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    tareas = [asyncio.create_task(_arrancar(APP), name="arranque")]
+    tasks = [asyncio.create_task(_start(APP), name="startup")]
     try:
         yield
     finally:
         APP._flush()
-        for t in [*tareas, *getattr(APP, "_tareas", [])]:
+        for t in [*tasks, *getattr(APP, "_tasks", [])]:
             t.cancel()
-        await asyncio.gather(*tareas, *getattr(APP, "_tareas", []), return_exceptions=True)
+        await asyncio.gather(*tasks, *getattr(APP, "_tasks", []), return_exceptions=True)
 
 
 app = FastAPI(title="wavelab", lifespan=lifespan)
 
 
-@app.get("/api/hipotesis")
-async def listar_hipotesis() -> JSONResponse:
-    """Catálogo de estrategias registradas, con su razonamiento y su criterio de falsación."""
+@app.get("/api/hypotheses")
+async def list_hypotheses() -> JSONResponse:
+    """Catalogue of registered strategies, with their reasoning and their falsification criterion."""
     from wavelab.hypotheses import load_all
     hs = load_all()
-    return JSONResponse({"hipotesis": [
+    return JSONResponse({"hypotheses": [
         {"name": h.name, "family": h.family, "rationale": h.rationale.strip(),
          "prior": h.prior.strip(), "params": {k: str(v) for k, v in h.params.items()},
          "timeframes": list(h.timeframes)}
         for h in sorted(hs.values(), key=lambda x: (x.family, x.name))]})
 
 
-def _bateria_propia(ts_ms, close, sig, nombre: str, extra: dict | None = None):
-    """Batería sobre la serie de precios DEL USUARIO.
+def _battery_own_series(ts_ms, close, sig, name: str, extra: dict | None = None):
+    """Battery over the USER'S OWN price series.
 
-    Es lo que hace la herramienta utilizable por alguien que no opera BTC en Binance: sus filas
-    SON las velas, así que no hay que alinear nada. El tamaño de barra se deduce de sus propias
-    marcas de tiempo.
+    This is what makes the tool usable by someone who does not trade BTC on Binance: their rows ARE
+    the bars, so there is nothing to align. The bar size is inferred from their own timestamps.
     """
     import numpy as np
 
@@ -320,175 +326,176 @@ def _bateria_propia(ts_ms, close, sig, nombre: str, extra: dict | None = None):
     ts = np.asarray(ts_ms, dtype=np.int64)
     bar_ms = int(np.median(np.diff(ts))) if ts.size > 1 else 86_400_000
     r = run_battery(np.asarray(close, dtype=float), ts, np.asarray(sig, dtype=float),
-                    nombre=nombre, bar_ms=max(bar_ms, 1), horizon_bars=1, n_random=250)
-    paso = max(1, len(r.equity) // 600)
+                    name=name, bar_ms=max(bar_ms, 1), horizon_bars=1, n_random=250)
+    step = max(1, len(r.equity) // 600)
     return {
-        "nombre": r.nombre, "tf": f"{bar_ms // 60000} min entre filas",
-        "veredicto": r.veredicto, "resumen": r.resumen,
+        "name": r.name, "tf": f"{bar_ms // 60000} min between rows",
+        "verdict": r.verdict, "summary": r.summary,
         "n_signals": r.n_signals, "n_effective": r.n_effective, "exposure": r.exposure,
         "cagr": r.cagr, "sharpe": r.sharpe, "max_dd": r.max_dd,
         "cagr_bh": r.cagr_bh, "sharpe_bh": r.sharpe_bh, "max_dd_bh": r.max_dd_bh,
-        "curva": [{"t": int(ts[1:][i]) // 1000, "e": float(r.equity[i]),
-                   "b": float(r.equity_bh[i])} for i in range(0, len(r.equity), paso)],
-        "tests": [{"id": t.id, "titulo": t.titulo, "estado": t.estado, "valor": t.valor,
-                   "referencia": t.referencia, "unidad": t.unidad,
-                   "explicacion": t.explicacion, "detalle": t.detalle} for t in r.tests],
+        "equity_curve": [{"t": int(ts[1:][i]) // 1000, "e": float(r.equity[i]),
+                          "b": float(r.equity_bh[i])} for i in range(0, len(r.equity), step)],
+        "tests": [{"id": t.id, "title": t.title, "status": t.status, "value": t.value,
+                   "reference": t.reference, "unit": t.unit,
+                   "explanation": t.explanation, "detail": t.detail} for t in r.tests],
         **(extra or {}),
     }
 
 
-def _serie_y_bateria(tf: str, sig, nombre: str, extra: dict | None = None):
-    """Camino común a las tres vías de entrada (catálogo, CSV y regla escrita).
+def _series_and_battery(tf: str, sig, name: str, extra: dict | None = None):
+    """The path shared by all three entry routes (catalogue, CSV and hand-written rule).
 
-    Que las tres pasen por la MISMA batería no es economía de código: es que un usuario tiene que
-    poder comparar su estrategia con las del catálogo sabiendo que se han medido igual.
+    Putting all three through the SAME battery is not code economy: it is so that a user can
+    compare their own strategy against the catalogue's knowing both were measured the same way.
     """
     import numpy as np
 
     from wavelab.validation.battery import run_battery
 
-    anillo = APP.engine.state.rings[tf]
-    w = anillo.window(len(anillo))
+    ring = APP.engine.state.rings[tf]
+    w = ring.window(len(ring))
     r = run_battery(w.close, w.ts, np.asarray(sig, dtype=float),
-                    nombre=nombre, bar_ms=BY_NAME[tf].ms, horizon_bars=1, n_random=250)
-    paso = max(1, len(r.equity) // 600)
+                    name=name, bar_ms=BY_NAME[tf].ms, horizon_bars=1, n_random=250)
+    step = max(1, len(r.equity) // 600)
     return {
-        "nombre": r.nombre, "tf": tf,
-        "veredicto": r.veredicto, "resumen": r.resumen,
+        "name": r.name, "tf": tf,
+        "verdict": r.verdict, "summary": r.summary,
         "n_signals": r.n_signals, "n_effective": r.n_effective, "exposure": r.exposure,
         "cagr": r.cagr, "sharpe": r.sharpe, "max_dd": r.max_dd,
         "cagr_bh": r.cagr_bh, "sharpe_bh": r.sharpe_bh, "max_dd_bh": r.max_dd_bh,
-        "curva": [{"t": int(w.ts[1:][i]) // 1000, "e": float(r.equity[i]),
-                   "b": float(r.equity_bh[i])} for i in range(0, len(r.equity), paso)],
-        "tests": [{"id": t.id, "titulo": t.titulo, "estado": t.estado, "valor": t.valor,
-                   "referencia": t.referencia, "unidad": t.unidad,
-                   "explicacion": t.explicacion, "detalle": t.detalle} for t in r.tests],
+        "equity_curve": [{"t": int(w.ts[1:][i]) // 1000, "e": float(r.equity[i]),
+                          "b": float(r.equity_bh[i])} for i in range(0, len(r.equity), step)],
+        "tests": [{"id": t.id, "title": t.title, "status": t.status, "value": t.value,
+                   "reference": t.reference, "unit": t.unit,
+                   "explanation": t.explanation, "detail": t.detail} for t in r.tests],
         **(extra or {}),
     }
 
 
-@app.post("/api/validar_csv")
-async def validar_csv(request: Request, tf: str = "1d") -> JSONResponse:
-    """Valida la estrategia del usuario a partir de su propio CSV de señales."""
+@app.post("/api/validate_csv")
+async def validate_csv(request: Request, tf: str = "1d") -> JSONResponse:
+    """Validates the user's strategy from their own CSV of signals."""
 
     try:
-        async with LIMITES.slot(_ip(request)):
-            return await _validar_csv(request, tf)
+        async with LIMITS.slot(_ip(request)):
+            return await _validate_csv(request, tf)
     except (TooBusy, TooMany) as e:
-        return _limite(e)
+        return _rate_limited(e)
 
 
-async def _validar_csv(request: Request, tf: str) -> JSONResponse:
+async def _validate_csv(request: Request, tf: str) -> JSONResponse:
     from wavelab.validation.csv_import import ImportError_, align_to_bars, parse_signals_csv
 
-    cuerpo = await request.body()
-    if not cuerpo:
-        return JSONResponse({"error": "fichero vacío"}, status_code=400)
-    if len(cuerpo) > 12_000_000:
-        return JSONResponse({"error": "el fichero supera los 12 MB"}, status_code=400)
-    anillo = APP.engine.state.rings.get(tf)
-    if not APP.listo:
-        return JSONResponse({"error": "el servicio está cargando nueve años de histórico "
-                             f"({APP._warm_n} meses). Vuelve a intentarlo en un minuto."},
+    body = await request.body()
+    if not body:
+        return JSONResponse({"error": "empty file"}, status_code=400)
+    if len(body) > 12_000_000:
+        return JSONResponse({"error": "the file is larger than 12 MB"}, status_code=400)
+    ring = APP.engine.state.rings.get(tf)
+    if not APP.ready:
+        return JSONResponse({"error": "the service is loading nine years of history "
+                             f"({APP._warm_n} months). Try again in a minute."},
                             status_code=503)
-    if anillo is None or len(anillo) < 400:
-        return JSONResponse({"error": f"sin datos suficientes en {tf}"}, status_code=400)
+    if ring is None or len(ring) < 400:
+        return JSONResponse({"error": f"not enough data on {tf}"}, status_code=400)
     try:
-        imp = parse_signals_csv(cuerpo)
+        imp = parse_signals_csv(body)
     except ImportError_ as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 
-    # Si el usuario trae SUS precios, se usan los suyos: puede estar operando ETH, acciones o
-    # divisas, y validarle su estrategia contra el precio de BTC daría un informe sin sentido.
-    if imp.tiene_precios:
+    # If the user brings THEIR OWN prices, those are the ones used: they may be trading ETH,
+    # equities or FX, and validating their strategy against the price of BTC would produce a
+    # report that means nothing.
+    if imp.has_prices:
         if len(imp.ts_ms) < 120:
             return JSONResponse({"error":
-                f"con precios propios hacen falta al menos 120 filas y hay {len(imp.ts_ms)}. "
-                "Con menos, ninguna de las cinco pruebas puede concluir nada."}, status_code=400)
-        informe = imp.informe + [
-            f"{imp.n_largo} largos, {imp.n_corto} cortos, {imp.n_fuera} fuera",
-            f"validado sobre TU serie de {len(imp.ts_ms):,} filas, entre "
-            f"{pd_fecha(imp.ts_ms.min())} y {pd_fecha(imp.ts_ms.max())}",
+                f"with your own prices we need at least 120 rows and there are {len(imp.ts_ms)}. "
+                "With fewer, none of the five tests can conclude anything."}, status_code=400)
+        report = imp.report + [
+            f"{imp.n_long} long, {imp.n_short} short, {imp.n_flat} flat",
+            f"validated on YOUR series of {len(imp.ts_ms):,} rows, between "
+            f"{_date_str(imp.ts_ms.min())} and {_date_str(imp.ts_ms.max())}",
         ]
-        return JSONResponse(_bateria_propia(imp.ts_ms, imp.precio, imp.signal,
-                                            "tu estrategia (CSV con precios)",
-                                            {"informe": informe}))
+        return JSONResponse(_battery_own_series(imp.ts_ms, imp.price, imp.signal,
+                                                "your strategy (CSV with prices)",
+                                                {"report": report}))
 
-    w = anillo.window(len(anillo))
+    w = ring.window(len(ring))
     sig = align_to_bars(imp, w.ts, BY_NAME[tf].ms)
-    cubiertas = int((sig != 0).sum())
-    if cubiertas < 30:
+    covered = int((sig != 0).sum())
+    if covered < 30:
         return JSONResponse({"error":
-            f"tras alinear tu CSV con nuestras velas de {tf} solo quedan {cubiertas} barras con "
-            "posición. Comprueba que las fechas caen dentro de 2017-2026 y que el timeframe "
-            "elegido es el tuyo."}, status_code=400)
+            f"after aligning your CSV with our {tf} bars only {covered} bars are left holding a "
+            "position. Check that the dates fall inside 2017-2026 and that the timeframe you "
+            "picked is the one you meant."}, status_code=400)
 
-    dentro = (w.ts >= imp.ts_ms.min()) & (w.ts <= imp.ts_ms.max())
-    informe = imp.informe + [
-        "tu CSV no trae columna de precio: se valida contra NUESTRA serie de BTCUSDT. "
-        "Si operas otro activo, añade una columna `precio`.",
-        f"{imp.n_largo} largos, {imp.n_corto} cortos, {imp.n_fuera} fuera en tu fichero",
-        f"alineado a {int(dentro.sum()):,} velas de {tf} entre "
-        f"{pd_fecha(imp.ts_ms.min())} y {pd_fecha(imp.ts_ms.max())}",
+    inside = (w.ts >= imp.ts_ms.min()) & (w.ts <= imp.ts_ms.max())
+    report = imp.report + [
+        "your CSV has no price column: it is validated against OUR BTCUSDT series. "
+        "If you trade a different asset, add a `price` column.",
+        f"{imp.n_long} long, {imp.n_short} short, {imp.n_flat} flat in your file",
+        f"aligned to {int(inside.sum()):,} {tf} bars between "
+        f"{_date_str(imp.ts_ms.min())} and {_date_str(imp.ts_ms.max())}",
     ]
-    return JSONResponse(_serie_y_bateria(tf, sig, "tu estrategia (CSV)", {"informe": informe}))
+    return JSONResponse(_series_and_battery(tf, sig, "your strategy (CSV)", {"report": report}))
 
 
-@app.post("/api/validar_regla")
-async def validar_regla(request: Request) -> JSONResponse:
-    """Valida una regla escrita por el usuario en el editor."""
+@app.post("/api/validate_rule")
+async def validate_rule(request: Request) -> JSONResponse:
+    """Validates a rule the user wrote in the editor."""
 
     try:
-        async with LIMITES.slot(_ip(request)):
-            return await _validar_regla(request)
+        async with LIMITS.slot(_ip(request)):
+            return await _validate_rule(request)
     except (TooBusy, TooMany) as e:
-        return _limite(e)
+        return _rate_limited(e)
 
 
-async def _validar_regla(request: Request) -> JSONResponse:
+async def _validate_rule(request: Request) -> JSONResponse:
     from wavelab.validation.expr import ExprError, build_series, evaluate_rule
 
     body = await request.json()
     tf = body.get("tf", "1d")
-    anillo = APP.engine.state.rings.get(tf)
-    if not APP.listo:
-        return JSONResponse({"error": "el servicio está cargando nueve años de histórico "
-                             f"({APP._warm_n} meses). Vuelve a intentarlo en un minuto."},
+    ring = APP.engine.state.rings.get(tf)
+    if not APP.ready:
+        return JSONResponse({"error": "the service is loading nine years of history "
+                             f"({APP._warm_n} months). Try again in a minute."},
                             status_code=503)
-    if anillo is None or len(anillo) < 400:
-        return JSONResponse({"error": f"sin datos suficientes en {tf}"}, status_code=400)
-    w = anillo.window(len(anillo))
+    if ring is None or len(ring) < 400:
+        return JSONResponse({"error": f"not enough data on {tf}"}, status_code=400)
+    w = ring.window(len(ring))
     ser = build_series(w.open, w.high, w.low, w.close, w.volume)
     try:
-        r = evaluate_rule(ser, body.get("largo", ""), body.get("corto", ""))
+        r = evaluate_rule(ser, body.get("long", ""), body.get("short", ""))
     except ExprError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
-    if r.n_largo + r.n_corto < 30:
+    if r.n_long + r.n_short < 30:
         return JSONResponse({"error":
-            f"la regla solo se cumple en {r.n_largo + r.n_corto} barras de {len(w.close):,}. "
-            "Con tan pocas no se puede concluir nada."}, status_code=400)
-    return JSONResponse(_serie_y_bateria(
-        tf, r.signal, "tu regla",
-        {"informe": [f"{r.n_largo} barras largas, {r.n_corto} cortas de {len(w.close):,}"]}))
+            f"the rule only holds on {r.n_long + r.n_short} bars out of {len(w.close):,}. "
+            "With that few, nothing can be concluded."}, status_code=400)
+    return JSONResponse(_series_and_battery(
+        tf, r.signal, "your rule",
+        {"report": [f"{r.n_long} long bars, {r.n_short} short out of {len(w.close):,}"]}))
 
 
-@app.get("/api/ayuda_regla")
-async def ayuda_regla() -> JSONResponse:
-    from wavelab.validation.expr import FUNC_DOCS, SERIE_DOCS
-    return JSONResponse({"series": SERIE_DOCS, "funciones": FUNC_DOCS})
+@app.get("/api/rule_help")
+async def rule_help() -> JSONResponse:
+    from wavelab.validation.expr import FUNC_DOCS, SERIES_DOCS
+    return JSONResponse({"series": SERIES_DOCS, "functions": FUNC_DOCS})
 
 
-@app.get("/api/validar")
-async def validar(request: Request, hyp: str, tf: str = "1d") -> JSONResponse:
-    """Somete una estrategia a la batería de cinco pruebas. ESTE es el producto."""
+@app.get("/api/validate")
+async def validate(request: Request, hyp: str, tf: str = "1d") -> JSONResponse:
+    """Puts a strategy through the battery of five tests. THIS is the product."""
     try:
-        async with LIMITES.slot(_ip(request)):
-            return await _validar_catalogo(hyp, tf)
+        async with LIMITS.slot(_ip(request)):
+            return await _validate_catalog(hyp, tf)
     except (TooBusy, TooMany) as e:
-        return _limite(e)
+        return _rate_limited(e)
 
 
-async def _validar_catalogo(hyp: str, tf: str) -> JSONResponse:
+async def _validate_catalog(hyp: str, tf: str) -> JSONResponse:
 
     from wavelab.hypotheses import load_all
     from wavelab.hypotheses.base import Series
@@ -497,69 +504,69 @@ async def _validar_catalogo(hyp: str, tf: str) -> JSONResponse:
     hs = load_all()
     h = hs.get(hyp)
     if h is None:
-        return JSONResponse({"error": f"hipótesis desconocida: {hyp}"}, status_code=400)
-    anillo = APP.engine.state.rings.get(tf)
-    if not APP.listo:
-        return JSONResponse({"error": "el servicio está cargando nueve años de histórico "
-                             f"({APP._warm_n} meses). Vuelve a intentarlo en un minuto."},
+        return JSONResponse({"error": f"unknown hypothesis: {hyp}"}, status_code=400)
+    ring = APP.engine.state.rings.get(tf)
+    if not APP.ready:
+        return JSONResponse({"error": "the service is loading nine years of history "
+                             f"({APP._warm_n} months). Try again in a minute."},
                             status_code=503)
-    if anillo is None or len(anillo) < 400:
-        return JSONResponse({"error": f"sin datos suficientes en {tf}"}, status_code=400)
+    if ring is None or len(ring) < 400:
+        return JSONResponse({"error": f"not enough data on {tf}"}, status_code=400)
 
-    w = anillo.window(len(anillo))
-    serie = Series(tf, w.ts, w.open, w.high, w.low, w.close, w.volume)
-    sig = h.signals(serie).astype(float)
-    r = run_battery(w.close, w.ts, sig, nombre=h.name,
+    w = ring.window(len(ring))
+    series = Series(tf, w.ts, w.open, w.high, w.low, w.close, w.volume)
+    sig = h.signals(series).astype(float)
+    r = run_battery(w.close, w.ts, sig, name=h.name,
                     bar_ms=BY_NAME[tf].ms, horizon_bars=1, n_random=250)
 
-    # Se submuestrea la curva para que el navegador no reciba 20.000 puntos por serie.
-    paso = max(1, len(r.equity) // 600)
+    # The curve is subsampled so the browser does not receive 20,000 points per series.
+    step = max(1, len(r.equity) // 600)
     return JSONResponse({
-        "nombre": r.nombre, "tf": tf, "family": h.family,
+        "name": r.name, "tf": tf, "family": h.family,
         "rationale": h.rationale.strip(), "prior": h.prior.strip(),
-        "veredicto": r.veredicto, "resumen": r.resumen,
+        "verdict": r.verdict, "summary": r.summary,
         "n_signals": r.n_signals, "n_effective": r.n_effective, "exposure": r.exposure,
         "cagr": r.cagr, "sharpe": r.sharpe, "max_dd": r.max_dd,
         "cagr_bh": r.cagr_bh, "sharpe_bh": r.sharpe_bh, "max_dd_bh": r.max_dd_bh,
-        "curva": [{"t": int(w.ts[1:][i]) // 1000, "e": float(r.equity[i]),
-                   "b": float(r.equity_bh[i])} for i in range(0, len(r.equity), paso)],
-        "tests": [{"id": t.id, "titulo": t.titulo, "estado": t.estado, "valor": t.valor,
-                   "referencia": t.referencia, "unidad": t.unidad,
-                   "explicacion": t.explicacion, "detalle": t.detalle} for t in r.tests],
+        "equity_curve": [{"t": int(w.ts[1:][i]) // 1000, "e": float(r.equity[i]),
+                          "b": float(r.equity_bh[i])} for i in range(0, len(r.equity), step)],
+        "tests": [{"id": t.id, "title": t.title, "status": t.status, "value": t.value,
+                   "reference": t.reference, "unit": t.unit,
+                   "explanation": t.explanation, "detail": t.detail} for t in r.tests],
     })
 
 
 @app.get("/api/decide")
 async def decide(tf: str = "4h") -> JSONResponse:
-    """Hipótesis ordenadas y su plan. Es la tarjeta de decisión."""
-    if PUBLICO:
-        return JSONResponse({"error": "no disponible"}, status_code=404)
-    anillo = APP.engine.state.rings.get(tf)
-    if anillo is None or not len(anillo):
-        return JSONResponse({"error": f"sin datos para {tf}"}, status_code=400)
-    precio = float(anillo.window(1).close[0])
-    return JSONResponse(APP.engine.decide(tf, precio))
+    """Ranked hypotheses and their plan. This is the decision card."""
+    if PUBLIC:
+        return JSONResponse({"error": "not available"}, status_code=404)
+    ring = APP.engine.state.rings.get(tf)
+    if ring is None or not len(ring):
+        return JSONResponse({"error": f"no data for {tf}"}, status_code=400)
+    price = float(ring.window(1).close[0])
+    return JSONResponse(APP.engine.decide(tf, price))
 
 
 @app.get("/api/history")
 async def history(tf: str = "15m", limit: int = 1500) -> JSONResponse:
-    if PUBLICO:
-        return JSONResponse({"error": "no disponible"}, status_code=404)
+    if PUBLIC:
+        return JSONResponse({"error": "not available"}, status_code=404)
     if tf not in APP.engine.state.rings:
-        return JSONResponse({"error": f"timeframe {tf} no configurado",
+        return JSONResponse({"error": f"timeframe {tf} is not configured",
                              "available": list(APP.engine.state.rings)}, status_code=400)
-    anillo = APP.engine.state.rings[tf]
-    if not len(anillo):
+    ring = APP.engine.state.rings[tf]
+    if not len(ring):
         return JSONResponse({"tf": tf, "bars": [], "health": APP.engine.state.health.as_dict()})
-    w = anillo.window(min(limit, len(anillo)))
+    w = ring.window(min(limit, len(ring)))
     bars = [{"time": int(t) // 1000, "open": float(o), "high": float(h), "low": float(l),
              "close": float(c), "volume": float(v), "is_gap": bool(g)}
             for t, o, h, l, c, v, g in zip(w.ts, w.open, w.high, w.low, w.close, w.volume,
                                            w.is_gap, strict=True)]
     return JSONResponse({
-        # Los tramos se acotan a la MISMA ventana que las velas. Sin esto, Lightweight Charts
-        # estira el eje temporal para abarcar todos los pivotes históricos y comprime las velas
-        # hasta hacerlas ilegibles: el gráfico se vuelve una línea de zigzag sobre nada.
+        # The legs are clipped to the SAME window as the bars. Without this, Lightweight Charts
+        # stretches the time axis to span every historical pivot and squeezes the candles until
+        # they are unreadable: the chart becomes a zigzag line drawn over nothing.
         "tf": tf, "symbol": APP.symbol, "bars": bars,
         "waves": APP.engine.waves(tf, since_ms=int(w.ts[0])),
         "gaps": w.n_gaps, "health": APP.engine.state.health.as_dict(),
@@ -570,7 +577,7 @@ async def history(tf: str = "15m", limit: int = 1500) -> JSONResponse:
 
 @app.websocket("/ws")
 async def ws(socket: WebSocket) -> None:
-    if PUBLICO:
+    if PUBLIC:
         await socket.close(code=1008)
         return
     await socket.accept()
@@ -578,35 +585,36 @@ async def ws(socket: WebSocket) -> None:
     await socket.send_text(json.dumps({"type": "health", **APP.engine.state.health.as_dict()}))
     try:
         while True:
-            await socket.receive_text()      # mantiene viva la conexión
+            await socket.receive_text()      # keeps the connection alive
     except WebSocketDisconnect:
         pass
     finally:
         APP.hub.clients.discard(socket)
 
 
-@app.get("/api/estado")
-async def estado() -> JSONResponse:
-    """Salud del servicio. Responde DESDE EL PRIMER SEGUNDO, también mientras calienta.
+@app.get("/api/status")
+async def status() -> JSONResponse:
+    """Service health. Answers FROM THE VERY FIRST SECOND, warming up included.
 
-    `ok` significa «el proceso vive y sirve». `listo` significa «ya puede trabajar». Separarlos es
-    lo que permite a un despliegue esperar sin confundir un arranque lento con una avería.
+    `ok` means "the process is alive and serving". `ready` means "it can actually do work now".
+    Keeping the two apart is what lets a deployment wait without mistaking a slow start for a
+    breakdown.
     """
     return JSONResponse({
         "ok": True,
-        "listo": APP.listo,
-        "publico": PUBLICO,
-        "calentando": None if APP.listo else {"meses": APP._warm_n, "mes": APP._warm_month},
-        "limites": LIMITES.stats,
-        "modo": APP.engine.state.health.mode.value,
+        "ready": APP.ready,
+        "public": PUBLIC,
+        "warming_up": None if APP.ready else {"months": APP._warm_n, "month": APP._warm_month},
+        "limits": LIMITS.stats,
+        "mode": APP.engine.state.health.mode.value,
     })
 
 
 if WEB.exists():
-    if PUBLICO:
-        # En público, Assay ES la portada. Nadie tiene que saberse una URL.
+    if PUBLIC:
+        # In public mode Assay IS the front page. Nobody should have to know a URL by heart.
         @app.get("/")
-        async def portada():
+        async def front_page():
             from fastapi.responses import FileResponse
             return FileResponse(WEB / "assay.html")
 

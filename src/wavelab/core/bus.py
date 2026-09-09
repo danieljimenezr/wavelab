@@ -1,17 +1,17 @@
-"""Bus de eventos en proceso. Sin Redis, sin Kafka, sin Celery.
+"""In-process event bus. No Redis, no Kafka, no Celery.
 
-Un broker externo rompería «ligera» para un único usuario local, y añadiría un modo de fallo (el
-broker caído) más probable que los que se supone que evita.
+An external broker would break "lightweight" for a single local user, and would add a failure mode
+(the broker being down) more likely than the ones it is supposed to prevent.
 
-El bus transporta ``Event = Bar | AuxEvent`` **desde el día 1**, aunque la capa de noticias sea v2.
-Si transportase solo ``Bar``, una noticia — que no es una vela y no llega en un cierre de vela —
-obligaría a añadir un segundo método al adaptador, y por la regla anti-astronauta eso significaría que
-la costura estaba mal dibujada. Veinte líneas ahora evitan un refactor después.
+The bus carries ``Event = Bar | AuxEvent`` **from day 1**, even though the news layer is v2. If it
+only carried ``Bar``, a news item — which is not a bar and does not arrive on a bar close — would
+force a second method onto the adapter, and by the anti-astronaut rule that would mean the seam was
+drawn in the wrong place. Twenty lines now save a refactor later.
 
-Política de desbordamiento: **descartar lo más viejo y contar**. Un suscriptor lento (la UI, un
-notificador con la red mal) jamás puede bloquear al consumidor del WebSocket: perder velas es
-recuperable con un relleno REST; que Binance nos desconecte por no responder al ping escala hacia un
-baneo de IP de hasta 3 días.
+Overflow policy: **drop the oldest and count it**. A slow subscriber (the UI, a notifier on a bad
+network) can never be allowed to block the WebSocket consumer: losing bars is recoverable with a
+REST backfill; having Binance disconnect us for not answering a ping escalates into an IP ban of up
+to 3 days.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ _CLOSED = object()
 
 
 class Subscription:
-    """Cola propia de un suscriptor. Se consume como iterador asíncrono."""
+    """A subscriber's own queue. Consumed as an async iterator."""
 
     __slots__ = ("_bus", "_dropped", "_q", "name")
 
@@ -39,8 +39,8 @@ class Subscription:
 
     @property
     def dropped(self) -> int:
-        """Eventos descartados por lentitud. Se expone en la insignia de salud de datos:
-        si esto no es cero, la interfaz está mintiendo sobre su frescura."""
+        """Events dropped because the subscriber was too slow. Exposed on the data-health badge:
+        if this is not zero, the interface is lying about how fresh it is."""
         return self._dropped
 
     @property
@@ -52,7 +52,7 @@ class Subscription:
             self._q.put_nowait(event)
         except asyncio.QueueFull:
             try:
-                self._q.get_nowait()      # descarta el más viejo
+                self._q.get_nowait()      # drop the oldest
                 self._dropped += 1
                 self._q.put_nowait(event)
             except (asyncio.QueueEmpty, asyncio.QueueFull):  # pragma: no cover
@@ -70,7 +70,7 @@ class Subscription:
 
 
 class Bus:
-    """Publicación en abanico a suscriptores independientes."""
+    """Fan-out publication to independent subscribers."""
 
     __slots__ = ("_maxsize", "_published", "_subs")
 
@@ -90,7 +90,7 @@ class Bus:
             sub._offer(_CLOSED)
 
     def publish(self, event: Event) -> None:
-        """No bloquea nunca, por diseño. Ver la nota sobre el baneo de IP arriba."""
+        """Never blocks, by design. See the note about the IP ban above."""
         self._published += 1
         for sub in self._subs:
             sub._offer(event)

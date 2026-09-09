@@ -1,17 +1,17 @@
-"""Backtest: reproduce el histórico por el MISMO camino que la ruta viva.
+"""Backtest: replays history down the SAME path as the live route.
 
-No hay ruta vectorizada, y no la habrá. Si backtest y live fuesen dos implementaciones, su
-divergencia reintroduciría lookahead en silencio — y en un proyecto que etiqueta ondas a partir de
-pivotes que repintan, esa divergencia es la forma más probable de que todo falle sin que nadie se
-entere.
+There is no vectorised path, and there never will be. If backtest and live were two separate
+implementations, the divergence between them would silently reintroduce lookahead — and in a project
+that labels waves from repainting pivots, that divergence is the most likely way for the whole thing
+to fail without anybody noticing.
 
-La DECISIÓN se toma con datos pasados (lo garantiza el motor causal). La RESOLUCIÓN usa datos
-futuros, que es legítimo y necesario: saber cómo acabó una operación exige mirar después.
+The DECISION is taken with past data (the causal engine guarantees that). The RESOLUTION uses future
+data, which is both legitimate and necessary: knowing how a trade ended requires looking afterwards.
 
-BRAZO NULO. Cada señal genera una operación gemela con entrada en un instante ALEATORIO cercano,
-mismo stop en R, mismo objetivo en R y misma barrera temporal. El delta emparejado contra ese brazo
-es interpretable muchísimo antes que la tasa de acierto absoluta: responde a "¿aporta algo el
-conteo?" en vez de a "¿sube BTC?", que es lo que mide un backtest sin control.
+NULL ARM. Every signal spawns a twin trade entered at a RANDOM nearby instant, with the same stop in
+R, the same target in R and the same time barrier. The paired delta against that arm becomes
+interpretable far sooner than the absolute hit rate: it answers "does the count add anything?"
+instead of "did BTC go up?", which is what an uncontrolled backtest measures.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ class Signal:
 
     @property
     def net_r(self) -> float:
-        """R neto de comisiones. El bruto es una cifra de folleto."""
+        """R net of fees. The gross figure is a brochure number."""
         return (self.outcome.r - self.cost_r) if self.outcome else 0.0
 
     @property
@@ -68,20 +68,20 @@ class BacktestResult:
         if not res:
             return {"n": 0}
         r = np.array([s.outcome.r - s.cost_r * cost_mult for s in res])
-        nulo = np.array([s.null_outcome.r - s.cost_r * cost_mult
+        null = np.array([s.null_outcome.r - s.cost_r * cost_mult
                          for s in res if s.null_outcome])
         wins = r > 0
-        perdidas = -r[~wins].sum()
+        losses = -r[~wins].sum()
         return {
             "n": len(res),
             "expectancy_r": float(r.mean()),
             "hit_rate": float(wins.mean()),
-            "profit_factor": float(r[wins].sum() / perdidas) if perdidas > 0 else float("inf"),
+            "profit_factor": float(r[wins].sum() / losses) if losses > 0 else float("inf"),
             "r_total": float(r.sum()),
             "r_std": float(r.std()),
             "best": float(r.max()), "worst": float(r.min()),
-            "null_expectancy_r": float(nulo.mean()) if len(nulo) else None,
-            "edge_vs_null": float(r.mean() - nulo.mean()) if len(nulo) else None,
+            "null_expectancy_r": float(null.mean()) if len(null) else None,
+            "edge_vs_null": float(r.mean() - null.mean()) if len(null) else None,
             "barriers": {b: sum(1 for s in res if s.outcome.barrier == b)
                          for b in ("tp", "sl", "vertical")},
         }
@@ -99,7 +99,7 @@ def run_backtest(
     seed: int = 17,
     progress_every: int = 500_000,
 ) -> BacktestResult:
-    """Reproduce y recoge señales. La resolución se hace al final, con las velas posteriores."""
+    """Replay and collect signals. Resolution happens at the end, with the later bars."""
     rng = random.Random(seed)
     tf = BY_NAME[trigger_tf]
     eng = LiveEngine(symbol, list(timeframes), 8192, trigger_tf)
@@ -109,14 +109,14 @@ def run_backtest(
     htf_h: list[float] = []
     htf_l: list[float] = []
     htf_c: list[float] = []
-    ultimo_ts_por_arq: dict[str, int] = {}
+    last_idx_by_archetype: dict[str, int] = {}
 
     for bar in bars_1m:
         res.bars_processed += 1
         if res.bars_processed % progress_every == 0:
-            print(f"  … {res.bars_processed:,} velas, {len(res.signals)} señales", flush=True)
-        cerradas = eng.on_bar_1m(bar)
-        for htf in cerradas:
+            print(f"  … {res.bars_processed:,} bars, {len(res.signals)} signals", flush=True)
+        closed = eng.on_bar_1m(bar)
+        for htf in closed:
             if htf.tf is not tf:
                 continue
             htf_ts.append(htf.open_time_ms)
@@ -127,46 +127,47 @@ def run_backtest(
             for h in d["hypotheses"]:
                 if not h["viable"] or not h["in_zone"] or h["score"] < min_score:
                     if not h["viable"]:
-                        motivo = h["reasons"][0].split(":")[0][:48] if h["reasons"] else "?"
-                        res.rejected[motivo] = res.rejected.get(motivo, 0) + 1
+                        reason = h["reasons"][0].split(":")[0][:48] if h["reasons"] else "?"
+                        res.rejected[reason] = res.rejected.get(reason, 0) + 1
                     continue
-                arq = h["archetype"] or "?"
+                arch = h["archetype"] or "?"
                 idx = len(htf_ts) - 1
-                if idx - ultimo_ts_por_arq.get(arq, -10**9) < cooldown_bars:
-                    continue        # antirrebote: no reentrar en el mismo conteo cada vela
-                ultimo_ts_por_arq[arq] = idx
-                largo = h["direction"] == "LONG"
+                if idx - last_idx_by_archetype.get(arch, -10**9) < cooldown_bars:
+                    continue        # debounce: do not re-enter the same count on every bar
+                last_idx_by_archetype[arch] = idx
+                is_long = h["direction"] == "LONG"
                 res.signals.append(Signal(
-                    ts_ms=htf.open_time_ms, archetype=f"{arq}_{'long' if largo else 'short'}",
-                    direction=Direction.LONG if largo else Direction.SHORT,
+                    ts_ms=htf.open_time_ms, archetype=f"{arch}_{'long' if is_long else 'short'}",
+                    direction=Direction.LONG if is_long else Direction.SHORT,
                     entry=htf.close, stop=h["stop"], target=h["targets"][1],
                     rr=h["rr_t2"], score=h["score"], cost_r=h["cost_r"],
                     size_factor=h["size_factor"], invalidation=h["invalidation_price"],
                 ))
 
-    # ---------------------------------------------------------------- resolución
+    # ---------------------------------------------------------------- resolution
     H, L, C = np.array(htf_h), np.array(htf_l), np.array(htf_c)
     pos = {t: i for i, t in enumerate(htf_ts)}
-    ambiguas = 0
+    ambiguous_n = 0
     for s in res.signals:
         i = pos.get(s.ts_ms)
         if i is None or i + 1 >= len(H):
             continue
-        largo = s.direction is Direction.LONG
+        is_long = s.direction is Direction.LONG
         s.outcome = resolve_triple_barrier(
             s.entry, s.stop, s.target, H[i + 1:], L[i + 1:], C[i + 1:],
-            max_bars=max_bars_hold, long=largo)
-        ambiguas += int(s.outcome.ambiguous)
+            max_bars=max_bars_hold, long=is_long)
+        ambiguous_n += int(s.outcome.ambiguous)
 
-        # Brazo nulo: misma geometría en R, entrada desplazada al azar. Aísla "¿aporta el conteo?"
-        # de "¿subió BTC en ese periodo?", que es lo que mide un backtest sin control.
+        # Null arm: same geometry in R, entry shifted at random. Isolates "does the count add
+        # anything?" from "did BTC go up over that stretch?", which is what an uncontrolled
+        # backtest measures.
         j = min(len(H) - 2, i + rng.randint(1, 20))
-        e = float(C[j]); riesgo = abs(s.entry - s.stop); rr = abs(s.target - s.entry) / riesgo
-        st = e - riesgo if largo else e + riesgo
-        tg = e + riesgo * rr if largo else e - riesgo * rr
+        e = float(C[j]); risk = abs(s.entry - s.stop); rr = abs(s.target - s.entry) / risk
+        st = e - risk if is_long else e + risk
+        tg = e + risk * rr if is_long else e - risk * rr
         s.null_outcome = resolve_triple_barrier(
-            e, st, tg, H[j + 1:], L[j + 1:], C[j + 1:], max_bars=max_bars_hold, long=largo)
+            e, st, tg, H[j + 1:], L[j + 1:], C[j + 1:], max_bars=max_bars_hold, long=is_long)
 
     n = sum(1 for s in res.signals if s.outcome)
-    res.ambiguity_rate = ambiguas / n if n else 0.0
+    res.ambiguity_rate = ambiguous_n / n if n else 0.0
     return res

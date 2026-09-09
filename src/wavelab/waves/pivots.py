@@ -1,28 +1,27 @@
-"""Detección causal de pivotes: ATR-ZigZag con umbral CONGELADO.
+"""Causal pivot detection: ATR-ZigZag with a LATCHED threshold.
 
-LA MECÁNICA QUE CASI TODO EL MUNDO SE SALTA. Un pivote se LOCALIZA en la vela τ donde ocurrió el
-extremo, pero solo se CONFIRMA en ``c(τ) = min{t > τ : |E_τ − precio_t| >= thr}``. Hasta entonces un
-nuevo máximo simplemente lo desplaza: el pivote todavía no existe. Son dos marcas de tiempo, e
-``idx`` es dónde lo DIBUJAS mientras ``confirmed_idx`` es la primera vela en que estaba PERMITIDO
-saberlo.
+THE MECHANIC ALMOST EVERYBODY SKIPS. A pivot is LOCATED at the bar τ where the extreme happened, but
+it is only CONFIRMED at ``c(τ) = min{t > τ : |E_τ − price_t| >= thr}``. Until then a new high simply
+moves it along: the pivot does not exist yet. These are two different timestamps, and ``idx`` is
+where you DRAW it while ``confirmed_idx`` is the first bar on which you were ALLOWED to know it.
 
-El retardo entre ambas es un tiempo de primer paso a una barrera: mediana de pocas velas, cola
-derecha muy pesada, cientos de velas en una tendencia fuerte. **Nunca se puede asumir un retardo
-fijo**, y por eso no basta con «desplazar N barras».
+The lag between the two is a first-passage time to a barrier: a median of a few bars, a very heavy
+right tail, hundreds of bars in a strong trend. **You can never assume a fixed lag**, which is why
+"just shift it N bars" does not cut it.
 
-EL UMBRAL SE CONGELA EN LA VELA DEL EXTREMO. Esto es lo que hace la confirmación monótona, y de esa
-monotonía cuelgan cuatro afirmaciones arquitectónicas: el histórico de conteos es genuinamente
-append-only, la instantánea «como estaba en la vela t» sale gratis, el arnés de replay es O(n) en vez
-de O(n²), y —lo importante— un conteo que el usuario ya vio no puede desaparecer sin evento de
-invalidación.
+THE THRESHOLD IS FROZEN AT THE EXTREME BAR — latched there, never recomputed. That is what makes
+confirmation monotone, and four architectural claims hang off that monotonicity: the count history
+is genuinely append-only, the "as it stood at bar t" snapshot comes for free, the replay harness is
+O(n) instead of O(n²), and — the one that matters — a count the user has already seen cannot
+disappear without an invalidation event.
 
-Si el umbral se recalculase con el ATR de hoy, un pivote confirmado ayer con volatilidad baja podría
-dejar de cumplir la desigualdad mañana con volatilidad expandida. Nada lanzaría. El gráfico
-simplemente cambiaría de opinión sobre el pasado, que es exactamente la deshonestidad que este
-diseño existe para eliminar.
+If the threshold were recomputed with today's ATR, a pivot confirmed yesterday under low volatility
+could stop satisfying the inequality tomorrow under expanded volatility. Nothing would fire. The
+chart would simply change its mind about the past, which is exactly the dishonesty this design
+exists to eliminate.
 
-Coste medido: 1,19 ms sobre 5.000 velas en Python puro (M5, ver docs/BENCHMARKS.md). No hace falta
-numba, y eso está medido, no supuesto.
+Measured cost: 1.19 ms over 5,000 bars in pure Python (M5, see docs/BENCHMARKS.md). numba is not
+needed, and that is measured, not assumed.
 """
 
 from __future__ import annotations
@@ -38,7 +37,7 @@ __all__ = ["WilderATR", "ZigZag", "ZigZagConfig"]
 
 
 class WilderATR:
-    """ATR de Wilder incremental. Estrictamente causal: solo ve velas cerradas ya entregadas."""
+    """Incremental Wilder ATR. Strictly causal: it only ever sees closed bars already delivered."""
 
     __slots__ = ("_atr", "_n", "_prev_close", "_sum", "period")
 
@@ -58,11 +57,11 @@ class WilderATR:
         return self._atr is not None
 
     def update(self, high: float, low: float, close: float) -> float | None:
-        # La PRIMERA vela no tiene cierre anterior, así que su "rango verdadero" no es verdadero:
-        # es solo high-low. TA-Lib la descarta y empieza a acumular en la segunda, de modo que el
-        # primer ATR(14) sale en el índice 14 y no en el 13. Incluirla desviaba nuestro ATR un ~2%
-        # de forma permanente (la semilla arrastra), y con él el umbral del ZigZag y por tanto qué
-        # pivotes se confirman. Lo cazó el test contra TA-Lib como oráculo independiente.
+        # The FIRST bar has no previous close, so its "true range" is not true: it is just
+        # high-low. TA-Lib drops it and starts accumulating on the second bar, so the first ATR(14)
+        # lands at index 14 and not at 13. Including it skewed our ATR by ~2% permanently (the seed
+        # carries forward), and with it the ZigZag threshold and therefore which pivots get
+        # confirmed. Caught by the test that uses TA-Lib as an independent oracle.
         if self._prev_close is None:
             self._prev_close = close
             return None
@@ -72,7 +71,7 @@ class WilderATR:
             self._n += 1
             self._sum += tr
             if self._n >= self.period:
-                self._atr = self._sum / self.period   # primera media simple, como Wilder
+                self._atr = self._sum / self.period   # first value is a plain mean, as Wilder does
         else:
             self._atr = (self._atr * (self.period - 1) + tr) / self.period
         return self._atr
@@ -83,19 +82,19 @@ class ZigZagConfig:
     k_atr: float = 1.5
     min_pct: float = 0.005
     atr_period: int = 14
-    #: Confirmar por CIERRE y no por mecha. En BTC la caza de liquidaciones es endémica y usar
-    #: mechas invalida una fracción enorme de estructuras por lo demás válidas. Expuesto porque
-    #: es una decisión, no una constante universal — e idéntico en la ruta viva y en el replay.
+    #: Confirm on the CLOSE rather than on the wick. Liquidation hunts are endemic in BTC and using
+    #: wicks invalidates a huge fraction of otherwise valid structures. Exposed because it is a
+    #: decision, not a universal constant — and identical on the live path and in replay.
     on_close: bool = False
 
 
 class ZigZag:
-    """Detector incremental. Alimenta un ``PivotStore`` y expone el pivote provisional.
+    """Incremental detector. Feeds a ``PivotStore`` and exposes the provisional pivot.
 
-    Se alimenta vela a vela y NUNCA se llama sobre el array completo. Llamarlo una vez sobre todo
-    el histórico y luego trocear el resultado es el bug que infla cada entrada en aproximadamente
-    el umbral entero (1,2-2,5 ATR), que es más grande que cualquier ventaja real, y produce un
-    backtest espléndido que opera fatal.
+    It is fed bar by bar and is NEVER called on the whole array. Calling it once over the entire
+    history and then slicing the result is the bug that inflates every entry by roughly the whole
+    threshold (1.2-2.5 ATR), which is larger than any real edge, and produces a magnificent backtest
+    that trades appallingly.
     """
 
     __slots__ = (
@@ -116,73 +115,74 @@ class ZigZag:
         self.store = store or PivotStore()
         self._atr = WilderATR(self.cfg.atr_period)
         self._i = -1
-        self._up: bool | None = None      # None = aún sin dirección
+        self._up: bool | None = None      # None = no direction yet
         self._ext_i = 0
         self._ext_ts = 0
         self._ext_px = 0.0
         self._ext_thr = 0.0
         self._confirmed_n = 0
 
-    # ------------------------------------------------------------------ interno
+    # ------------------------------------------------------------------ internals
 
     def _thr(self, close: float) -> float:
-        """Umbral absoluto y escalado por volatilidad.
+        """Absolute, volatility-scaled threshold.
 
-        Que sea absoluto es lo que hace `k` adimensional: el mismo k=1.5 significa lo mismo en BTC,
-        en EURUSD y en AAPL. Ahí está el requisito multi-activo hecho real en vez de aspiracional.
+        Being absolute is what makes `k` dimensionless: the same k=1.5 means the same thing on BTC,
+        on EURUSD and on AAPL. That is the multi-asset requirement made real instead of
+        aspirational.
         """
         atr = self._atr.value or 0.0
         return max(self.cfg.k_atr * atr, self.cfg.min_pct * close)
 
     def _set_extreme(self, i: int, ts: int, px: float, close: float) -> None:
         self._ext_i, self._ext_ts, self._ext_px = i, ts, px
-        # CONGELADO aquí. No se vuelve a tocar hasta que haya un extremo nuevo.
+        # LATCHED here. Never touched again until there is a new extreme.
         self._ext_thr = self._thr(close)
 
-    # ------------------------------------------------------------------ público
+    # ------------------------------------------------------------------ public
 
     def update(self, ts_ms: int, high: float, low: float, close: float) -> Pivot | None:
-        """Procesa una vela CERRADA. Devuelve el pivote recién confirmado, si lo hay."""
+        """Process a CLOSED bar. Returns the pivot just confirmed, if there is one."""
         self._i += 1
         self._atr.update(high, low, close)
         if not self._atr.ready:
             return None
 
         i, ts = self._i, ts_ms
-        arriba_px = close if self.cfg.on_close else high
-        abajo_px = close if self.cfg.on_close else low
+        up_px = close if self.cfg.on_close else high
+        down_px = close if self.cfg.on_close else low
 
         if self._up is None:
             self._up = True
-            self._set_extreme(i, ts, arriba_px, close)
+            self._set_extreme(i, ts, up_px, close)
             self._publish_provisional()
             return None
 
-        confirmado: Pivot | None = None
+        confirmed: Pivot | None = None
 
         if self._up:
-            if arriba_px > self._ext_px:
-                self._set_extreme(i, ts, arriba_px, close)
-            elif self._ext_px - abajo_px >= self._ext_thr:
-                confirmado = Pivot(self._ext_i, self._ext_ts, self._ext_px, PivotKind.HIGH,
-                                   self._ext_thr).confirmed_at(i, ts)
-                self.store.append_confirmed(confirmado)
+            if up_px > self._ext_px:
+                self._set_extreme(i, ts, up_px, close)
+            elif self._ext_px - down_px >= self._ext_thr:
+                confirmed = Pivot(self._ext_i, self._ext_ts, self._ext_px, PivotKind.HIGH,
+                                  self._ext_thr).confirmed_at(i, ts)
+                self.store.append_confirmed(confirmed)
                 self._confirmed_n += 1
                 self._up = False
-                self._set_extreme(i, ts, abajo_px, close)
+                self._set_extreme(i, ts, down_px, close)
         else:
-            if abajo_px < self._ext_px:
-                self._set_extreme(i, ts, abajo_px, close)
-            elif arriba_px - self._ext_px >= self._ext_thr:
-                confirmado = Pivot(self._ext_i, self._ext_ts, self._ext_px, PivotKind.LOW,
-                                   self._ext_thr).confirmed_at(i, ts)
-                self.store.append_confirmed(confirmado)
+            if down_px < self._ext_px:
+                self._set_extreme(i, ts, down_px, close)
+            elif up_px - self._ext_px >= self._ext_thr:
+                confirmed = Pivot(self._ext_i, self._ext_ts, self._ext_px, PivotKind.LOW,
+                                  self._ext_thr).confirmed_at(i, ts)
+                self.store.append_confirmed(confirmed)
                 self._confirmed_n += 1
                 self._up = True
-                self._set_extreme(i, ts, arriba_px, close)
+                self._set_extreme(i, ts, up_px, close)
 
         self._publish_provisional()
-        return confirmado
+        return confirmed
 
     def _publish_provisional(self) -> None:
         if self._up is None:
@@ -192,7 +192,7 @@ class ZigZag:
             PivotKind.HIGH if self._up else PivotKind.LOW, self._ext_thr,
         ))
 
-    # ------------------------------------------------------------------ lectura
+    # ------------------------------------------------------------------ reads
 
     @property
     def n_confirmed(self) -> int:
@@ -203,12 +203,12 @@ class ZigZag:
         return self._atr.value
 
     def confirm_price(self) -> float | None:
-        """El precio al que el pivote provisional quedaría confirmado.
+        """The price at which the provisional pivot would become confirmed.
 
-        ★ Esta es la línea gris del gráfico: «el conteo confirma por debajo de 108.240». Casi nadie
-        la implementa, y convierte la debilidad de repintado de Elliott en la línea más accionable
-        de la pantalla: el usuario deja de ver «esto podría ser el techo» y pasa a ver el precio
-        exacto en que deja de ser un quizá.
+        ★ This is the grey line on the chart: "the count confirms below 108,240". Almost nobody
+        implements it, and it turns Elliott's repainting weakness into the most actionable line on
+        the screen: the user stops seeing "this might be the top" and starts seeing the exact price
+        at which it stops being a maybe.
         """
         if self._up is None:
             return None
@@ -216,16 +216,15 @@ class ZigZag:
 
     def legs_as_of(self, now_ms: int, include_provisional: bool = True,
                    since_ms: int | None = None) -> list[dict]:
-        """Tramos para dibujar. Los confirmados van SÓLIDOS; el provisional, DISCONTINUO.
+        """Legs to draw. Confirmed ones go SOLID; the provisional one, DASHED.
 
-        La separación visual no es estética: el tramo provisional cambia legítimamente según se
-        mueve el precio, y presentarlo igual que uno confirmado es afirmar una certeza que no se
-        tiene.
+        The visual separation is not cosmetic: the provisional leg legitimately changes as price
+        moves, and presenting it exactly like a confirmed one asserts a certainty nobody has.
         """
         pivs = self.store.as_of(now_ms)
         if since_ms is not None:
-            # Un tramo extra hacia atrás: sin él, el primer tramo visible quedaría suelto,
-            # empezando en la nada en el borde izquierdo del gráfico.
+            # One extra leg backwards: without it the first visible leg would dangle, starting
+            # from nowhere at the left edge of the chart.
             i = next((j for j, p in enumerate(pivs) if p.ts_ms >= since_ms), len(pivs))
             pivs = pivs[max(0, i - 1):]
         out = [{"ts": p.ts_ms, "price": p.price, "kind": int(p.kind),
@@ -240,10 +239,10 @@ class ZigZag:
 
 def detect_batch(ts: np.ndarray, high: np.ndarray, low: np.ndarray, close: np.ndarray,
                  cfg: ZigZagConfig | None = None) -> ZigZag:
-    """Reproduce un array vela a vela. NO es una ruta vectorizada: es el mismo bucle.
+    """Replay an array bar by bar. This is NOT a vectorised path: it is the very same loop.
 
-    Existe para el calentamiento y los tests, no para ir más rápido. Si hubiese una versión
-    vectorizada distinta, su divergencia con la ruta viva reintroduciría lookahead en silencio.
+    It exists for warm-up and for the tests, not to go faster. If there were a separate vectorised
+    version, its divergence from the live path would silently reintroduce lookahead.
     """
     z = ZigZag(cfg)
     for i in range(ts.size):

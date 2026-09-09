@@ -1,23 +1,24 @@
-"""Almacén de velas: Parquet particionado por mes, con ingesta IDEMPOTENTE.
+"""Bar store: Parquet partitioned by month, with IDEMPOTENT ingestion.
 
-Por qué la idempotencia no es opcional. Tres caminos escriben las mismas velas:
-el archivo mensual al hidratar, el relleno REST tras cada reconexión, y el WebSocket en vivo. El
-WebSocket de Binance se desconecta a las 24 h **por diseño**, y en cada reconexión hay que re-ejecutar
-el relleno REST sobre minutos que ya están guardados. Sin una clave declarada, un simple append
-duplica filas — y una vela de 1m duplicada **dobla el volumen resampleado, distorsiona el ATR y
-fabrica pivotes**. Todo eso renderiza sin ningún error.
+Why idempotency is not optional. Three paths write the same bars: the monthly archive during
+hydration, the REST backfill after every reconnect, and the live WebSocket. Binance's WebSocket
+disconnects after 24 h **by design**, and on each reconnect the REST backfill has to run again over
+minutes that are already stored. Without a declared key, a plain append duplicates rows — and a
+duplicated 1m bar **doubles the resampled volume, distorts the ATR and manufactures pivots**. All
+of that renders without a single error.
 
-Por qué Parquet y no DuckDB como almacén vivo: DuckDB es de un solo escritor y sus llamadas son C
-bloqueante. Una escritura por lotes o un CHECKPOINT ejecutados en el hilo del bucle de eventos paran
-el consumidor del WebSocket; pasado el plazo de 20 s del pong, Binance desconecta, y las reconexiones
-en cascada escalan hacia un 418 de hasta 3 días. DuckDB se abre POR TRABAJO para análisis offline.
+Why Parquet and not DuckDB as the live store: DuckDB is single-writer and its calls are blocking C.
+A batch write or a CHECKPOINT running on the event loop's thread stalls the WebSocket consumer;
+past the 20 s pong deadline Binance disconnects, and the cascading reconnects escalate into a 418
+lasting up to 3 days. DuckDB is opened PER JOB for offline analysis.
 
-Por qué se guarda solo 1m: los conteos multi-timeframe tienen que derivar de una única serie fuente
-idéntica, o la lógica de acuerdo entre timeframes mide ruido de alineación en vez de estructura.
+Why only 1m is stored: multi-timeframe counts have to derive from one identical source series, or
+the cross-timeframe agreement logic measures alignment noise instead of structure.
 """
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,35 +35,35 @@ _COLUMNS = ["open", "high", "low", "close", "volume",
 
 @dataclass(frozen=True, slots=True)
 class IngestResult:
-    """Qué pasó al ingestar. `duplicates` se cuenta y se registra: si crece sin parar, algún
-    camino de escritura está mal y hay que verlo antes de que envenene el ATR."""
+    """What happened during an ingest. `duplicates` is counted and logged: if it grows without
+    stopping, some write path is wrong and it needs looking at before it poisons the ATR."""
 
     written: int
     duplicates: int
     months_touched: tuple[str, ...]
 
     def __str__(self) -> str:
-        return (f"{self.written:,} velas nuevas, {self.duplicates:,} duplicadas ignoradas, "
-                f"{len(self.months_touched)} mes(es)")
+        return (f"{self.written:,} new bars, {self.duplicates:,} duplicates ignored, "
+                f"{len(self.months_touched)} month(s)")
 
 
 class BarStore:
-    """Velas de 1m en ``<root>/<symbol>/<YYYY-MM>.parquet``.
+    """1m bars under ``<root>/<symbol>/<YYYY-MM>.parquet``.
 
-    Un fichero por mes: una hidratación interrumpida deja meses completos y meses ausentes, nunca un
-    fichero a medio escribir; y reprocesar un mes concreto no reescribe nueve años.
+    One file per month: an interrupted hydration leaves whole months and missing months, never a
+    half-written file; and reprocessing one particular month does not rewrite nine years.
     """
 
     def __init__(self, root: Path | str, tf: Timeframe = TF_1M) -> None:
         if tf is not TF_1M:
             raise ValueError(
-                "BarStore solo almacena 1m. Los demás timeframes se resamplean en local desde esta "
-                "única serie fuente; pedirlos a la API por separado desalinea las fronteras."
+                "BarStore only stores 1m. Every other timeframe is resampled locally from this one "
+                "source series; asking the API for them separately misaligns the boundaries."
             )
         self.root = Path(root)
         self.tf = tf
 
-    # ------------------------------------------------------------------ rutas
+    # ------------------------------------------------------------------ paths
 
     def _dir(self, symbol: str) -> Path:
         return self.root / symbol.upper()
@@ -74,9 +75,9 @@ class BarStore:
         d = self._dir(symbol)
         return sorted(p.stem for p in d.glob("*.parquet")) if d.exists() else []
 
-    #: pandas indexa en nanosegundos, así que su rango acaba en 2262. Un centinela como 10**14 ms
-    #: (año 5138) revienta con OutOfBoundsDatetime en vez de significar "todo". Se acota aquí, en
-    #: la frontera, para que ningún llamante tenga que conocer el detalle.
+    #: pandas indexes in nanoseconds, so its range ends in 2262. A sentinel like 10**14 ms
+    #: (the year 5138) blows up with OutOfBoundsDatetime instead of meaning "everything". It is
+    #: clamped here, at the boundary, so that no caller has to know the detail.
     _MAX_MS = 4_102_444_800_000   # 2100-01-01
     _MIN_MS = 1_262_304_000_000   # 2010-01-01
 
@@ -88,15 +89,15 @@ class BarStore:
     def _month_keys(index: np.ndarray) -> np.ndarray:
         return pd.to_datetime(index, unit="ms", utc=True).strftime("%Y-%m").to_numpy()
 
-    # ------------------------------------------------------------------ escritura
+    # ------------------------------------------------------------------ writing
 
     def ingest(self, symbol: str, df: pd.DataFrame) -> IngestResult:
-        """Escribe velas nuevas y **descarta silenciosamente las ya presentes**.
+        """Writes new bars and **silently drops the ones already present**.
 
-        Equivalente a ``INSERT ... ON CONFLICT DO NOTHING`` con clave
-        ``(symbol, timeframe, open_time_ms)``. Parquet no tiene claves primarias, así que la
-        restricción se aplica aquí con un anti-join — y por eso este es el ÚNICO camino de escritura
-        permitido al almacén.
+        Equivalent to ``INSERT ... ON CONFLICT DO NOTHING`` keyed on
+        ``(symbol, timeframe, open_time_ms)``. Parquet has no primary keys, so the constraint is
+        enforced here with an anti-join — and that is why this is the ONLY write path into the
+        store that is allowed.
         """
         if df.empty:
             return IngestResult(0, 0, ())
@@ -106,7 +107,7 @@ class BarStore:
 
         bad = df.index.to_numpy() % self.tf.ms
         if (bad != 0).any():
-            raise ValueError("ingest: hay open_time_ms fuera de la rejilla de 1m")
+            raise ValueError("ingest: there are open_time_ms values off the 1m grid")
 
         self._dir(symbol).mkdir(parents=True, exist_ok=True)
         written = dupes = 0
@@ -116,33 +117,42 @@ class BarStore:
             path = self._path(symbol, str(key))
             if path.exists():
                 existing = pd.read_parquet(path)
-                nuevas = chunk[~chunk.index.isin(existing.index)]
-                dupes += len(chunk) - len(nuevas)
-                if nuevas.empty:
+                fresh = chunk[~chunk.index.isin(existing.index)]
+                dupes += len(chunk) - len(fresh)
+                if fresh.empty:
                     continue
-                merged = pd.concat([existing, nuevas]).sort_index()
+                merged = pd.concat([existing, fresh]).sort_index()
             else:
-                nuevas, merged = chunk, chunk
-            # Escritura atómica: un fichero .tmp renombrado. Un Ctrl-C a mitad no deja un Parquet
-            # corrupto que luego lea como si fuese válido.
-            tmp = path.with_suffix(".parquet.tmp")
-            merged.to_parquet(tmp, engine="pyarrow", compression="zstd", index=True)
-            tmp.replace(path)
-            written += len(nuevas)
+                fresh, merged = chunk, chunk
+            # Atomic write: a .tmp file, then a rename. A Ctrl-C halfway through does not leave a
+            # corrupt Parquet behind that would later read as if it were valid.
+            # The temporary name carries the PID. A FIXED name is not enough: two processes
+            # pointed at the same data directory — a second server started by hand next to the
+            # one already running is all it takes — write into the SAME .tmp and then rename it,
+            # and what lands in place is half of one file and half of the other. Observed, not
+            # theoretical. This does not make concurrent writers correct (the read-merge-write
+            # cycle still loses the other's rows); it only stops them corrupting the store.
+            tmp = path.with_suffix(f".parquet.{os.getpid()}.tmp")
+            try:
+                merged.to_parquet(tmp, engine="pyarrow", compression="zstd", index=True)
+                tmp.replace(path)
+            finally:
+                tmp.unlink(missing_ok=True)
+            written += len(fresh)
             touched.append(str(key))
 
         return IngestResult(written, dupes, tuple(sorted(set(touched))))
 
-    # ------------------------------------------------------------------ lectura
+    # ------------------------------------------------------------------ reading
 
     def read(
         self, symbol: str, start_ms: int, end_ms: int, *, fill_grid: bool = True
     ) -> pd.DataFrame:
-        """Lee un rango. Con ``fill_grid`` reindexa a la rejilla UTC de minutos COMPLETA.
+        """Reads a range. With ``fill_grid`` it reindexes onto the COMPLETE UTC minute grid.
 
-        Reindexar es lo que convierte un hueco invisible en un hueco explícito: sin esto, veinte
-        filas consecutivas del DataFrame pueden abarcar tres horas de reloj y cualquier ventana de
-        N velas mentiría sobre qué periodo cubre.
+        Reindexing is what turns an invisible gap into an explicit one: without it, twenty
+        consecutive DataFrame rows can span three hours of wall clock and any window of N bars
+        would be lying about which period it covers.
         """
         start_ms, end_ms = self._clamp(start_ms), self._clamp(end_ms)
         if end_ms < start_ms:
@@ -168,14 +178,14 @@ class BarStore:
         return out
 
     def iter_months(self, symbol: str, start_ms: int = 0, end_ms: int | None = None):
-        """Transmite el histórico MES A MES, sin cargarlo entero.
+        """Streams the history MONTH BY MONTH, without loading all of it.
 
-        Nueve años de 1m son 4,76 M de filas: leídas de golpe son ~340 MB de DataFrame más el
-        coste de concatenar 110 ficheros Parquet, y eso mata al servicio contra su tope de 768 MB
-        antes de que sirva una sola petición. Mes a mes, el pico queda en ~44.000 filas.
+        Nine years of 1m data is 4.76M rows: read in one go that is ~340 MB of DataFrame plus the
+        cost of concatenating 110 Parquet files, and that kills the service against its 768 MB cap
+        before it serves a single request. Month by month, the peak stays around 44,000 rows.
 
-        Se paginan los FICHEROS, que es la unidad natural del almacén: cada uno es un mes completo
-        y ya está ordenado, así que no hace falta ni ordenar ni recortar en el caso general.
+        It is the FILES that are paginated, which is the store's natural unit: each one is a whole
+        month and is already sorted, so in the general case there is nothing to sort or trim.
         """
         end_ms = self._clamp(end_ms if end_ms is not None else self._MAX_MS)
         start_ms = self._clamp(start_ms)
@@ -192,7 +202,7 @@ class BarStore:
                 yield key, df.sort_index()
 
     def coverage(self, symbol: str, start_ms: int, end_ms: int) -> tuple[int, int, float]:
-        """(presentes, esperadas, fracción). La insignia de salud de datos de la interfaz."""
+        """(present, expected, fraction). The interface's data-health badge."""
         df = self.read(symbol, start_ms, end_ms, fill_grid=True)
         if df.empty:
             return 0, max(0, (end_ms - start_ms) // self.tf.ms + 1), 0.0

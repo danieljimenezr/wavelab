@@ -1,7 +1,7 @@
-"""Los tipos que definen las costuras del sistema.
+"""The types that define the seams of the system.
 
-Nada de lógica aquí: solo los contratos. Si un tipo de este módulo necesita cambiar para añadir una
-funcionalidad prevista (otro activo, otra fuente de señal, noticias), la costura estaba mal dibujada.
+No logic here: only the contracts. If a type in this module has to change in order to add a feature
+that was always foreseen (another asset, another signal source, news), the seam was drawn wrong.
 """
 
 from __future__ import annotations
@@ -33,16 +33,16 @@ __all__ = [
 
 
 # --------------------------------------------------------------------------------------
-# Transporte
+# Transport
 # --------------------------------------------------------------------------------------
 
 @dataclass(frozen=True, slots=True)
 class Bar:
-    """Una vela. Inmutable, y con el contrato de `close_time` aseverado en construcción.
+    """A bar. Immutable, with the `close_time` contract asserted at construction.
 
-    ``n_source_bars`` e ``is_gap`` viajan CON la vela, no en una estructura paralela: una vela de 1h
-    construida con 43 minutos tiene que ser reconocible como tal en cualquier punto del sistema, y
-    una máscara aparte se pierde en el primer slice.
+    ``n_source_bars`` and ``is_gap`` travel WITH the bar, not in a parallel structure: a 1h bar
+    built out of 43 minutes has to stay recognisable as such at every point in the system, and a
+    separate mask is lost on the first slice.
     """
 
     symbol: str
@@ -62,13 +62,13 @@ class Bar:
     is_gap: bool = False
 
     def __post_init__(self) -> None:
-        # Barato (una comparación de enteros) y atrapa el error más caro del proyecto:
-        # un adaptador que invente su propio convenio de close_time.
+        # Cheap (one integer comparison) and it catches the costliest mistake in the project:
+        # an adapter that invents its own close_time convention.
         if self.open_time_ms % self.tf.ms != 0:
             raise ValueError(
-                f"Bar {self.symbol} {self.tf}: open_time_ms={self.open_time_ms} no cae en la "
-                f"rejilla UTC de {self.tf} (resto {self.open_time_ms % self.tf.ms}). "
-                "El adaptador debe alinear a la rejilla, no redondear."
+                f"Bar {self.symbol} {self.tf}: open_time_ms={self.open_time_ms} does not land on "
+                f"the {self.tf} UTC grid (remainder {self.open_time_ms % self.tf.ms}). "
+                "The adapter must align to the grid, not round."
             )
 
     @property
@@ -77,7 +77,7 @@ class Bar:
 
     @property
     def coverage(self) -> float:
-        """Fracción de velas de 1m realmente presentes. 1.0 = completa."""
+        """Fraction of the 1m bars actually present. 1.0 = complete."""
         exp = self.tf.expected_source_bars
         return 1.0 if exp <= 1 else self.n_source_bars / exp
 
@@ -88,12 +88,12 @@ class Bar:
 
 @dataclass(frozen=True, slots=True)
 class AuxEvent:
-    """Cualquier cosa que no sea una vela: funding, liquidación, noticia, evento macro.
+    """Anything that is not a bar: funding, liquidation, news item, macro event.
 
-    Existe desde el día 1 aunque la capa de noticias sea v2. Las dos marcas de tiempo separadas son
-    el motivo: ``ts_event_ms`` (cuándo ocurrió) y ``ts_ingest_ms`` (cuándo nos enteramos). Esa
-    distinción NO se puede reconstruir a posteriori, así que o se registra desde el principio o el
-    histórico de noticias nace inservible para calibrar latencia.
+    It exists from day 1 even though the news layer is v2. The two separate timestamps are the
+    reason: ``ts_event_ms`` (when it happened) and ``ts_ingest_ms`` (when we found out). That
+    distinction CANNOT be reconstructed after the fact, so either it is recorded from the start or
+    the news history is born useless for calibrating latency.
     """
 
     ts_event_ms: int
@@ -110,21 +110,21 @@ Event = Bar | AuxEvent
 
 
 # --------------------------------------------------------------------------------------
-# Enumeraciones
+# Enumerations
 # --------------------------------------------------------------------------------------
 
 class SourceKind(StrEnum):
-    """De dónde viene una señal. El tope por tipo se configura y se aplica al fusionar,
-    de modo que activar noticias en v2 es una línea de config y no un refactor."""
-    STRUCTURE = "structure"      # Elliott, ruptura de estructura, niveles
+    """Where a signal comes from. The per-kind cap is configured and applied at merge time,
+    so switching news on in v2 is one line of config and not a refactor."""
+    STRUCTURE = "structure"      # Elliott, break of structure, levels
     TREND = "trend"
     MOMENTUM = "momentum"
     VOLATILITY = "volatility"
-    FLOW = "flow"                # volumen, CVD, VWAP
-    DERIVATIVES = "derivatives"  # funding, OI, ratios (contexto cross-instrumento en spot)
+    FLOW = "flow"                # volume, CVD, VWAP
+    DERIVATIVES = "derivatives"  # funding, OI, ratios (cross-instrument context on spot)
     ONCHAIN = "onchain"
     SENTIMENT = "sentiment"
-    NEWS = "news"                # tope 0.0 en v1; se sube a 0.25 en v2 cambiando config
+    NEWS = "news"                # capped at 0.0 in v1; raised to 0.25 in v2 by editing config
 
 
 class Direction(IntEnum):
@@ -138,11 +138,11 @@ class Direction(IntEnum):
 
 
 class Verdict(StrEnum):
-    """Tres estados, nunca un booleano.
+    """Three states, never a boolean.
 
-    NO_TRADE es el caso COMÚN y muestra siempre la aritmética del rechazo.
-    WATCH cubre dos situaciones distintas que el usuario debe poder diferenciar: hay estructura pero
-    el precio no está en zona, o el conteo todavía es tentativo.
+    NO_TRADE is the COMMON case and always shows the arithmetic behind the rejection.
+    WATCH covers two distinct situations the user has to be able to tell apart: there is structure
+    but price is not in the zone, or the count is still tentative.
     """
     NO_TRADE = "no_trade"
     WATCH = "watch"
@@ -150,15 +150,15 @@ class Verdict(StrEnum):
 
 
 class MaturityLevel(IntEnum):
-    """Cuánta evidencia respalda lo que se está mostrando. Se calcula por celda, no global."""
-    PRIOR = 0             # tabla escrita a mano; ninguna probabilidad en pantalla
-    HISTORICAL = 1        # walk-forward purgado sobre 9 años; contaminado por selección
+    """How much evidence backs what is being shown. Computed per cell, not globally."""
+    PRIOR = 0             # hand-written table; no probability on screen
+    HISTORICAL = 1        # purged walk-forward over 9 years; contaminated by selection
     HISTORICAL_RIGOR = 2  # CPCV, SPA, Deflated Sharpe, PBO
-    FORWARD = 3           # evidencia no contaminada acumulada en vivo
+    FORWARD = 3           # uncontaminated evidence accumulated live
 
 
 # --------------------------------------------------------------------------------------
-# Estructura
+# Structure
 # --------------------------------------------------------------------------------------
 
 class PivotKind(IntEnum):
@@ -168,19 +168,20 @@ class PivotKind(IntEnum):
 
 @dataclass(frozen=True, slots=True)
 class Pivot:
-    """Un extremo del ZigZag, con sus DOS marcas de tiempo separadas.
+    """A ZigZag extreme, with its TWO separate timestamps.
 
-    ``idx``/``ts_ms`` es dónde se DIBUJA (la vela del extremo).
-    ``confirmed_idx``/``confirmed_ts_ms`` es la primera vela en que estaba PERMITIDO saberlo.
+    ``idx``/``ts_ms`` is where it is DRAWN (the bar of the extreme).
+    ``confirmed_idx``/``confirmed_ts_ms`` is the first bar on which we were ALLOWED to know it.
 
-    Confundirlas es la clase de bug entera. El retardo entre ambas es un tiempo de primer paso a una
-    barrera: mediana de pocas velas, cola derecha muy pesada, cientos de velas en tendencia fuerte.
-    Nunca se puede asumir un retardo fijo.
+    Conflating them is the entire class of bug. The lag between the two is a first-passage time to
+    a barrier: a median of a few bars, a very heavy right tail, hundreds of bars in a strong trend.
+    A fixed lag can never be assumed.
 
-    ``thr_at_extreme`` se CONGELA en la vela del extremo. Es lo que hace la confirmación monótona: si
-    el umbral se recalculase con el ATR de hoy, un pivote confirmado ayer podría dejar de estarlo, el
-    histórico de conteos dejaría de ser append-only, y un conteo que el usuario ya vio desaparecería
-    sin evento de invalidación — justo la deshonestidad que este diseño existe para eliminar.
+    ``thr_at_extreme`` is FROZEN at the bar of the extreme. That is what makes confirmation
+    monotonic: if the threshold were recomputed with today's ATR, a pivot confirmed yesterday could
+    stop being confirmed, the history of counts would stop being append-only, and a count the user
+    had already seen would vanish with no invalidation event — precisely the dishonesty this design
+    exists to eliminate.
     """
 
     idx: int
@@ -197,66 +198,66 @@ class Pivot:
 
     @property
     def confirm_price(self) -> float:
-        """El precio al que este pivote quedaría confirmado.
+        """The price at which this pivot would become confirmed.
 
-        Se dibuja como línea gris discontinua: «el conteo confirma por debajo de 108.240». Convierte
-        la debilidad de repintado de Elliott en la línea más accionable del gráfico, porque el usuario
-        deja de ver «esto podría ser el techo» y pasa a ver el precio exacto en que deja de ser un
-        quizá.
+        Drawn as a dashed grey line: "the count confirms below 108,240". It turns Elliott's
+        repainting weakness into the most actionable line on the chart, because the user stops
+        seeing "this might be the top" and starts seeing the exact price at which it stops being a
+        maybe.
         """
         return (self.price - self.thr_at_extreme if self.kind is PivotKind.HIGH
                 else self.price + self.thr_at_extreme)
 
     def confirmed_at(self, idx: int, ts_ms: int) -> Pivot:
-        """Devuelve la versión confirmada. Escritura ÚNICA: reconfirmar es un error de programa."""
+        """Return the confirmed version. WRITE-ONCE: re-confirming is a program error."""
         if self.is_confirmed:
             raise ValueError(
-                f"Pivot en idx={self.idx} ya estaba confirmado en {self.confirmed_idx}; "
-                "la confirmación es de escritura única para que el beam solo pueda CRECER."
+                f"Pivot at idx={self.idx} was already confirmed at {self.confirmed_idx}; "
+                "confirmation is write-once so that the beam can only GROW."
             )
         return Pivot(self.idx, self.ts_ms, self.price, self.kind, self.thr_at_extreme, idx, ts_ms)
 
 
 @dataclass(frozen=True, slots=True)
 class RuleVerdict:
-    """El resultado de una regla dura, CON su propio precio de invalidación.
+    """The result of a hard rule, WITH its own invalidation price.
 
-    Que cada regla emita su invalidación es la mejor propiedad del diseño: el número más grande de la
-    tarjeta de señal lo produce el motor de reglas y no se ensambla aguas abajo, así que no puede
-    desviarse de la regla que lo justifica.
+    Having every rule emit its own invalidation is the best property of the design: the biggest
+    number on the signal card is produced by the rule engine and is not assembled downstream, so it
+    cannot drift away from the rule that justifies it.
     """
 
     rule: str                       # "R1", "R2b", "R3", "diag_2_4"
     ok: bool
     invalidation_price: float | None
     detail: str = ""
-    evaluable: bool = True          # R2 no es evaluable mientras el impulso esté incompleto
+    evaluable: bool = True          # R2 is not evaluable while the impulse is still incomplete
 
 
 # --------------------------------------------------------------------------------------
-# Plan y señales
+# Plan and signals
 # --------------------------------------------------------------------------------------
 
 @dataclass(frozen=True, slots=True)
 class ExitTemplate:
-    """Plantilla de salida compartida por el etiquetador y la interfaz.
+    """Exit template shared by the labeller and the interface.
 
-    UN SOLO objeto congelado lo consumen a la vez ``labeling/barriers.py`` y las tarjetas de la UI.
-    Si el modelo entrenase con barreras de 2R/1R/48 velas mientras la pantalla muestra un objetivo de
-    3R con stop dinámico, cada probabilidad mostrada describiría una operación que el usuario no está
-    haciendo. Se asevera en la construcción de cada decisión.
+    ONE single frozen object is consumed by both ``labeling/barriers.py`` and the UI cards. If the
+    model trained on 2R/1R/48-bar barriers while the screen showed a 3R target with a dynamic
+    stop, every probability displayed would describe a trade the user is not taking. It is asserted
+    when each decision is constructed.
     """
 
     id: str
-    tp_r: float                 # objetivo en múltiplos de R
-    max_bars: int               # barrera vertical
+    tp_r: float                 # target in multiples of R
+    max_bars: int               # vertical barrier
     trail: str = "none"         # "none" | "chandelier" | "structure"
     breakeven_after_r: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class TradePlan:
-    """Qué hacer, dónde deja de tener sentido, y por qué."""
+    """What to do, where it stops making sense, and why."""
 
     archetype: str              # "w2_long", "w4_long", "wc_long", "diag_exit"
     direction: Direction
@@ -264,7 +265,7 @@ class TradePlan:
     entry_hi: float
     stop: float
     invalidation_price: float
-    invalidation_rule: str      # el nombre de la regla que produjo la invalidación
+    invalidation_rule: str      # the name of the rule that produced the invalidation
     targets: tuple[float, ...]
     exit_template_id: str
     count_id: str | None = None
@@ -284,25 +285,26 @@ class TradePlan:
 
 @dataclass(frozen=True, slots=True)
 class Signal:
-    """La unidad que fusiona el motor. `source` y las dos marcas de tiempo existen desde v1
-    precisamente para que la capa de noticias no obligue a redibujar nada."""
+    """The unit the engine merges. `source` and the two timestamps exist from v1 precisely so
+    that the news layer does not force anything to be redrawn."""
 
     ts_event_ms: int
     ts_ingest_ms: int
-    source: str                 # nombre punteado del proveedor en el REGISTRY
+    source: str                 # dotted name of the provider in the REGISTRY
     kind: SourceKind
     direction: Direction
-    strength: float             # normalizado a [-1, 1]
+    strength: float             # normalised to [-1, 1]
     detail: str = ""
-    tentative: bool = False     # tocado por el pivote provisional: nunca entra en estadística
+    tentative: bool = False     # touched by the provisional pivot: never enters the statistics
 
 
 @dataclass(frozen=True, slots=True)
 class Stat:
-    """Un estadístico NUNCA se muestra como número pelado.
+    """A statistic is NEVER shown as a bare number.
 
-    Siempre la terna (valor, n del que sale, estado de la precondición). Un estadístico que devuelve
-    un valor tranquilizador a partir de datos insuficientes es peor que no tenerlo: fabrica confianza.
+    Always the triple (value, the n it came from, state of the precondition). A statistic that
+    returns a reassuring value out of insufficient data is worse than not having it at all: it
+    manufactures confidence.
     """
 
     name: str
@@ -322,16 +324,16 @@ class Stat:
     def render(self) -> str:
         if self.computable:
             return f"{self.name}: {self.value:.4g} (n={self.n})"
-        return f"{self.name}: no computable — faltan {self.missing} (n={self.n}/{self.n_required})"
+        return f"{self.name}: not computable — {self.missing} missing (n={self.n}/{self.n_required})"
 
 
 @dataclass(frozen=True, slots=True)
 class Decision:
-    """Lo que el motor concluye en una vela cerrada. Es la unidad que se journaliza.
+    """What the engine concludes on a closed bar. This is the unit that gets journalled.
 
-    ``stale`` y ``catching_up`` viajan aquí y no en una variable global porque son propiedades de
-    ESTA decisión: una decisión emitida durante una puesta al día tras un corte describe un precio
-    que ya pasó, y el usuario tiene derecho a saberlo mirando la propia tarjeta.
+    ``stale`` and ``catching_up`` travel here and not in a global variable because they are
+    properties of THIS decision: a decision emitted while catching up after an outage describes a
+    price that has already gone, and the user has the right to see that on the card itself.
     """
 
     ts_ms: int
@@ -349,16 +351,16 @@ class Decision:
     def __post_init__(self) -> None:
         if self.verdict is Verdict.ACTIONABLE:
             if self.plan is None:
-                raise ValueError("Decision ACCIONABLE sin plan: no hay nada que operar")
+                raise ValueError("ACTIONABLE Decision with no plan: there is nothing to trade")
             if self.catching_up:
                 raise ValueError(
-                    "Decision ACCIONABLE durante CATCH_UP: la zona de entrada describe un precio "
-                    "que ya pasó. Suprime la emisión mientras se reproduce el hueco."
+                    "ACTIONABLE Decision during CATCH_UP: the entry zone describes a price that "
+                    "has already gone. Suppress emission while the gap is being replayed."
                 )
             if self.maturity is MaturityLevel.PRIOR:
                 raise ValueError(
-                    "Decision ACCIONABLE en nivel PRIOR: sin evidencia, el verdict se topa en WATCH. "
-                    "Ver la escalera de madurez."
+                    "ACTIONABLE Decision at PRIOR level: with no evidence the verdict is capped "
+                    "at WATCH. See the maturity ladder."
                 )
 
     @property

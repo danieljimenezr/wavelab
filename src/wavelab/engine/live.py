@@ -1,20 +1,19 @@
-"""Motor en vivo: mantiene los anillos por timeframe desde la única serie de 1m.
+"""Live engine: keeps the per-timeframe rings fed from the single 1m series.
 
-Tres modos, y el usuario los ve:
+Three modes, and the user gets to see them:
 
-  WARMUP    cargando histórico; no se emite nada
-  CATCH_UP  reproduciendo un hueco tras un corte; el estado se actualiza pero la EMISIÓN DE
-            DECISIONES ESTÁ SUPRIMIDA
-  LIVE      al día
+  WARMUP    loading history; nothing is emitted
+  CATCH_UP  replaying a hole left by an outage; state is updated but DECISION EMISSION IS
+            SUPPRESSED
+  LIVE      up to date
 
-El modo CATCH_UP existe por un motivo concreto. Como ``on_bar`` es deliberadamente idéntico en vivo
-y en replay, tras despertar de un corte producirá encantado una decisión ACCIONABLE con una zona de
-entrada en un precio que pasó hace cuarenta minutos. Es la forma más probable de que la herramienta
-pierda la confianza del usuario en la primera semana, y no se arregla con un aviso: se arregla no
-emitiendo.
+CATCH_UP exists for one concrete reason. Because ``on_bar`` is deliberately identical live and in
+replay, waking up after an outage it will happily produce an ACTIONABLE decision with an entry zone
+at a price that went past forty minutes ago. That is the most likely way for the tool to lose the
+user's trust in its first week, and it is not fixed with a warning: it is fixed by not emitting.
 
-El tipo ``Decision`` ya lo impide estructuralmente (lanza si se construye ACCIONABLE con
-``catching_up=True``), pero eso es la última red. Esta es la primera.
+The ``Decision`` type already prevents this structurally (it raises if it is constructed ACTIONABLE
+with ``catching_up=True``), but that is the last line of defence. This is the first.
 """
 
 from __future__ import annotations
@@ -41,8 +40,8 @@ class Mode(StrEnum):
 
 @dataclass(slots=True)
 class Health:
-    """Lo que se pinta en la insignia de salud de datos. Si algo aquí no está bien,
-    la interfaz está mintiendo sobre su frescura y el usuario tiene derecho a saberlo."""
+    """What gets painted on the data-health badge. If anything here is off, the interface is lying
+    about how fresh it is and the user has a right to know."""
 
     mode: Mode = Mode.WARMUP
     connected: bool = False
@@ -65,19 +64,19 @@ class Health:
 
 @dataclass(slots=True)
 class EngineState:
-    """Estado mutable del motor. Se muta SOLO en el hilo del bucle de eventos.
+    """The engine's mutable state. Mutated ONLY on the event loop's thread.
 
-    Cuando llegue el análisis pesado (M4+), se le pasará una instantánea inmutable y devolverá un
-    estado nuevo que se aplica aquí. Nunca al revés: `asyncio.wait_for` alrededor de
-    `asyncio.to_thread` NO cancela el hilo, así que un análisis abandonado seguiría mutando este
-    objeto mientras empieza el siguiente. Sería una carrera de datos dentro de la única función
-    que todo el diseño promete determinista.
+    When the heavy analysis lands (M4+), it will be handed an immutable snapshot and will return a
+    new state that gets applied here. Never the other way round: `asyncio.wait_for` around
+    `asyncio.to_thread` does NOT cancel the thread, so an abandoned analysis would carry on
+    mutating this object while the next one starts. That would be a data race inside the one
+    function the whole design promises is deterministic.
     """
 
     symbol: str
     rings: dict[str, Ring] = field(default_factory=dict)
-    #: Un detector por timeframe de ANÁLISIS. 1m no lleva: es la serie fuente, no un timeframe
-    #: de análisis, y detectar pivotes en 1m sería medir ruido de microestructura.
+    #: One detector per ANALYSIS timeframe. 1m does not get one: it is the source series, not an
+    #: analysis timeframe, and detecting pivots on 1m would be measuring microstructure noise.
     detectors: dict[str, ZigZag] = field(default_factory=dict)
     provisional: Bar | None = None
     health: Health = field(default_factory=Health)
@@ -88,7 +87,7 @@ class EngineState:
 
 
 class LiveEngine:
-    """Consume velas de 1m y mantiene los anillos de todos los timeframes."""
+    """Consumes 1m bars and keeps the rings of every timeframe up to date."""
 
     def __init__(self, symbol: str, timeframes: list[str], ring_capacity: int = 8192,
                  trigger_tf: str = "15m", zigzag: ZigZagConfig | None = None) -> None:
@@ -98,8 +97,8 @@ class LiveEngine:
         self.zz_cfg = zigzag or ZigZagConfig()
         self.matcher_cfg = MatcherConfig()
         self.plan_cfg = PlanConfig()
-        #: La interfaz solo muestra largos, pero el motor evalúa AMBAS direcciones: así se acumula
-        #: el doble de evidencia desde el día 1 y activar cortos es una línea de configuración.
+        #: The interface only shows longs, but the engine evaluates BOTH directions: that way twice
+        #: as much evidence accumulates from day 1 and turning shorts on is one config line.
         self.directions: list[Direction] = [Direction.LONG, Direction.SHORT]
         self.state = EngineState(symbol=self.symbol)
         self.state.rings[TF_1M.name] = Ring(self.symbol, TF_1M, ring_capacity)
@@ -109,14 +108,14 @@ class LiveEngine:
                 self.state.detectors[tf.name] = ZigZag(self.zz_cfg)
         self._last_wall = time.time()
 
-    # ------------------------------------------------------------------ resampleo
+    # ------------------------------------------------------------------ resampling
 
     def _close_htf(self, tf: Timeframe, htf_open_ms: int) -> Bar | None:
-        """Construye la vela de timeframe superior que acaba de cerrar, desde el anillo de 1m.
+        """Builds the higher-timeframe bar that has just closed, out of the 1m ring.
 
-        Se reconstruye desde la serie fuente en vez de acumular incrementalmente: un acumulador
-        que se desincroniza no lo delata nada, mientras que reconstruir siempre da el mismo
-        resultado que daría el backtest sobre los mismos datos.
+        It is rebuilt from the source series instead of accumulated incrementally: an accumulator
+        that drifts out of sync gives nothing away, whereas rebuilding always yields the same
+        result the backtest would give over the same data.
         """
         r1 = self.state.rings[TF_1M.name]
         n = tf.expected_source_bars
@@ -132,71 +131,71 @@ class LiveEngine:
             symbol=self.symbol, tf=tf, open_time_ms=htf_open_ms,
             open=float(o[0]), high=float(h.max()), low=float(l.min()), close=float(c[-1]),
             volume=float(v.sum()), is_closed=True, n_source_bars=n_src,
-            # Una vela de 1h construida con 43 minutos no es una vela de 1h. Viaja marcada.
+            # A 1h bar built out of 43 minutes is not a 1h bar. It travels labelled as such.
             is_gap=n_src < int(MIN_SOURCE_COVERAGE * n),
         )
 
-    # ------------------------------------------------------------------ ingesta
+    # ------------------------------------------------------------------ ingestion
 
     def on_bar_1m(self, bar: Bar) -> list[Bar]:
-        """Añade una vela de 1m y devuelve las de timeframe superior que hayan cerrado con ella."""
+        """Adds a 1m bar and returns the higher-timeframe bars that closed along with it."""
         if not bar.is_closed:
             self.state.provisional = bar
             self.state.rings[TF_1M.name].set_provisional(bar)
             return []
 
         r1 = self.state.rings[TF_1M.name]
-        ultimo = r1.last_closed_ts_ms
-        if ultimo is not None and bar.open_time_ms <= ultimo:
-            return []                                   # duplicada del curado de huecos
+        last = r1.last_closed_ts_ms
+        if last is not None and bar.open_time_ms <= last:
+            return []                                   # duplicate from gap healing
         r1.append(bar)
         self.state.n_bars_1m += 1
         self.state.provisional = None
         self.state.health.last_closed_ms = bar.open_time_ms
 
-        cerradas: list[Bar] = []
-        fin = bar.open_time_ms + TF_1M.ms      # instante en que termina esta vela de 1m
+        closed: list[Bar] = []
+        end = bar.open_time_ms + TF_1M.ms      # the instant this 1m bar ends
         for tf in self.tfs:
-            if tf is TF_1M or fin % tf.ms != 0:
+            if tf is TF_1M or end % tf.ms != 0:
                 continue
-            htf = self._close_htf(tf, fin - tf.ms)
+            htf = self._close_htf(tf, end - tf.ms)
             if htf is None:
                 continue
-            anillo = self.state.rings[tf.name]
-            ult = anillo.last_closed_ts_ms
-            if ult is None or htf.open_time_ms > ult:
-                anillo.append(htf)
-                # El detector se alimenta con la MISMA vela que acaba de entrar al anillo, vela a
-                # vela y en orden. Nunca se le pasa un array completo: llamarlo una vez sobre todo
-                # el histórico y luego trocear el resultado infla cada entrada en ~el umbral entero
-                # (1,2-2,5 ATR), que es más que cualquier ventaja real.
+            ring = self.state.rings[tf.name]
+            last_htf = ring.last_closed_ts_ms
+            if last_htf is None or htf.open_time_ms > last_htf:
+                ring.append(htf)
+                # The detector is fed the SAME bar that just entered the ring, one bar at a time
+                # and in order. It is never handed a whole array: calling it once over the entire
+                # history and then slicing the result inflates every entry by roughly the whole
+                # threshold (1.2-2.5 ATR), which is more than any real edge.
                 det = self.state.detectors.get(tf.name)
                 if det is not None:
                     det.update(htf.open_time_ms, htf.high, htf.low, htf.close)
-                cerradas.append(htf)
-        return cerradas
+                closed.append(htf)
+        return closed
 
     def decide(self, tf_name: str, price: float) -> dict:
-        """Hipótesis ordenadas y su plan. Es lo que se pinta en la tarjeta de decisión.
+        """Ranked hypotheses and their plan. This is what gets painted on the decision card.
 
-        El verdict SIEMPRE se topa en WATCH mientras el nivel de madurez sea PRIOR: sin evidencia
-        propia no se puede marcar nada como ACCIONABLE. El constructor de `Decision` lo impone
-        además estructuralmente, así que aquí es la primera red y allí la última.
+        The verdict is ALWAYS capped at WATCH while the maturity level is PRIOR: with no evidence
+        of our own, nothing can be marked ACTIONABLE. `Decision`'s constructor enforces that
+        structurally as well, so this is the first line of defence and that one is the last.
         """
         det = self.state.detectors.get(tf_name)
-        anillo = self.state.rings.get(tf_name)
-        if det is None or anillo is None or not len(anillo) or det.atr is None:
+        ring = self.state.rings.get(tf_name)
+        if det is None or ring is None or not len(ring) or det.atr is None:
             return {"verdict": Verdict.NO_TRADE.value, "maturity": int(MaturityLevel.PRIOR),
-                    "hypotheses": [], "reasons": ["sin estructura suficiente todavía"]}
+                    "hypotheses": [], "reasons": ["not enough structure yet"]}
 
-        pivs = det.store.as_of(anillo.last_closed_ts_ms or 0)
-        hips = match_impulses(pivs, self.matcher_cfg,
+        pivs = det.store.as_of(ring.last_closed_ts_ms or 0)
+        hyps = match_impulses(pivs, self.matcher_cfg,
                               directions=tuple(self.directions))
         atr = det.atr
-        out, mejor_en_zona = [], False
-        for h in hips:
+        out, best_in_zone = [], False
+        for h in hyps:
             r = build_plan(h, price, atr, self.plan_cfg)
-            fila = {
+            row = {
                 "id": h.id, "state": h.state.value, "direction": h.direction.name,
                 "label": h.terminal_label, "score": round(h.score, 3),
                 "fit": {k: round(v, 3) for k, v in h.fit.items()},
@@ -209,7 +208,7 @@ class LiveEngine:
                 "reasons": list(r.reasons),
             }
             if r.viable:
-                fila |= {
+                row |= {
                     "entry_lo": round(r.plan.entry_lo, 2), "entry_hi": round(r.plan.entry_hi, 2),
                     "stop": round(r.plan.stop, 2),
                     "targets": [round(t, 2) for t in r.plan.targets],
@@ -217,32 +216,32 @@ class LiveEngine:
                     "p_required": round(r.p_required, 4), "stop_atr": round(r.stop_atr, 2),
                     "size_factor": round(r.size_factor, 3),
                 }
-                mejor_en_zona |= r.in_zone
-            out.append(fila)
+                best_in_zone |= r.in_zone
+            out.append(row)
 
-        # Nivel PRIOR: la tabla de expectativas está escrita a mano y no hay ni una operación
-        # resuelta. Se puede VIGILAR, nunca marcar como accionable.
-        verdict = Verdict.WATCH if (out and mejor_en_zona) else (
+        # PRIOR level: the expectancy table is hand-written and not a single trade has resolved.
+        # We can WATCH, never mark as actionable.
+        verdict = Verdict.WATCH if (out and best_in_zone) else (
             Verdict.WATCH if out else Verdict.NO_TRADE)
-        razones = []
+        reasons = []
         if not out:
-            razones.append("ninguna estructura cumple las reglas duras ahora mismo")
-        elif not mejor_en_zona:
-            razones.append("hay estructura, pero el precio no está en ninguna zona de entrada")
-        razones.append("nivel PRIOR (n=0): expectativas de tabla experta, sin validar. "
-                       "El verdict no puede pasar de WATCH.")
+            reasons.append("no structure satisfies the hard rules right now")
+        elif not best_in_zone:
+            reasons.append("there is structure, but the price is not inside any entry zone")
+        reasons.append("PRIOR level (n=0): expectancies from an expert table, unvalidated. "
+                       "The verdict cannot go above WATCH.")
         return {"verdict": verdict.value, "maturity": int(MaturityLevel.PRIOR),
-                "hypotheses": out, "reasons": razones, "atr": round(atr, 2),
+                "hypotheses": out, "reasons": reasons, "atr": round(atr, 2),
                 "price": round(price, 2)}
 
     def waves(self, tf_name: str, now_ms: int | None = None,
               since_ms: int | None = None) -> dict:
-        """Tramos y precio de confirmación para dibujar. Nunca lanza si el timeframe no existe."""
+        """Legs and confirmation price, for drawing. Never raises if the timeframe does not exist."""
         det = self.state.detectors.get(tf_name)
         if det is None:
             return {"legs": [], "confirm_price": None, "n_confirmed": 0, "atr": None}
-        anillo = self.state.rings.get(tf_name)
-        t = now_ms if now_ms is not None else (anillo.last_closed_ts_ms if anillo else 0) or 0
+        ring = self.state.rings.get(tf_name)
+        t = now_ms if now_ms is not None else (ring.last_closed_ts_ms if ring else 0) or 0
         return {
             "legs": det.legs_as_of(t, since_ms=since_ms),
             "confirm_price": det.confirm_price(),
@@ -251,9 +250,9 @@ class LiveEngine:
         }
 
     def warmup(self, bars_1m) -> int:
-        """Carga histórico. Reproduce vela a vela, igual que la ruta viva: si el calentamiento
-        usase un camino distinto, el estado inicial diferiría del que produciría el replay y la
-        promesa de «una sola función» sería falsa desde el primer segundo."""
+        """Loads history. Replays bar by bar, exactly like the live path: if the warm-up went down
+        a different route, the initial state would differ from the one a replay would produce and
+        the "one single function" promise would be false from the first second."""
         self.state.health.mode = Mode.WARMUP
         n = 0
         for b in bars_1m:
@@ -261,16 +260,16 @@ class LiveEngine:
             n += 1
         return n
 
-    # ------------------------------------------------------------------ modo
+    # ------------------------------------------------------------------ mode
 
     def check_clock(self, trigger_tf_ms: int | None = None) -> Mode:
-        """Detecta un salto de reloj (suspensión, reinicio, corte largo) y entra en CATCH_UP."""
+        """Detects a clock jump (suspend, restart, long outage) and enters CATCH_UP."""
         tf_ms = trigger_tf_ms or self.trigger.ms
-        ahora = time.time()
-        salto = ahora - self._last_wall
-        self._last_wall = ahora
+        now = time.time()
+        jump = now - self._last_wall
+        self._last_wall = now
         h = self.state.health
-        if h.mode is not Mode.WARMUP and salto * 1000 > 2 * tf_ms:
+        if h.mode is not Mode.WARMUP and jump * 1000 > 2 * tf_ms:
             h.mode = Mode.CATCH_UP
         return h.mode
 
@@ -283,10 +282,10 @@ class LiveEngine:
         h.silent_seconds = silent_seconds
         if h.last_closed_ms:
             h.lag_bars = (time.time() * 1000 - h.last_closed_ms) / self.trigger.ms
-        anillo = self.state.rings.get(self.trigger.name)
-        if anillo is not None and len(anillo):
-            h.gaps_in_window = anillo.window(min(500, len(anillo))).n_gaps
-        # Se sale de CATCH_UP cuando el retraso vuelve a estar dentro de una vela de disparo.
+        ring = self.state.rings.get(self.trigger.name)
+        if ring is not None and len(ring):
+            h.gaps_in_window = ring.window(min(500, len(ring))).n_gaps
+        # CATCH_UP is left when the lag is back inside a single trigger bar.
         if h.mode is Mode.CATCH_UP and h.lag_bars <= 1.0:
             h.mode = Mode.LIVE
         elif h.mode is Mode.WARMUP and h.last_closed_ms:
@@ -295,6 +294,6 @@ class LiveEngine:
 
     @property
     def emitting(self) -> bool:
-        """Si esto es False, NO se emite ninguna decisión. Es la primera red; el constructor de
-        `Decision` es la última."""
+        """If this is False, NO decision is emitted. This is the first line of defence;
+        `Decision`'s constructor is the last."""
         return self.state.health.mode is Mode.LIVE

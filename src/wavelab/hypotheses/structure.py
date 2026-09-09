@@ -1,29 +1,30 @@
-"""Familia `structure`: la estructura de mercado como fuente de ventaja.
+"""`structure` family: market structure as a source of edge.
 
-REGISTRO PREVIO. Nada de lo que hay aquí se ha ejecutado contra datos. Los parámetros son los
-convencionales de la literatura —Donchian 20 y 55 (sistemas 1 y 2 de las Tortugas), fractal de
-Williams de 5 velas (k=2 a cada lado), ATR 14, media de volumen 20— y el horizonte de las
-hipótesis de evento es 10 velas para TODAS, elegido una sola vez y aplicado sin excepción para que
-no haya rejilla encubierta disfrazada de "variantes".
+PRE-REGISTRATION. Nothing here has been run against data. The parameters are the conventional ones
+from the literature — Donchian 20 and 55 (Turtle systems 1 and 2), Williams' 5-candle fractal (k=2
+on each side), ATR 14, 20-period volume average — and the horizon of the event hypotheses is 10
+candles for ALL of them, chosen once and applied without exception so that there is no hidden grid
+dressed up as "variants".
 
-MECANISMO COMÚN DE LA FAMILIA. Los máximos y mínimos previos son los pocos niveles que todos los
-participantes ven igual, sin ambigüedad y sin parámetros. Ahí es donde el que va largo pone el
-stop, donde el que espera confirmación pone la orden de ruptura y donde el creador de mercado sabe
-que hay volumen ejecutable. Es decir: la estructura no predice, pero SÍ concentra órdenes, y una
-concentración de órdenes es lo único que puede mover un precio. Cada hipótesis de abajo apuesta
-sobre qué pasa cuando el precio llega a esa liquidez: o la ruptura arrastra a los que estaban al
-otro lado (continuación) o la liquidez se consume de golpe y el precio vuelve dentro (barrida).
+THE FAMILY'S SHARED MECHANISM. Previous highs and lows are the few levels every participant sees
+the same way, without ambiguity and without parameters. That is where the long puts the stop, where
+whoever waits for confirmation puts the breakout order, and where the market maker knows there is
+executable volume. In other words: structure does not predict, but it DOES concentrate orders, and
+a concentration of orders is the only thing that can move a price. Each hypothesis below bets on
+what happens when price reaches that liquidity: either the break drags along whoever was on the
+other side (continuation) or the liquidity is consumed in one go and price comes back inside (a
+sweep).
 
-Las dos familias de apuestas NO pueden ser ciertas a la vez en el mismo régimen. El conflicto es
-deliberado: `structure.donchian_break_20` y `structure.sweep_reversal_20` operan sobre el mismo
-nivel en direcciones opuestas, igual que `structure.bos_swing` y `structure.range_fade_swing`. Si
-las dos "funcionan" a la vez sin que el régimen las separe, la explicación más probable no es que
-haya dos ventajas sino que el estimador está midiendo ruido, y eso es informativo.
+The two families of bets CANNOT both be true in the same regime. The conflict is deliberate:
+`structure.donchian_break_20` and `structure.sweep_reversal_20` trade the same level in opposite
+directions, and so do `structure.bos_swing` and `structure.range_fade_swing`. If both "work" at
+once without the regime separating them, the likeliest explanation is not that there are two edges
+but that the estimator is measuring noise, and that is informative.
 
-CAUSALIDAD. Todo nivel de referencia proviene de velas ESTRICTAMENTE anteriores a i (`_shift1`
-sobre las ventanas de talib, que incluyen la vela actual) y todo pivote se coloca en la vela en la
-que queda CONFIRMADO, no en la que ocurrió el extremo. No se usa `find_peaks` ni ningún estadístico
-definido contra el array entero.
+CAUSALITY. Every reference level comes from candles STRICTLY earlier than i (`_shift1` over talib's
+windows, which include the current candle) and every pivot is placed on the candle where it is
+CONFIRMED, not on the one where the extreme happened. Neither `find_peaks` nor any statistic
+defined against the whole array is used.
 """
 
 from __future__ import annotations
@@ -33,55 +34,55 @@ import talib
 
 from wavelab.hypotheses.base import Hypothesis, Series, register
 
-# Horizonte único para las hipótesis de evento (barrida, retest, inside bar, fade de rango).
-# Un solo número para todas: si cada una llevara el suyo, esto sería una rejilla.
+# Single horizon for the event hypotheses (sweep, retest, inside bar, range fade).
+# One number for all of them: if each carried its own, this would be a grid.
 _HOLD = 10
 
-# Semiamplitud del fractal de Williams: 5 velas, 2 a cada lado. La confirmación llega 2 velas
-# después del extremo, y ese retardo se respeta de forma explícita.
+# Half-width of the Williams fractal: 5 candles, 2 on each side. Confirmation arrives 2 candles
+# after the extreme, and that delay is honoured explicitly.
 _K = 2
 
-# Series más cortas que esto devuelven todo ceros. Coincide con `min_warmup` a propósito: así el
-# umbral del guarda nunca cae DENTRO de la región que el backtest evalúa, y la señal en i es
-# idéntica se calcule sobre el prefijo [0..i] o sobre la serie entera.
+# Series shorter than this return all zeros. It matches `min_warmup` on purpose: that way the
+# guard's threshold never falls INSIDE the region the backtest evaluates, and the signal at i is
+# identical whether it is computed over the prefix [0..i] or over the whole series.
 _MIN_BARS = 200
 
 
 # --------------------------------------------------------------------------------------------
-# Utilidades. Todas causales: la posición i solo mira posiciones <= i.
+# Utilities. All causal: position i only looks at positions <= i.
 # --------------------------------------------------------------------------------------------
 
 def _f(x: np.ndarray) -> np.ndarray:
-    """talib exige float64 contiguo."""
+    """talib requires contiguous float64."""
     return np.ascontiguousarray(x, dtype=np.float64)
 
 
 def _shift1(x: np.ndarray) -> np.ndarray:
-    """out[i] = x[i-1], out[0] = NaN. Desplaza hacia el FUTURO (nunca np.roll negativo)."""
+    """out[i] = x[i-1], out[0] = NaN. Shifts towards the FUTURE (never a negative np.roll)."""
     out = np.empty_like(x)
     out[0] = np.nan
     out[1:] = x[:-1]
     return out
 
 
-# `_shiftk` vivía aquí. Se retira con la hipótesis duplicada que era su único uso (véase la nota
-# del punto 11): dejar utilidades muertas invita a que la siguiente hipótesis las reutilice sin
-# volver a comprobar su causalidad.
+# `_shiftk` used to live here. It goes with the duplicate hypothesis that was its only user (see
+# the note at point 11): leaving dead utilities lying around invites the next hypothesis to reuse
+# them without rechecking their causality.
 
 
 def _prev_max(high: np.ndarray, n: int) -> np.ndarray:
-    """Máximo de las n velas ANTERIORES a i. talib.MAX incluye la vela i, así que se desplaza."""
+    """Maximum of the n candles BEFORE i. talib.MAX includes candle i, so it is shifted."""
     return _shift1(talib.MAX(_f(high), n))
 
 
 def _prev_min(low: np.ndarray, n: int) -> np.ndarray:
-    """Mínimo de las n velas ANTERIORES a i."""
+    """Minimum of the n candles BEFORE i."""
     return _shift1(talib.MIN(_f(low), n))
 
 
 def _gt(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """a > b, False donde cualquiera sea NaN. Comprobación explícita: nan_to_num con un centinela
-    inventaría rupturas durante el calentamiento."""
+    """a > b, False wherever either is NaN. The check is explicit: nan_to_num with a sentinel
+    would invent breakouts during warm-up."""
     out = np.zeros(a.shape, dtype=bool)
     ok = ~(np.isnan(a) | np.isnan(b))
     np.greater(a, b, out=out, where=ok)
@@ -89,7 +90,7 @@ def _gt(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 
 
 def _lt(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """a < b, False donde cualquiera sea NaN."""
+    """a < b, False wherever either is NaN."""
     out = np.zeros(a.shape, dtype=bool)
     ok = ~(np.isnan(a) | np.isnan(b))
     np.less(a, b, out=out, where=ok)
@@ -97,26 +98,26 @@ def _lt(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 
 
 def _fresh(cond: np.ndarray) -> np.ndarray:
-    """Solo la vela en que `cond` pasa de falsa a verdadera. Necesario para las hipótesis de
-    evento cuya condición es un ESTADO persistente ("el precio está por encima del pivote"): sin
-    esto el evento se rearma en cada vela y una hipótesis de rechazo puntual se convierte, sin
-    quererlo, en una posición contratendencia permanente. Mira i e i-1, nada más."""
+    """Only the candle on which `cond` flips from false to true. Needed for the event hypotheses
+    whose condition is a persistent STATE ("price is above the pivot"): without this the event
+    re-arms on every candle and a one-off rejection hypothesis turns, unintentionally, into a
+    permanent counter-trend position. It looks at i and i-1, nothing else."""
     out = cond.copy()
     out[1:] &= ~cond[:-1]
     return out
 
 
 def _ffill(x: np.ndarray) -> np.ndarray:
-    """Arrastra hacia adelante el último valor no-NaN. `maximum.accumulate` es un prefijo: el
-    valor en i solo puede venir de <= i."""
+    """Carries the last non-NaN value forward. `maximum.accumulate` is a prefix: the value at i
+    can only come from <= i."""
     idx = np.where(~np.isnan(x), np.arange(x.size), 0)
     np.maximum.accumulate(idx, out=idx)
     return x[idx]
 
 
 def _events(up: np.ndarray, dn: np.ndarray) -> np.ndarray:
-    """Codifica eventos en {-1,0,+1}. Si los dos disparan en la misma vela la situación es
-    ambigua y se emite 0 (no hay información), nunca un desempate arbitrario."""
+    """Encodes events into {-1,0,+1}. If both fire on the same candle the situation is ambiguous
+    and 0 is emitted (there is no information), never an arbitrary tie-break."""
     both = up & dn
     ev = np.zeros(up.size, dtype=np.int8)
     ev[up & ~both] = 1
@@ -125,19 +126,19 @@ def _events(up: np.ndarray, dn: np.ndarray) -> np.ndarray:
 
 
 def _hold(up: np.ndarray, dn: np.ndarray) -> np.ndarray:
-    """Mantiene el último evento hasta que aparezca el contrario (siempre en mercado tras el
-    primero)."""
+    """Holds the last event until the opposite one appears (always in the market after the
+    first)."""
     ev = _events(up, dn)
     idx = np.where(ev != 0, np.arange(ev.size), 0)
     np.maximum.accumulate(idx, out=idx)
     out = ev[idx]
-    out[idx == 0] = ev[0]          # antes del primer evento no hay posición
+    out[idx == 0] = ev[0]          # before the first event there is no position
     return out
 
 
 def _hold_n(up: np.ndarray, dn: np.ndarray, bars: int = _HOLD) -> np.ndarray:
-    """Mantiene el último evento `bars` velas y luego se sale. Para hipótesis de evento, donde el
-    efecto —si existe— es transitorio por construcción."""
+    """Holds the last event for `bars` candles and then exits. For event hypotheses, where the
+    effect —if it exists— is transient by construction."""
     ev = _events(up, dn)
     n = ev.size
     idx = np.where(ev != 0, np.arange(n), 0)
@@ -150,12 +151,12 @@ def _hold_n(up: np.ndarray, dn: np.ndarray, bars: int = _HOLD) -> np.ndarray:
 
 
 def _pivots(s: Series, k: int = _K) -> tuple[np.ndarray, np.ndarray]:
-    """Fractales de Williams COLOCADOS EN LA VELA QUE LOS CONFIRMA, no en la del extremo.
+    """Williams fractals PLACED ON THE CANDLE THAT CONFIRMS THEM, not on the candle of the extreme.
 
-    Un máximo fractal en la vela j solo se sabe en j+k, cuando ya han cerrado las k velas
-    posteriores. Devolver el pivote en j sería mirar al futuro: es exactamente el error que hace
-    que las estrategias de "estructura" parezcan rentables en papel. Aquí `ph[i]` guarda el precio
-    del máximo confirmado EN i (extremo ocurrido en i-k) y NaN si en i no se confirma nada.
+    A fractal high at candle j is only known at j+k, once the k following candles have closed.
+    Returning the pivot at j would be looking into the future: it is exactly the mistake that makes
+    "structure" strategies look profitable on paper. Here `ph[i]` holds the price of the high
+    confirmed AT i (the extreme having occurred at i-k) and NaN if nothing is confirmed at i.
     """
     n = len(s)
     w = 2 * k + 1
@@ -165,11 +166,11 @@ def _pivots(s: Series, k: int = _K) -> tuple[np.ndarray, np.ndarray]:
         return ph, pl
 
     hi, lo = _f(s.high), _f(s.low)
-    rmax = talib.MAX(hi, w)      # máximo de [i-w+1, i]: todo dato <= i
+    rmax = talib.MAX(hi, w)      # maximum over [i-w+1, i]: every datum <= i
     rmin = talib.MIN(lo, w)
 
-    i = np.arange(w - 1, n)      # primera ventana completa en adelante
-    c = i - k                    # vela central: el extremo candidato
+    i = np.arange(w - 1, n)      # from the first complete window onwards
+    c = i - k                    # central candle: the candidate extreme
 
     ok_h = ~(np.isnan(rmax[i]) | np.isnan(hi[c]))
     is_h = np.zeros(i.size, dtype=bool)
@@ -185,18 +186,20 @@ def _pivots(s: Series, k: int = _K) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _pivot_levels(s: Series) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """(último máximo confirmado, penúltimo, último mínimo confirmado, penúltimo) en cada vela."""
+    """(last confirmed high, the one before it, last confirmed low, the one before it) at each
+    candle."""
     ph, pl = _pivots(s)
     ph1, pl1 = _ffill(ph), _ffill(pl)
-    # En una vela de confirmación, el "anterior" es el arrastre hasta la vela previa.
+    # On a confirmation candle, the "previous" one is the value carried forward to the candle
+    # before.
     ph2 = _ffill(np.where(~np.isnan(ph), _shift1(ph1), np.nan))
     pl2 = _ffill(np.where(~np.isnan(pl), _shift1(pl1), np.nan))
     return ph1, ph2, pl1, pl2
 
 
 def _structure_state(s: Series) -> np.ndarray:
-    """+1 si la última estructura confirmada es máximos y mínimos crecientes, -1 si decrecientes,
-    0 si está mezclada. Base compartida por varias hipótesis."""
+    """+1 if the last confirmed structure is higher highs and higher lows, -1 if lower, 0 if it is
+    mixed. Shared base for several hypotheses."""
     ph1, ph2, pl1, pl2 = _pivot_levels(s)
     up = _gt(ph1, ph2) & _gt(pl1, pl2)
     dn = _lt(ph1, ph2) & _lt(pl1, pl2)
@@ -207,7 +210,7 @@ def _structure_state(s: Series) -> np.ndarray:
 
 
 # --------------------------------------------------------------------------------------------
-# 1. Ruptura de Donchian 20, siempre en mercado
+# 1. Donchian 20 breakout, always in the market
 # --------------------------------------------------------------------------------------------
 
 def _donchian_break_20(s: Series) -> np.ndarray:
@@ -221,28 +224,27 @@ def _donchian_break_20(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="structure.donchian_break_20",
     family="structure",
-    rationale="El máximo de las 20 velas previas es el nivel donde converge la mayor cantidad de "
-              "órdenes en reposo: stops de los cortos, entradas en stop de los que esperan "
-              "confirmación y coberturas de los vendedores de opciones. Cuando el precio lo "
-              "supera, esas órdenes se ejecutan como mercado y consumen el libro en la misma "
-              "dirección, lo que empuja el precio más allá y obliga a más cierres. Si esa cascada "
-              "existe en BTC, un simple stop-and-reverse sobre el canal debería capturarla sin "
-              "más maquinaria.",
-    prior="Esperamos ventaja positiva y concentrada en pocos episodios de cola derecha (pocas "
-          "operaciones aportan casi todo el resultado), con tasa de acierto BAJA, por debajo del "
-          "45%. Esperamos que falle —ventaja negativa, no nula— en mercados laterales prolongados, "
-          "donde cada ruptura se revierte y el sistema paga el diferencial en ambos sentidos. Si "
-          "sale ventaja positiva CON tasa de acierto alta, la hipótesis está mal: eso indicaría "
-          "un fallo de datos o de ejecución, no un efecto de estructura.",
+    rationale="The high of the previous 20 candles is the level where the largest quantity of "
+              "resting orders converges: the shorts' stops, stop entries from those waiting for "
+              "confirmation, and hedges from option sellers. When price takes it out, those orders "
+              "execute as market orders and consume the book in the same direction, which pushes "
+              "price further and forces more closing. If that cascade exists in BTC, a plain "
+              "stop-and-reverse on the channel should capture it with no further machinery.",
+    prior="We expect a positive edge concentrated in a few right-tail episodes (a handful of "
+          "trades supply almost the entire result), with a LOW hit rate, below 45%. We expect it "
+          "to fail —a negative edge, not a nil one— in prolonged ranges, where every breakout "
+          "reverses and the system pays the spread in both directions. If it comes out with a "
+          "positive edge AND a high hit rate, the hypothesis is wrong: that would point to a data "
+          "or execution fault, not to a structural effect.",
     fn=_donchian_break_20,
-    params={"canal": 20, "modo": "stop-and-reverse"},
+    params={"channel": 20, "mode": "stop-and-reverse"},
     timeframes=("15m", "1h", "4h", "1d"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 2. Ruptura de Donchian 55 con salida por Donchian 20 (con estado plano)
+# 2. Donchian 55 breakout with a Donchian 20 exit (with a flat state)
 # --------------------------------------------------------------------------------------------
 
 def _donchian_55_exit_20(s: Series) -> np.ndarray:
@@ -255,7 +257,8 @@ def _donchian_55_exit_20(s: Series) -> np.ndarray:
     out = np.zeros(n, dtype=np.int8)
     pos = 0
     for i in range(n):
-        # Bucle explícito: el estado en i depende del estado en i-1 y de datos de i. Nada más.
+        # Explicit loop: the state at i depends on the state at i-1 and on data from i. Nothing
+        # else.
         if pos == 0:
             if not np.isnan(hi55[i]) and c[i] > hi55[i]:
                 pos = 1
@@ -263,7 +266,7 @@ def _donchian_55_exit_20(s: Series) -> np.ndarray:
                 pos = -1
         elif pos == 1:
             if not np.isnan(lo20[i]) and c[i] < lo20[i]:
-                pos = 0          # se sale y se queda plano: reentrar el mismo cierre es ambiguo
+                pos = 0          # exit and stay flat: re-entering on the same close is ambiguous
         else:
             if not np.isnan(hi20[i]) and c[i] > hi20[i]:
                 pos = 0
@@ -274,30 +277,30 @@ def _donchian_55_exit_20(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="structure.donchian_55_exit_20",
     family="structure",
-    rationale="No es la misma hipótesis que el canal de 20 con otro número, y por eso se registra "
-              "aparte: la afirmación aquí no es sobre el nivel de entrada sino sobre la ASIMETRÍA "
-              "entre entrar y salir. Se entra solo en la ruptura de 55 velas, la que exige un "
-              "desequilibrio que ya ha absorbido toda la liquidez del trimestre, y se sale con un "
-              "canal más corto de 20 y con estado PLANO, sin reversión. La apuesta es que el "
-              "participante que provoca la cascada (liquidaciones apalancadas, reequilibrio de "
-              "tesorerías) tarda semanas en agotarse, mientras que su desaparición se nota en "
-              "días; salir plano en lugar de darse la vuelta evita pagar el lado equivocado de "
-              "una consolidación.",
-    prior="Esperamos ventaja positiva y MENOR número de operaciones que en `donchian_break_20`, "
-          "con menor pérdida máxima acumulada gracias al estado plano. Esperamos que falle en "
-          "timeframes bajos (15m, 1h), donde 55 velas son unas pocas horas y la ruptura no "
-          "identifica ningún flujo estructural: ahí el resultado debería ser indistinguible de "
-          "cero o negativo por costes. Si la ventaja fuera igual o mayor en 15m que en 1d, la "
-          "explicación mecánica de arriba es falsa.",
+    rationale="This is not the same hypothesis as the 20 channel with a different number, and that "
+              "is why it is registered separately: the claim here is not about the entry level but "
+              "about the ASYMMETRY between entering and exiting. Entry happens only on the "
+              "55-candle break, the one that requires an imbalance that has already absorbed the "
+              "whole quarter's liquidity, and the exit uses a shorter 20 channel and goes FLAT, "
+              "with no reversal. The bet is that the participant who triggers the cascade "
+              "(leveraged liquidations, treasury rebalancing) takes weeks to exhaust itself, while "
+              "its disappearance shows up within days; exiting flat instead of flipping avoids "
+              "paying the wrong side of a consolidation.",
+    prior="We expect a positive edge and FEWER trades than `donchian_break_20`, with a smaller "
+          "maximum cumulative loss thanks to the flat state. We expect it to fail on low "
+          "timeframes (15m, 1h), where 55 candles are a few hours and the break identifies no "
+          "structural flow at all: there the result should be indistinguishable from zero, or "
+          "negative after costs. If the edge were equal or greater on 15m than on 1d, the "
+          "mechanical explanation above is false.",
     fn=_donchian_55_exit_20,
-    params={"entrada": 55, "salida": 20, "modo": "largo/corto con estado plano"},
+    params={"entry": 55, "exit": 20, "mode": "long/short with a flat state"},
     timeframes=("15m", "1h", "4h", "1d"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 3. BOS: ruptura del último pivote CONFIRMADO
+# 3. BOS: break of the last CONFIRMED pivot
 # --------------------------------------------------------------------------------------------
 
 def _bos_swing(s: Series) -> np.ndarray:
@@ -312,28 +315,28 @@ def _bos_swing(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="structure.bos_swing",
     family="structure",
-    rationale="La versión estructural de la ruptura: en vez de un canal de longitud fija, el "
-              "nivel es el último máximo o mínimo de oscilación CONFIRMADO por un fractal de 5 "
-              "velas. La diferencia mecánica importa: un canal de 20 se mueve por el mero paso "
-              "del tiempo aunque no haya pasado nada, mientras que un pivote solo cambia cuando "
-              "el mercado ha girado de verdad y ha dejado a alguien atrapado en el extremo. Ahí "
-              "es donde están los stops reales, porque es el único punto que invalida la tesis "
-              "del que compró en el impulso anterior.",
-    prior="Esperamos ventaja positiva similar o algo inferior a la del canal de 20 pero con "
-          "MENOS operaciones, porque los niveles son más estables. Esperamos que falle cuando la "
-          "volatilidad se comprime: con velas pequeñas el fractal confirma pivotes triviales, el "
-          "nivel queda a un tick del precio y la señal cambia de signo constantemente. La "
-          "hipótesis queda refutada si la ventaja por operación no supera a la del canal de 20, "
-          "porque entonces la parte 'estructural' no aporta nada sobre un máximo móvil.",
+    rationale="The structural version of the breakout: instead of a fixed-length channel, the "
+              "level is the last swing high or low CONFIRMED by a 5-candle fractal. The mechanical "
+              "difference matters: a 20 channel moves through the mere passage of time even if "
+              "nothing has happened, whereas a pivot only changes when the market has genuinely "
+              "turned and left somebody trapped at the extreme. That is where the real stops are, "
+              "because it is the only point that invalidates the thesis of whoever bought the "
+              "previous impulse.",
+    prior="We expect a positive edge similar to or slightly below the 20 channel's but with FEWER "
+          "trades, because the levels are more stable. We expect it to fail when volatility "
+          "compresses: with small candles the fractal confirms trivial pivots, the level ends up a "
+          "tick away from price and the signal flips sign constantly. The hypothesis is refuted if "
+          "the edge per trade does not beat the 20 channel's, because then the 'structural' part "
+          "adds nothing over a rolling maximum.",
     fn=_bos_swing,
-    params={"fractal_k": _K, "ventana_fractal": 2 * _K + 1, "retardo_confirmacion": _K},
+    params={"fractal_k": _K, "fractal_window": 2 * _K + 1, "confirmation_lag": _K},
     timeframes=("1h", "4h", "1d"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 4. CHoCH: cambio de carácter
+# 4. CHoCH: change of character
 # --------------------------------------------------------------------------------------------
 
 def _choch(s: Series) -> np.ndarray:
@@ -342,41 +345,41 @@ def _choch(s: Series) -> np.ndarray:
         return np.zeros(n, dtype=np.int8)
     c = _f(s.close)
     ph1, ph2, pl1, pl2 = _pivot_levels(s)
-    alcista = _gt(ph1, ph2) & _gt(pl1, pl2)      # secuencia creciente vigente
-    bajista = _lt(ph1, ph2) & _lt(pl1, pl2)      # secuencia decreciente vigente
-    # Cambio de carácter: primer mínimo perdido tras una secuencia creciente (y su simétrico).
-    choch_dn = alcista & _lt(c, pl1)
-    choch_up = bajista & _gt(c, ph1)
+    uptrend = _gt(ph1, ph2) & _gt(pl1, pl2)      # rising sequence in force
+    downtrend = _lt(ph1, ph2) & _lt(pl1, pl2)    # falling sequence in force
+    # Change of character: first low lost after a rising sequence (and its mirror image).
+    choch_dn = uptrend & _lt(c, pl1)
+    choch_up = downtrend & _gt(c, ph1)
     return _hold(choch_up, choch_dn)
 
 
 register(Hypothesis(
     name="structure.choch",
     family="structure",
-    rationale="El cambio de carácter es la primera vez que la secuencia se rompe: veníamos "
-              "haciendo máximos y mínimos crecientes y de pronto se pierde el último mínimo. El "
-              "mecanismo no es la ruptura en sí, sino QUIÉN está al otro lado: en una secuencia "
-              "creciente, cada mínimo es donde compró la última tanda de tendencia, con el stop "
-              "justo debajo. Perder ese mínimo significa que la demanda que sostenía el impulso "
-              "ya no aparece y convierte a los compradores recientes en vendedores forzados. La "
-              "diferencia con `bos_swing` es que aquí solo se opera la ruptura CONTRA la "
-              "estructura vigente, no a favor.",
-    prior="Esperamos ventaja positiva pero MENOR que la de continuación, y muy dependiente del "
-          "timeframe: creíble en 4h y 1d, dudosa en 15m. Esperamos que falle claramente en "
-          "tendencias fuertes, donde la mayoría de los CHoCH son sacudidas dentro del impulso y "
-          "el precio reanuda: ahí debe dar ventaja NEGATIVA, y si no la da es que la señal no "
-          "está capturando lo que creemos. También queda refutada si su resultado no se distingue "
-          "del de `bos_swing` con signo cambiado: eso significaría que solo estamos midiendo "
-          "autocorrelación del precio, no estructura.",
+    rationale="The change of character is the first time the sequence breaks: we had been making "
+              "higher highs and higher lows and suddenly the last low is lost. The mechanism is "
+              "not the break itself but WHO is on the other side: in a rising sequence, each low "
+              "is where the latest batch of trend buyers got in, with the stop just underneath. "
+              "Losing that low means the demand that was holding the impulse up no longer shows "
+              "up, and it turns the recent buyers into forced sellers. The difference from "
+              "`bos_swing` is that here only the break AGAINST the structure in force is traded, "
+              "not the one with it.",
+    prior="We expect a positive edge but SMALLER than the continuation one, and heavily dependent "
+          "on the timeframe: credible on 4h and 1d, doubtful on 15m. We expect it to fail clearly "
+          "in strong trends, where most CHoCHs are shakeouts inside the impulse and price resumes: "
+          "there it should give a NEGATIVE edge, and if it does not, the signal is not capturing "
+          "what we think it is. It is also refuted if its result is indistinguishable from "
+          "`bos_swing`'s with the sign flipped: that would mean we are only measuring price "
+          "autocorrelation, not structure.",
     fn=_choch,
-    params={"fractal_k": _K, "contexto": "2 pivotes por lado"},
+    params={"fractal_k": _K, "context": "2 pivots per side"},
     timeframes=("1h", "4h", "1d"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 5. Régimen estructural HH/HL vs LH/LL
+# 5. Structural regime HH/HL vs LH/LL
 # --------------------------------------------------------------------------------------------
 
 def _swing_trend_state(s: Series) -> np.ndarray:
@@ -389,19 +392,19 @@ def _swing_trend_state(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="structure.swing_trend_state",
     family="structure",
-    rationale="Hipótesis mínima de la familia, y a propósito la más aburrida: no hay evento ni "
-              "ruptura, solo la clasificación clásica de Dow. Se está largo mientras los dos "
-              "últimos pivotes confirmados sean máximo creciente Y mínimo creciente, corto en el "
-              "caso simétrico, y fuera cuando la estructura está mezclada. Sirve de PATRÓN DE "
-              "REFERENCIA: si las hipótesis de evento no baten a esto, lo que están capturando es "
-              "la tendencia de fondo y no el mecanismo de liquidez que dicen explotar. El estar "
-              "fuera en estructura mezclada es la parte que aporta, porque ahí es donde el "
-              "seguimiento de tendencia pierde dinero.",
-    prior="Esperamos ventaja positiva pequeña, dominada por el sesgo alcista histórico de BTC, "
-          "con un tiempo fuera de mercado sustancial (más del 25% de las velas). Esperamos que la "
-          "parte corta tenga ventaja negativa o nula por sí sola: si los cortos aportan tanto "
-          "como los largos, hay que sospechar del período de datos, no celebrarlo. Queda refutada "
-          "como referencia útil si su resultado es indistinguible de estar comprado y quieto.",
+    rationale="The family's minimal hypothesis, and deliberately the dullest: no event and no "
+              "breakout, just the classic Dow classification. Long while the last two confirmed "
+              "pivots are a higher high AND a higher low, short in the mirror case, and flat when "
+              "the structure is mixed. It serves as the BENCHMARK: if the event hypotheses do not "
+              "beat this, what they are capturing is the underlying trend and not the liquidity "
+              "mechanism they claim to exploit. Being flat on mixed structure is the part that "
+              "contributes, because that is where trend following loses money.",
+    prior="We expect a small positive edge, dominated by BTC's historical bullish bias, with a "
+          "substantial amount of time out of the market (more than 25% of candles). We expect the "
+          "short side to have a negative or nil edge on its own: if the shorts contribute as much "
+          "as the longs, the data period should be treated with suspicion rather than celebrated. "
+          "It is refuted as a useful benchmark if its result is indistinguishable from buying and "
+          "sitting still.",
     fn=_swing_trend_state,
     params={"fractal_k": _K},
     timeframes=("1h", "4h", "1d"),
@@ -410,7 +413,7 @@ register(Hypothesis(
 
 
 # --------------------------------------------------------------------------------------------
-# 6. Barrida de liquidez: ruptura falsa del canal de 20
+# 6. Liquidity sweep: false break of the 20 channel
 # --------------------------------------------------------------------------------------------
 
 def _sweep_reversal_20(s: Series) -> np.ndarray:
@@ -419,37 +422,37 @@ def _sweep_reversal_20(s: Series) -> np.ndarray:
         return np.zeros(n, dtype=np.int8)
     c, hi, lo = _f(s.close), _f(s.high), _f(s.low)
     hh, ll = _prev_max(s.high, 20), _prev_min(s.low, 20)
-    corto = _gt(hi, hh) & _lt(c, hh)     # perfora el máximo previo y cierra por debajo
-    largo = _lt(lo, ll) & _gt(c, ll)     # perfora el mínimo previo y cierra por encima
-    return _hold_n(largo, corto)
+    short_ev = _gt(hi, hh) & _lt(c, hh)    # pierces the previous high and closes below it
+    long_ev = _lt(lo, ll) & _gt(c, ll)     # pierces the previous low and closes above it
+    return _hold_n(long_ev, short_ev)
 
 
 register(Hypothesis(
     name="structure.sweep_reversal_20",
     family="structure",
-    rationale="La cara opuesta de `donchian_break_20`, sobre el MISMO nivel y a propósito. Si la "
-              "liquidez está amontonada justo detrás del extremo de 20 velas, hay un participante "
-              "con incentivo directo a ir a buscarla: el que necesita ejecutar tamaño y solo "
-              "puede hacerlo contra los stops de los demás. La firma observable es una vela que "
-              "perfora el nivel en máximos pero cierra DENTRO del rango: se ejecutaron los stops, "
-              "no había continuación detrás y el precio vuelve. Cierre dentro es la condición "
-              "clave, porque distingue absorción de ruptura genuina.",
-    prior="Esperamos ventaja positiva de vida corta —concentrada en las primeras velas del "
-          "horizonte de 10— con tasa de acierto ALTA y ganancia media pequeña, el perfil inverso "
-          "al de la ruptura. Esperamos que falle en tendencias fuertes, donde la falsa ruptura "
-          "solo es una pausa antes de continuar, y que falle en 1d, donde una vela diaria agrupa "
-          "demasiados eventos como para que el cierre signifique 'absorción'. Si tanto esta "
-          "hipótesis como `donchian_break_20` salen positivas sobre el mismo período y régimen, "
-          "hay que sospechar del estimador antes que creerse las dos.",
+    rationale="The opposite face of `donchian_break_20`, on the SAME level and on purpose. If "
+              "liquidity is piled up just behind the 20-candle extreme, there is a participant "
+              "with a direct incentive to go and get it: whoever needs to execute size and can "
+              "only do so against everybody else's stops. The observable signature is a candle "
+              "that pierces the level on the high but closes INSIDE the range: the stops were "
+              "filled, there was no continuation behind them and price comes back. Closing inside "
+              "is the key condition, because it separates absorption from a genuine break.",
+    prior="We expect a short-lived positive edge —concentrated in the first candles of the "
+          "10-candle horizon— with a HIGH hit rate and a small average gain, the inverse profile "
+          "to the breakout's. We expect it to fail in strong trends, where the false break is only "
+          "a pause before continuing, and to fail on 1d, where a daily candle bundles too many "
+          "events for the close to mean 'absorption'. If both this hypothesis and "
+          "`donchian_break_20` come out positive over the same period and regime, the estimator "
+          "should be suspected before either of them is believed.",
     fn=_sweep_reversal_20,
-    params={"canal": 20, "horizonte": _HOLD},
+    params={"channel": 20, "horizon": _HOLD},
     timeframes=("15m", "1h", "4h"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 7. Retest del nivel roto
+# 7. Retest of the broken level
 # --------------------------------------------------------------------------------------------
 
 def _retest_hold(s: Series) -> np.ndarray:
@@ -463,33 +466,33 @@ def _retest_hold(s: Series) -> np.ndarray:
 
     lvl_u = np.nan
     ttl_u = 0
-    toc_u = False
+    touched_u = False
     lvl_d = np.nan
     ttl_d = 0
-    toc_d = False
+    touched_d = False
 
     for i in range(n):
-        # Todo lo que se lee aquí es de la vela i o de estado acumulado de velas anteriores.
-        rot_u = (not np.isnan(hh[i])) and c[i] > hh[i]
-        rot_d = (not np.isnan(ll[i])) and c[i] < ll[i]
+        # Everything read here is from candle i or from state accumulated over earlier candles.
+        brk_u = (not np.isnan(hh[i])) and c[i] > hh[i]
+        brk_d = (not np.isnan(ll[i])) and c[i] < ll[i]
 
-        if rot_u:
-            lvl_u, ttl_u, toc_u = hh[i], _HOLD, False
+        if brk_u:
+            lvl_u, ttl_u, touched_u = hh[i], _HOLD, False
         elif ttl_u > 0:
             ttl_u -= 1
             if lo[i] <= lvl_u:
-                toc_u = True
-            if toc_u and c[i] > lvl_u:
+                touched_u = True
+            if touched_u and c[i] > lvl_u:
                 ev_up[i] = True
                 ttl_u = 0
 
-        if rot_d:
-            lvl_d, ttl_d, toc_d = ll[i], _HOLD, False
+        if brk_d:
+            lvl_d, ttl_d, touched_d = ll[i], _HOLD, False
         elif ttl_d > 0:
             ttl_d -= 1
             if hi[i] >= lvl_d:
-                toc_d = True
-            if toc_d and c[i] < lvl_d:
+                touched_d = True
+            if touched_d and c[i] < lvl_d:
                 ev_dn[i] = True
                 ttl_d = 0
 
@@ -499,28 +502,28 @@ def _retest_hold(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="structure.retest_hold",
     family="structure",
-    rationale="El nivel roto cambia de papel, y hay una razón de flujo concreta para ello: los "
-              "que vendieron en la resistencia y quedaron atrapados intentan salir en el punto de "
-              "entrada cuando el precio vuelve, y los que se perdieron la ruptura tienen ahí su "
-              "referencia para comprar sin perseguir. Ambos actúan en el mismo sitio y en la "
-              "misma dirección. La condición operativa es exigente a propósito: hay que romper, "
-              "VOLVER a tocar el nivel dentro de 10 velas y cerrar otra vez del lado bueno. Si "
-              "solo importara la ruptura, esto no aportaría nada sobre la hipótesis 1.",
-    prior="Esperamos MENOS operaciones que la ruptura simple y mejor resultado por operación, "
-          "porque el retest filtra las rupturas sin comprador detrás. Esperamos que falle en las "
-          "rupturas más violentas —justo las que más aportan a la hipótesis 1— porque esas nunca "
-          "vuelven a tocar el nivel y el filtro las descarta: si el efecto de ruptura es de cola "
-          "derecha pura, este filtro debería DESTRUIR la ventaja en lugar de mejorarla. Ese es el "
-          "contraste que interesa, y las dos conclusiones son publicables.",
+    rationale="The broken level changes role, and there is a concrete flow reason for it: those "
+              "who sold at resistance and got trapped try to get out at their entry point when "
+              "price comes back, and those who missed the break have their reference there to buy "
+              "without chasing. Both act in the same place and in the same direction. The trading "
+              "condition is demanding on purpose: it has to break, COME BACK and touch the level "
+              "within 10 candles, and close on the right side again. If only the break mattered, "
+              "this would add nothing over hypothesis 1.",
+    prior="We expect FEWER trades than the plain break and a better result per trade, because the "
+          "retest filters out the breaks with no buyer behind them. We expect it to fail on the "
+          "most violent breaks —precisely the ones that contribute most to hypothesis 1— because "
+          "those never come back to touch the level and the filter discards them: if the breakout "
+          "effect is pure right tail, this filter should DESTROY the edge rather than improve it. "
+          "That is the test that matters, and both conclusions are publishable.",
     fn=_retest_hold,
-    params={"canal": 20, "ventana_retest": _HOLD, "horizonte": _HOLD},
+    params={"channel": 20, "retest_window": _HOLD, "horizon": _HOLD},
     timeframes=("15m", "1h", "4h", "1d"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 8. Ruptura tras compresión del canal
+# 8. Breakout after channel compression
 # --------------------------------------------------------------------------------------------
 
 def _compression_break(s: Series) -> np.ndarray:
@@ -529,41 +532,41 @@ def _compression_break(s: Series) -> np.ndarray:
         return np.zeros(n, dtype=np.int8)
     c = _f(s.close)
     hh, ll = _prev_max(s.high, 20), _prev_min(s.low, 20)
-    ancho = hh - ll
-    min_ancho = talib.MIN(_f(np.nan_to_num(ancho, nan=np.inf)), 60)
-    # `ancho` en i ya solo depende de velas < i; la ventana de 60 de talib termina en i.
-    comprimido = np.zeros(n, dtype=bool)
-    ok = ~(np.isnan(ancho) | np.isnan(min_ancho) | np.isinf(min_ancho))
-    np.less_equal(ancho, min_ancho, out=comprimido, where=ok)
-    return _hold(comprimido & _gt(c, hh), comprimido & _lt(c, ll))
+    width = hh - ll
+    min_width = talib.MIN(_f(np.nan_to_num(width, nan=np.inf)), 60)
+    # `width` at i already depends only on candles < i; talib's 60-window ends at i.
+    compressed = np.zeros(n, dtype=bool)
+    ok = ~(np.isnan(width) | np.isnan(min_width) | np.isinf(min_width))
+    np.less_equal(width, min_width, out=compressed, where=ok)
+    return _hold(compressed & _gt(c, hh), compressed & _lt(c, ll))
 
 
 register(Hypothesis(
     name="structure.compression_break",
     family="structure",
-    rationale="Una ruptura solo importa si antes había desacuerdo contenido. Cuando el ancho del "
-              "canal de 20 cae a su mínimo de las últimas 60 velas, compradores y vendedores han "
-              "llegado a un equilibrio estrecho y ambos bandos han ido acumulando stops muy "
-              "cerca, a pocos ticks del precio y unos de otros. Salir de esa zona ejecuta las dos "
-              "carteras de stops en cadena, que es el único momento en que una ruptura arrastra "
-              "un volumen desproporcionado respecto al tamaño del movimiento previo. La "
-              "compresión no predice la dirección: solo dice que el movimiento que la resuelva "
-              "será desproporcionado.",
-    prior="Esperamos ventaja por operación SUPERIOR a la de `donchian_break_20` con muchas menos "
-          "operaciones, y esa comparación es el contraste real de la hipótesis: si el filtro de "
-          "compresión no mejora nada, la idea de la doble cartera de stops es falsa y solo "
-          "estábamos operando menos. Esperamos que falle tras caídas violentas, donde la "
-          "compresión aparece por agotamiento y no por equilibrio, y en 1d, donde 60 velas son "
-          "dos meses y el mínimo de ancho llega tarde.",
+    rationale="A break only matters if there was contained disagreement beforehand. When the width "
+              "of the 20 channel falls to its lowest of the last 60 candles, buyers and sellers "
+              "have reached a narrow equilibrium and both camps have been stacking stops very "
+              "close by, a few ticks from price and from each other. Leaving that zone executes "
+              "both stop books in a chain, which is the only moment when a break drags along a "
+              "volume disproportionate to the size of the preceding move. Compression does not "
+              "predict direction: it only says that the move which resolves it will be "
+              "disproportionate.",
+    prior="We expect an edge per trade HIGHER than `donchian_break_20`'s with far fewer trades, "
+          "and that comparison is the hypothesis's real test: if the compression filter improves "
+          "nothing, the twin-stop-book idea is false and all we were doing was trading less. We "
+          "expect it to fail after violent falls, where the compression appears through exhaustion "
+          "and not through equilibrium, and on 1d, where 60 candles are two months and the width "
+          "minimum arrives late.",
     fn=_compression_break,
-    params={"canal": 20, "ventana_compresion": 60},
+    params={"channel": 20, "compression_window": 60},
     timeframes=("15m", "1h", "4h", "1d"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 9. Ruptura confirmada por volumen
+# 9. Volume-confirmed breakout
 # --------------------------------------------------------------------------------------------
 
 def _volume_confirmed_break(s: Series) -> np.ndarray:
@@ -572,36 +575,35 @@ def _volume_confirmed_break(s: Series) -> np.ndarray:
         return np.zeros(n, dtype=np.int8)
     c, v = _f(s.close), _f(s.volume)
     hh, ll = _prev_max(s.high, 20), _prev_min(s.low, 20)
-    vmed = talib.SMA(v, 20)                    # incluye la vela i: dato disponible en i
-    fuerte = _gt(v, vmed)
-    return _hold(_gt(c, hh) & fuerte, _lt(c, ll) & fuerte)
+    v_avg = talib.SMA(v, 20)                   # includes candle i: a datum available at i
+    strong = _gt(v, v_avg)
+    return _hold(_gt(c, hh) & strong, _lt(c, ll) & strong)
 
 
 register(Hypothesis(
     name="structure.volume_confirmed_break",
     family="structure",
-    rationale="Si el mecanismo de la ruptura es la ejecución en cascada de órdenes acumuladas, "
-              "entonces tiene una huella obligatoria: volumen. Una ruptura con volumen por debajo "
-              "de su media de 20 significa que no había nadie esperando en ese nivel, que el "
-              "precio llegó ahí por deriva y no por ejecución, y que por tanto no hay ningún "
-              "flujo forzado que continúe el movimiento. El volumen no se usa aquí como "
-              "indicador, sino como VERIFICACIÓN del mecanismo que las hipótesis 1 y 8 dan por "
-              "supuesto.",
-    prior="Esperamos ventaja positiva y, sobre todo, ventaja por operación MAYOR que la de "
-          "`donchian_break_20` sin filtro. Si el filtro de volumen no mejora nada, la explicación "
-          "por cascada de órdenes queda seriamente debilitada para todas las hipótesis de "
-          "ruptura de esta familia, y eso es un resultado más valioso que la hipótesis en sí. "
-          "Esperamos que falle en 1d, donde el volumen diario de BTC está dominado por el ciclo "
-          "semanal y por el reparto entre exchanges, no por el evento de ruptura.",
+    rationale="If the breakout mechanism is the cascading execution of accumulated orders, then it "
+              "has a compulsory fingerprint: volume. A break on volume below its 20-period average "
+              "means there was nobody waiting at that level, that price got there by drift and not "
+              "by execution, and that there is therefore no forced flow to continue the move. "
+              "Volume is not used here as an indicator but as a VERIFICATION of the mechanism that "
+              "hypotheses 1 and 8 take for granted.",
+    prior="We expect a positive edge and, above all, an edge per trade GREATER than unfiltered "
+          "`donchian_break_20`'s. If the volume filter improves nothing, the order-cascade "
+          "explanation is seriously weakened for every breakout hypothesis in this family, and "
+          "that is a more valuable result than the hypothesis itself. We expect it to fail on 1d, "
+          "where BTC's daily volume is dominated by the weekly cycle and by the split across "
+          "exchanges, not by the breakout event.",
     fn=_volume_confirmed_break,
-    params={"canal": 20, "media_volumen": 20},
+    params={"channel": 20, "volume_average": 20},
     timeframes=("15m", "1h", "4h", "1d"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 10. Ruptura con colchón de ATR
+# 10. Breakout with an ATR buffer
 # --------------------------------------------------------------------------------------------
 
 def _atr_buffered_break(s: Series) -> np.ndarray:
@@ -617,57 +619,57 @@ def _atr_buffered_break(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="structure.atr_buffered_break",
     family="structure",
-    rationale="Complemento directo de `sweep_reversal_20` y contraste explícito de la hipótesis 1. "
-              "Si es cierto que los stops se amontonan justo detrás del nivel y que alguien los "
-              "va a buscar, entonces la ruptura MARGINAL —la que asoma unos ticks por encima— es "
-              "sistemáticamente la peor, porque es exactamente la que produce quien quiere "
-              "vender. Exigir que el cierre supere el nivel por medio ATR de 14 velas descarta "
-              "esa zona sin cambiar nada más de la regla, y hace que el colchón se adapte solo a "
-              "la volatilidad en lugar de fijar un porcentaje arbitrario.",
-    prior="Esperamos ventaja positiva y mayor por operación que la ruptura sin colchón, y este es "
-          "el contraste que importa. Como `sweep_reversal_20` afirma que la zona descartada tiene "
-          "ventaja NEGATIVA, las dos hipótesis deben ser coherentes entre sí: si la barrida "
-          "resulta rentable pero el colchón no mejora la ruptura, o al revés, alguna de las dos "
-          "está midiendo otra cosa. Esperamos que el colchón perjudique en 1d, donde media ATR "
-          "diaria es un movimiento enorme y entrar tan tarde regala la mayor parte del "
-          "desplazamiento.",
+    rationale="A direct complement to `sweep_reversal_20` and an explicit test of hypothesis 1. If "
+              "it is true that the stops pile up just behind the level and that somebody goes "
+              "looking for them, then the MARGINAL break —the one that pokes a few ticks above— is "
+              "systematically the worst, because it is exactly the one produced by whoever wants "
+              "to sell. Requiring the close to clear the level by half a 14-candle ATR discards "
+              "that zone without changing anything else about the rule, and it makes the buffer "
+              "adapt to volatility on its own instead of fixing an arbitrary percentage.",
+    prior="We expect a positive edge and a larger one per trade than the break without a buffer, "
+          "and this is the comparison that matters. Since `sweep_reversal_20` claims the discarded "
+          "zone has a NEGATIVE edge, the two hypotheses have to be consistent with each other: if "
+          "the sweep turns out profitable but the buffer does not improve the break, or the other "
+          "way round, one of the two is measuring something else. We expect the buffer to hurt on "
+          "1d, where half a daily ATR is an enormous move and entering that late gives away most "
+          "of the displacement.",
     fn=_atr_buffered_break,
-    params={"canal": 20, "atr": 14, "colchon_atr": 0.5},
+    params={"channel": 20, "atr": 14, "atr_buffer": 0.5},
     timeframes=("15m", "1h", "4h", "1d"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 11. HUECO DEJADO POR UNA HIPÓTESIS RETIRADA EN AUDITORÍA (2026-09-08)
+# 11. GAP LEFT BY A HYPOTHESIS WITHDRAWN IN THE AUDIT (2026-09-08)
 #
-# Aquí estaba `structure.inside_bar_break`. Se ha ELIMINADO por ser un DUPLICADO exacto de
-# `candles.vela_interior_ruptura`: misma condición de contención (la vela i-1 dentro de la i-2),
-# mismo nivel de ruptura (los extremos de la vela madre, i-2) y misma confirmación (el cierre de
-# i). Lo único que las separaba era `<` frente a `<=` en la contención y el horizonte de tenencia
-# (10 velas aquí, pulso de 1 vela allí). Medido sobre datos, el conjunto de eventos de esta
-# hipótesis era un SUBCONJUNTO ESTRICTO del de la otra: 244 de 244 eventos coincidían vela a vela.
+# `structure.inside_bar_break` used to be here. It has been DELETED for being an exact DUPLICATE of
+# `candles.inside_bar_break`: same containment condition (candle i-1 inside candle i-2), same
+# breakout level (the extremes of the mother candle, i-2) and same confirmation (the close of i).
+# The only things separating them were `<` versus `<=` in the containment and the holding horizon
+# (10 candles here, a 1-candle pulse there). Measured against data, this hypothesis's event set was
+# a STRICT SUBSET of the other's: 244 out of 244 events matched candle for candle.
 #
-# Por qué importaba y no es cosmético. Un registro previo solo sirve si el número de ensayos que
-# entra en la corrección por contraste múltiple es el número de APUESTAS DISTINTAS. Registrar la
-# misma apuesta en dos familias la cuenta dos veces, y como además las dos comparten casi todas
-# sus señales, sus resultados están correlacionados: si el patrón funciona por azar, "funciona"
-# dos veces y parece confirmación cruzada entre familias cuando es la misma observación repetida.
-# Ese es exactamente el sesgo que este registro existe para evitar, y la diferencia de horizonte
-# no lo arregla: mantener 10 velas en vez de 1 multiplica cada evento por diez observaciones
-# solapadas sobre casi la misma ventana futura, lo que infla `n_signals` sin aportar información
-# (para eso está `effective_n`).
+# Why it mattered, and why this is not cosmetic. A pre-registration is only worth anything if the
+# number of trials entering the multiple-comparisons correction is the number of DISTINCT BETS.
+# Registering the same bet in two families counts it twice, and since the two also share almost all
+# their signals, their results are correlated: if the pattern works by chance it "works" twice and
+# looks like cross-family confirmation when it is the same observation repeated. That is exactly
+# the bias this registry exists to prevent, and the difference in horizon does not fix it: holding
+# 10 candles instead of 1 multiplies each event into ten overlapping observations over almost the
+# same future window, which inflates `n_signals` without adding information (that is what
+# `effective_n` is for).
 #
-# Se conserva la versión de `candles` porque es el superconjunto (contención no estricta) y su
-# pulso de una vela es la codificación limpia de la apuesta. La variante de `volatility.
-# inside_bar_breakout` NO se elimina: rompe los extremos de la vela INTERIOR, no los de la madre,
-# que es un nivel distinto y una afirmación mecánica distinta; queda declarada como ensayo
-# dependiente en el propio fichero de `volatility`.
+# The `candles` version is kept because it is the superset (non-strict containment) and its
+# one-candle pulse is the clean encoding of the bet. The `volatility.inside_bar_breakout` variant
+# is NOT removed: it breaks the extremes of the INSIDE candle, not the mother's, which is a
+# different level and a different mechanical claim; it is declared as a dependent trial in
+# `volatility`'s own file.
 # --------------------------------------------------------------------------------------------
 
 
 # --------------------------------------------------------------------------------------------
-# 12. Fade de los extremos cuando la estructura NO es tendencial
+# 12. Fading the extremes when the structure is NOT trending
 # --------------------------------------------------------------------------------------------
 
 def _range_fade_swing(s: Series) -> np.ndarray:
@@ -676,56 +678,56 @@ def _range_fade_swing(s: Series) -> np.ndarray:
         return np.zeros(n, dtype=np.int8)
     c = _f(s.close)
     ph1, _, pl1, _ = _pivot_levels(s)
-    mezclada = _structure_state(s) == 0          # ni HH+HL ni LH+LL
-    # `_fresh`: el evento es el TOQUE del extremo, no el estado de estar por encima de él.
-    corto = mezclada & _fresh(_gt(c, ph1))
-    largo = mezclada & _fresh(_lt(c, pl1))
-    return _hold_n(largo, corto)
+    mixed = _structure_state(s) == 0             # neither HH+HL nor LH+LL
+    # `_fresh`: the event is the TOUCH of the extreme, not the state of being beyond it.
+    short_ev = mixed & _fresh(_gt(c, ph1))
+    long_ev = mixed & _fresh(_lt(c, pl1))
+    return _hold_n(long_ev, short_ev)
 
 
 register(Hypothesis(
     name="structure.range_fade_swing",
     family="structure",
-    rationale="Contradice deliberadamente a `bos_swing` sobre el mismo nivel, y solo se activa "
-              "donde aquella debería ser más débil: cuando la secuencia de pivotes está mezclada "
-              "y no hay estructura direccional. El razonamiento es de inventario. Sin tendencia "
-              "que absorba, quien provee liquidez en los extremos de la oscilación no tiene "
-              "riesgo de quedarse en el lado equivocado de un movimiento sostenido, así que "
-              "puede defender esos niveles con tamaño; la ruptura se queda sin continuación y el "
-              "precio revierte hacia el centro del rango. La afirmación fuerte no es 'los rangos "
-              "revierten', sino que la MISMA señal cambia de signo según el estado estructural.",
-    prior="Esperamos ventaja positiva SOLO bajo el filtro de estructura mezclada, y esperamos "
-          "explícitamente que la misma regla sin ese filtro dé ventaja negativa. NOTA DE AUDITORÍA "
-          "(2026-09-08): esa regla sin filtro no estaba registrada, así que el criterio de "
-          "falsación central de esta hipótesis no se podía ejecutar; se ha registrado como "
-          "`structure.swing_fade_unfiltered` y es contra él contra quien debe medirse. Un fractal de 5 "
-          "velas deja el nivel muy cerca del precio, así que esperamos MUCHAS operaciones y que "
-          "los costes se coman una ventaja bruta pequeña: si la ventaja neta no sobrevive a "
-          "comisiones y diferencial realistas, la hipótesis está refutada aunque la bruta sea "
-          "positiva, y no vale rescatarla subiendo k. Esperamos que "
-          "falle en los giros de régimen, donde la estructura aparece mezclada justo mientras se "
-          "está construyendo la tendencia nueva: ahí los fades se ejecutan contra el impulso "
-          "inicial y deberían ser las peores operaciones de toda la familia. Si el resultado es "
-          "positivo tanto aquí como en `bos_swing` sin que el régimen los separe, el filtro no "
-          "está haciendo nada y ambas conclusiones deben descartarse.",
+    rationale="Deliberately contradicts `bos_swing` on the same level, and only activates where "
+              "that one should be weakest: when the sequence of pivots is mixed and there is no "
+              "directional structure. The reasoning is about inventory. With no trend to absorb, "
+              "whoever provides liquidity at the swing extremes runs no risk of ending up on the "
+              "wrong side of a sustained move, so they can defend those levels with size; the "
+              "break finds no continuation and price reverts towards the middle of the range. The "
+              "strong claim is not 'ranges revert', but that the SAME signal changes sign "
+              "according to the structural state.",
+    prior="We expect a positive edge ONLY under the mixed-structure filter, and we explicitly "
+          "expect the same rule without that filter to give a negative edge. AUDIT NOTE "
+          "(2026-09-08): that unfiltered rule was not registered, so this hypothesis's central "
+          "falsification criterion could not be run; it has been registered as "
+          "`structure.swing_fade_unfiltered` and that is what it must be measured against. A "
+          "5-candle fractal leaves the level very close to price, so we expect MANY trades and for "
+          "costs to eat a small gross edge: if the net edge does not survive realistic commissions "
+          "and spread, the hypothesis is refuted even if the gross one is positive, and it is not "
+          "legitimate to rescue it by raising k. We expect it to "
+          "fail at regime turns, where the structure looks mixed exactly while the new trend is "
+          "being built: there the fades execute against the initial impulse and should be the "
+          "worst trades in the whole family. If the result is positive both here and in "
+          "`bos_swing` without the regime separating them, the filter is doing nothing and both "
+          "conclusions must be discarded.",
     fn=_range_fade_swing,
-    params={"fractal_k": _K, "filtro": "estructura mezclada", "horizonte": _HOLD},
+    params={"fractal_k": _K, "filter": "mixed structure", "horizon": _HOLD},
     timeframes=("15m", "1h", "4h"),
     min_warmup=200,
 ))
 
 
 # --------------------------------------------------------------------------------------------
-# 12b. CONTROL AÑADIDO EN AUDITORÍA (2026-09-08) para que `range_fade_swing` sea falsable.
+# 12b. CONTROL ADDED IN THE AUDIT (2026-09-08) so that `range_fade_swing` is falsifiable.
 #
-# Qué estaba mal. El prior de `structure.range_fade_swing` dice, literalmente, que espera ventaja
-# positiva "SOLO bajo el filtro de estructura mezclada" y que "la misma regla sin ese filtro dé
-# ventaja negativa". Ese es su criterio de falsación y es el bueno: la afirmación fuerte no es que
-# desvanecer extremos gane, sino que el ESTADO ESTRUCTURAL cambie el signo. El problema es que la
-# regla sin filtro no estaba registrada en ninguna parte, así que el contraste no se podía
-# ejecutar: un prior cuyo criterio de fracaso nombra un control inexistente no puede fallar, y un
-# prior que no puede fallar no es un prior. Se registra aquí el control, con su propio prior y
-# contando como un ensayo más en la corrección por contraste múltiple.
+# What was wrong. The prior of `structure.range_fade_swing` says, literally, that it expects a
+# positive edge "ONLY under the mixed-structure filter" and that "the same rule without that filter
+# gives a negative edge". That is its falsification criterion and it is the right one: the strong
+# claim is not that fading extremes wins, but that the STRUCTURAL STATE changes the sign. The
+# problem was that the unfiltered rule was registered nowhere, so the test could not be run: a
+# prior whose failure criterion names a control that does not exist cannot fail, and a prior that
+# cannot fail is not a prior. The control is registered here, with its own prior and counting as
+# one more trial in the multiple-comparisons correction.
 # --------------------------------------------------------------------------------------------
 
 def _swing_fade_unfiltered(s: Series) -> np.ndarray:
@@ -734,31 +736,31 @@ def _swing_fade_unfiltered(s: Series) -> np.ndarray:
         return np.zeros(n, dtype=np.int8)
     c = _f(s.close)
     ph1, _, pl1, _ = _pivot_levels(s)
-    # Idéntica a `range_fade_swing` salvo por la ausencia del filtro `mezclada`.
+    # Identical to `range_fade_swing` except for the absence of the `mixed` filter.
     return _hold_n(_fresh(_lt(c, pl1)), _fresh(_gt(c, ph1)))
 
 
 register(Hypothesis(
     name="structure.swing_fade_unfiltered",
     family="structure",
-    rationale="Control incondicional de `range_fade_swing`: desvanecer el toque del último pivote "
-              "confirmado en TODOS los estados estructurales, no solo cuando la secuencia está "
-              "mezclada. No afirma un mecanismo propio —al contrario, el mecanismo de inventario "
-              "que justifica el fade solo se sostiene cuando no hay tendencia que absorba— y está "
-              "aquí porque una afirmación condicional únicamente es comprobable si el caso "
-              "incondicional también se mide. Sin este control, un resultado positivo de "
-              "`range_fade_swing` no distinguiría 'el filtro estructural aporta' de 'desvanecer "
-              "extremos de oscilación gana siempre y el filtro es decorativo'.",
-    prior="Esperamos ventaja NEGATIVA, y estamos comprometidos con ese signo por adelantado: sin "
-          "filtro, la misma regla se pone corta contra cada ruptura de una tendencia viva, que es "
-          "el modo de fallo declarado de todo desvanecimiento. La lectura conjunta es la que "
-          "importa y se fija ahora: si esta sale negativa y `range_fade_swing` positiva, el estado "
-          "estructural separa régimen y la afirmación condicional se sostiene; si ambas salen "
-          "parecidas, el filtro no hace nada y las dos deben descartarse; si esta sale POSITIVA, "
-          "lo que hay es reversión a la media genérica en los extremos de oscilación y el "
-          "argumento de inventario de `range_fade_swing` es falso aunque su número sea bueno.",
+    rationale="Unconditional control for `range_fade_swing`: fading the touch of the last "
+              "confirmed pivot in ALL structural states, not only when the sequence is mixed. It "
+              "claims no mechanism of its own —on the contrary, the inventory mechanism that "
+              "justifies the fade only holds when there is no trend to absorb— and it is here "
+              "because a conditional claim is only testable if the unconditional case is measured "
+              "too. Without this control, a positive result for `range_fade_swing` would not "
+              "distinguish 'the structural filter contributes' from 'fading swing extremes always "
+              "wins and the filter is decorative'.",
+    prior="We expect a NEGATIVE edge, and we are committed to that sign in advance: without the "
+          "filter, the same rule goes short against every breakout of a live trend, which is the "
+          "declared failure mode of all fading. The joint reading is what matters and it is fixed "
+          "now: if this one comes out negative and `range_fade_swing` positive, the structural "
+          "state does separate regimes and the conditional claim holds; if both come out similar, "
+          "the filter does nothing and both must be discarded; if this one comes out POSITIVE, "
+          "what we have is generic mean reversion at the swing extremes and `range_fade_swing`'s "
+          "inventory argument is false even if its number is good.",
     fn=_swing_fade_unfiltered,
-    params={"fractal_k": _K, "filtro": "ninguno", "horizonte": _HOLD},
+    params={"fractal_k": _K, "filter": "none", "horizon": _HOLD},
     timeframes=("15m", "1h", "4h"),
     min_warmup=200,
 ))

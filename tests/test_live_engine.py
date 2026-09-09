@@ -1,7 +1,8 @@
-"""El motor en vivo debe producir EXACTAMENTE lo mismo que el camino offline.
+"""The live engine must produce EXACTLY the same thing as the offline path.
 
-Si el resampleo en vivo y el del backtest difirieran aunque fuese en el último decimal, toda la
-promesa de «una sola función» sería falsa: el backtest mediría una serie y el usuario vería otra.
+If live resampling and backtest resampling differed even in the last decimal, the whole promise of
+«one single function» would be false: the backtest would be measuring one series and the user would
+be looking at another.
 """
 
 from __future__ import annotations
@@ -20,8 +21,8 @@ def _engine(tfs=("1m", "15m", "1h")) -> LiveEngine:
     return LiveEngine(SYMBOL, list(tfs), ring_capacity=4096, trigger_tf="15m")
 
 
-class TestResampleoEnVivo:
-    def test_coincide_con_el_offline_barra_por_barra(self):
+class TestLiveResampling:
+    def test_it_matches_the_offline_path_bar_for_bar(self):
         bars = make_bars(600, tf=TF_1M)
         e = _engine()
         for b in bars:
@@ -36,51 +37,51 @@ class TestResampleoEnVivo:
         for tf in (TF_15M, TF_1H):
             offline = resample_from_1m(df, tf)
             offline = offline[offline["n_source_bars"] == tf.expected_source_bars]
-            anillo = e.state.rings[tf.name]
-            w = anillo.window(len(anillo))
-            comunes = offline.index.intersection(w.ts)
-            assert len(comunes) >= 4, f"muy pocas velas de {tf.name} para comparar"
-            for ts in comunes:
+            ring = e.state.rings[tf.name]
+            w = ring.window(len(ring))
+            common = offline.index.intersection(w.ts)
+            assert len(common) >= 4, f"too few {tf.name} bars to compare"
+            for ts in common:
                 i = int(np.flatnonzero(w.ts == ts)[0])
                 o = offline.loc[ts]
-                assert w.open[i] == pytest.approx(o["open"]), f"{tf.name} open en {ts}"
-                assert w.high[i] == pytest.approx(o["high"]), f"{tf.name} high en {ts}"
-                assert w.low[i] == pytest.approx(o["low"]), f"{tf.name} low en {ts}"
-                assert w.close[i] == pytest.approx(o["close"]), f"{tf.name} close en {ts}"
-                assert w.volume[i] == pytest.approx(o["volume"]), f"{tf.name} volume en {ts}"
+                assert w.open[i] == pytest.approx(o["open"]), f"{tf.name} open at {ts}"
+                assert w.high[i] == pytest.approx(o["high"]), f"{tf.name} high at {ts}"
+                assert w.low[i] == pytest.approx(o["low"]), f"{tf.name} low at {ts}"
+                assert w.close[i] == pytest.approx(o["close"]), f"{tf.name} close at {ts}"
+                assert w.volume[i] == pytest.approx(o["volume"]), f"{tf.name} volume at {ts}"
 
-    def test_cuenta_las_velas_fuente(self):
+    def test_it_counts_the_source_bars(self):
         e = _engine()
         for b in make_bars(120, tf=TF_1M):
             e.on_bar_1m(b)
         w = e.state.rings["1h"].window(2)
         assert list(w.n_source_bars) == [60, 60]
 
-    def test_marca_como_hueco_la_vela_mal_cubierta(self):
-        """Una vela de 1h construida con 20 minutos no es una vela de 1h."""
+    def test_it_marks_a_badly_covered_bar_as_a_gap(self):
+        """A 1h bar built out of 20 minutes is not a 1h bar."""
         e = _engine()
         for b in make_bars(120, tf=TF_1M, drop=set(range(40))):
             e.on_bar_1m(b)
         w = e.state.rings["1h"].window(1)
-        assert int(w.n_source_bars[0]) == 60, "la 2ª hora está completa"
+        assert int(w.n_source_bars[0]) == 60, "the 2nd hour is complete"
         assert not bool(w.is_gap[0])
 
-    def test_la_vela_en_curso_no_cierra_nada(self):
+    def test_the_in_flight_bar_closes_nothing(self):
         e = _engine()
         bars = make_bars(60, tf=TF_1M)
         for b in bars[:-1]:
             e.on_bar_1m(b)
-        antes = len(e.state.rings["1h"])
-        ultima = bars[-1]
-        abierta = type(ultima)(
-            symbol=ultima.symbol, tf=ultima.tf, open_time_ms=ultima.open_time_ms,
-            open=ultima.open, high=ultima.high, low=ultima.low, close=ultima.close,
-            volume=ultima.volume, is_closed=False)
-        assert e.on_bar_1m(abierta) == []
-        assert len(e.state.rings["1h"]) == antes
-        assert e.state.provisional is abierta
+        before = len(e.state.rings["1h"])
+        last = bars[-1]
+        unclosed = type(last)(
+            symbol=last.symbol, tf=last.tf, open_time_ms=last.open_time_ms,
+            open=last.open, high=last.high, low=last.low, close=last.close,
+            volume=last.volume, is_closed=False)
+        assert e.on_bar_1m(unclosed) == []
+        assert len(e.state.rings["1h"]) == before
+        assert e.state.provisional is unclosed
 
-    def test_las_duplicadas_del_curado_se_ignoran(self):
+    def test_duplicates_from_the_healing_pass_are_ignored(self):
         e = _engine()
         bars = make_bars(30, tf=TF_1M)
         for b in bars:
@@ -91,20 +92,20 @@ class TestResampleoEnVivo:
         assert len(e.state.rings["1m"]) == n
 
 
-class TestModoPuestaAlDia:
-    def test_arranca_calentando_y_no_emite(self):
+class TestCatchUpMode:
+    def test_it_starts_warming_up_and_emits_nothing(self):
         e = _engine()
         assert e.state.health.mode is Mode.WARMUP
         assert not e.emitting
 
-    def test_un_retraso_grande_impide_emitir(self):
+    def test_a_large_lag_prevents_emitting(self):
         e = _engine()
         for b in make_bars(120, tf=TF_1M, start_ms=1_600_000_000_000 - (1_600_000_000_000 % TF_1M.ms)):
             e.on_bar_1m(b)
-        # Las velas son de 2020: el retraso es de años.
+        # The bars are from 2020: the lag is measured in years.
         e.update_health(connected=True, reconnects=0, healed=0, silent_seconds=0.0)
         assert e.state.health.mode is Mode.CATCH_UP
         assert not e.emitting, (
-            "emitir durante la puesta al día describe un precio que ya pasó; es la forma más "
-            "probable de perder la confianza del usuario en la primera semana"
+            "emitting while catching up describes a price that has already been and gone; it is "
+            "the likeliest way to lose the user's trust in the first week"
         )
