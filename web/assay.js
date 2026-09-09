@@ -222,6 +222,114 @@ function paintHelp() {
     + Object.entries(lastHelp.functions).map(row).join('');
 }
 
+// ----------------------------------------------------------------- completion in the rule editor
+//
+// The candidate list is built from /api/rule_help, which the interpreter itself produces. That is
+// the point: if a function is added, renamed or dropped in expr.py, the completion follows without
+// anyone remembering to update it. A hand-kept list would eventually offer a name the parser
+// rejects, which is a worse experience than no completion, because the user trusts it.
+//
+// Names are never translated — they are code the user types. Only the description beside them is.
+
+const AC = { input: null, list: null, items: [], sel: -1, from: 0, to: 0 };
+
+/** The identifier being typed, as [start, end). Bare `\w+` on purpose: `close`, `ema`, `atr` are
+ *  all one token, and a caret in the middle of a word should complete THAT word, not the line. */
+function tokenAt(value, caret) {
+  let a = caret;
+  while (a > 0 && /[A-Za-z_0-9]/.test(value[a - 1])) a--;
+  let b = caret;
+  while (b < value.length && /[A-Za-z_0-9]/.test(value[b])) b++;
+  return [a, b];
+}
+
+function acClose() {
+  if (!AC.list) return;
+  AC.list.hidden = true;
+  AC.list.innerHTML = '';
+  AC.input?.setAttribute('aria-expanded', 'false');
+  AC.items = []; AC.sel = -1;
+}
+
+function acRender() {
+  AC.list.innerHTML = AC.items.map((it, i) =>
+    `<li role="option" aria-selected="${i === AC.sel}" data-i="${i}">`
+    + `<code>${it.label}</code><span class="d">${tx(it.doc)}</span></li>`).join('');
+  AC.list.hidden = false;
+  AC.input.setAttribute('aria-expanded', 'true');
+  AC.list.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' });
+}
+
+/** Accepts a candidate. A function is inserted with its parentheses and the caret placed INSIDE
+ *  them — the argument is what you type next, every time, so making the user reach for `(` is a
+ *  keystroke this knows is coming. A series is a bare name; there is nothing to type after it. */
+function acAccept(i) {
+  const it = AC.items[i];
+  if (!it) return;
+  const v = AC.input.value;
+  const ins = it.fn ? it.label + '(' : it.label;
+  AC.input.value = v.slice(0, AC.from) + ins + v.slice(AC.to);
+  const caret = AC.from + ins.length;
+  AC.input.setSelectionRange(caret, caret);
+  acClose();
+  AC.input.focus();
+}
+
+function acSuggest(input) {
+  if (!lastHelp?.series) return acClose();          // help not loaded, or an error payload
+  AC.input = input;
+  AC.list = $('ac-' + input.id);
+  const [a, b] = tokenAt(input.value, input.selectionStart ?? 0);
+  const word = input.value.slice(a, input.selectionStart ?? 0);
+  if (!word) return acClose();                       // no token under the caret: nothing to offer
+  AC.from = a; AC.to = b;
+
+  const pool = [
+    ...Object.entries(lastHelp.series).map(([k, v]) => ({ label: k, doc: v, fn: false })),
+    // The help keys are signatures — "sma(x, n)" — so the completable name is the part before `(`.
+    ...Object.entries(lastHelp.functions).map(([k, v]) => ({ label: k.split('(')[0], doc: v, fn: true })),
+  ];
+  const w = word.toLowerCase();
+  // Prefix matches first, then anything containing the fragment: someone typing "cross" wants
+  // crosses_above before they want anything else, and someone typing "above" should still find it.
+  const pre = pool.filter((x) => x.label.toLowerCase().startsWith(w));
+  const mid = pool.filter((x) => !x.label.toLowerCase().startsWith(w) && x.label.toLowerCase().includes(w));
+  AC.items = [...pre, ...mid].slice(0, 8);
+  if (!AC.items.length) return acClose();
+  AC.sel = 0;
+  acRender();
+}
+
+for (const id of ['long', 'short']) {
+  const input = $(id);
+  input.addEventListener('input', () => acSuggest(input));
+  input.addEventListener('blur', () => setTimeout(acClose, 120));  // let a click on the list land
+  input.addEventListener('keydown', (e) => {
+    if (AC.list?.hidden !== false || AC.input !== input) {
+      // Ctrl-Space asks for the list even when nothing has been typed since the last dismissal.
+      if (e.key === ' ' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); acSuggest(input); }
+      return;
+    }
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      AC.sel = (AC.sel + (e.key === 'ArrowDown' ? 1 : -1) + AC.items.length) % AC.items.length;
+      acRender();
+    } else if (e.key === 'Enter' || e.key === 'Tab') {
+      // Enter would otherwise submit, and Tab would leave the field — both lose the suggestion the
+      // user was looking straight at.
+      e.preventDefault();
+      acAccept(AC.sel);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      acClose();
+    }
+  });
+  $('ac-' + id).addEventListener('mousedown', (e) => {
+    const li = e.target.closest('li');
+    if (li) { e.preventDefault(); acAccept(Number(li.dataset.i)); }
+  });
+}
+
 document.querySelectorAll('.ex').forEach((b) => (b.onclick = () => {
   $('long').value = b.dataset.l || '';
   $('short').value = b.dataset.c || '';

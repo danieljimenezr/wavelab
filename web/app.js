@@ -84,10 +84,51 @@ function updatePrice(b) {
   document.title = `$${fmt(b.close, 0)} · wavelab`;
 }
 
+/** Says what went wrong ON THE PAGE, and stops. `console.error` and a bare `return` left the panel
+ *  reading "analysing…" for ever, which is the one failure mode this project is least entitled to
+ *  ship: a thing that looks like it is working and is not.
+ *
+ *  The case that actually happens has nothing to do with the code. In PUBLIC mode the chart's three
+ *  routes 404 by design — the chart is the owner's private view and Assay is what the world sees —
+ *  and on macOS `localhost` resolves to ::1 BEFORE 127.0.0.1. So an ssh tunnel left open on port
+ *  8000 quietly puts the browser on the production server, where the 404 is not a fault but the
+ *  security guarantee doing its job. Say that, rather than spinning. */
+/** Paints the failure from `lastFailure`, so a language switch repaints it like everything else.
+ *  Storing the FACT (public? which status?) rather than the finished sentence is what makes that
+ *  possible — the first version painted the text straight into the DOM and a Spanish reader who
+ *  switched language got an English error, which is the one screen where being understood matters
+ *  most. Same mistake `paintHelp` made, one file over. */
+function paintFailure() {
+  if (!lastFailure) return;
+  const pub = lastFailure.public;
+  $('panel').innerHTML = '';
+  const box = document.createElement('div');
+  box.className = 'lbl';
+  box.style.cssText = 'font-size:11.5px;line-height:1.55;white-space:pre-wrap';
+  box.textContent = pub ? t('idx.public_server')
+                        : t('idx.chart_error').replace('$1', String(lastFailure.status));
+  $('panel').appendChild(box);
+  const bn = $('banner');            // NOT the `banner` further down: that one is function-local
+  bn.textContent = pub ? t('banner.public_server') : t('banner.chart_error');
+  bn.classList.add('show');
+}
+
+let lastFailure = null;   // {public, status} — the FACT, so it can be re-rendered in any language
+
+async function chartUnavailable(status) {
+  let pub = false;
+  try {
+    pub = !!(await (await fetch('/api/status')).json()).public;
+  } catch { /* status is best-effort: if it is unreachable too, the generic message still lands */ }
+  lastFailure = { public: pub, status };
+  paintFailure();
+}
+
 async function load(tf) {
   const r = await fetch(`/api/history?tf=${tf}&limit=1500`);
+  if (!r.ok) { await chartUnavailable(r.status); return; }
   const d = await r.json();
-  if (d.error) { console.error(d); return; }
+  if (d.error) { await chartUnavailable(d.error); return; }
   currentTf = tf;
   $('sym').textContent = d.symbol;
   candles.setData(d.bars);
@@ -216,7 +257,15 @@ function connect() {
       updatePrice(m.bar);
     }
   };
-  ws.onclose = () => { clearInterval(heartbeat); setTimeout(connect, 2000); };
+  ws.onclose = () => {
+    clearInterval(heartbeat);
+    // Reconnecting for ever is right when the server is merely down; it is wrong when the
+    // server has told us this route does not exist here. On the public host /ws is 404 by
+    // design, so a retry every 2 s is a loop that can only ever fail, filling the console
+    // and hiding whatever the real problem might have been.
+    if (lastFailure && lastFailure.public) return;
+    setTimeout(connect, 2000);
+  };
   ws.onerror = () => ws.close();
 }
 
@@ -304,6 +353,7 @@ function paintDecision(d) {
 
 async function decide() {
   const r = await fetch(`/api/decide?tf=${currentTf}`);
+  if (!r.ok) { await chartUnavailable(r.status); return; }
   lastDecision = await r.json();
   paintDecision(lastDecision);
 }
@@ -316,5 +366,6 @@ onLangChange(() => {
   if (lastWaves) paintWaves(lastWaves);
   if (lastHealth) paintHealth(lastHealth, lastGaps);
   if (lastDecision) paintDecision(lastDecision);
+  paintFailure();
   if (lastBar) updatePrice(lastBar);
 });

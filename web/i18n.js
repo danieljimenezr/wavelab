@@ -35,6 +35,16 @@ const EN = {
 
   // ---- chart page
   'idx.analysing': 'analysing…',
+  'idx.public_server': "You are looking at the public server, and this chart is not on it.\n\n"
+    + 'The chart is the owner\'s private view: /api/history, /api/decide and /ws answer 404 here '
+    + 'on purpose. That is the guarantee working, not a fault.\n\n'
+    + 'On macOS `localhost` resolves to ::1 before 127.0.0.1, so an ssh tunnel left open on port '
+    + '8000 sends the browser to production without saying so. Open http://127.0.0.1:8000 instead, '
+    + 'or close the tunnel.',
+  'idx.chart_error': 'The chart could not load its history ($1). The panel would otherwise sit here '
+    + 'saying "analysing…" for ever, which would be worse than telling you.',
+  'banner.public_server': 'Public server — the chart lives on your local one (127.0.0.1:8000)',
+  'banner.chart_error': 'The chart is not loading. See the panel.',
   'idx.connecting': 'connecting…',
   'idx.foot': 'view only · no orders · <kbd>1m</kbd> is the only series stored, everything else '
     + 'is resampled from it',
@@ -176,6 +186,16 @@ const ES = {
   'nav.assay': 'Assay',
 
   'idx.analysing': 'analizando…',
+  'idx.public_server': 'Estás viendo el servidor público, y este gráfico no está ahí.\n\n'
+    + 'El gráfico es la vista privada del propietario: /api/history, /api/decide y /ws responden '
+    + '404 aquí a propósito. Es la garantía funcionando, no un fallo.\n\n'
+    + 'En macOS «localhost» se resuelve a ::1 antes que a 127.0.0.1, así que un túnel ssh abierto '
+    + 'en el puerto 8000 manda el navegador a producción sin decírtelo. Abre '
+    + 'http://127.0.0.1:8000 o cierra el túnel.',
+  'idx.chart_error': 'El gráfico no ha podido cargar su histórico ($1). Si no, el panel se quedaría '
+    + 'aquí diciendo «analizando…» para siempre, que sería peor que contártelo.',
+  'banner.public_server': 'Servidor público — el gráfico está en el tuyo local (127.0.0.1:8000)',
+  'banner.chart_error': 'El gráfico no carga. Mira el panel.',
   'idx.connecting': 'conectando…',
   'idx.foot': 'solo visual · sin órdenes · <kbd>1m</kbd> es la única serie almacenada, el resto '
     + 'se resamplea',
@@ -318,6 +338,16 @@ const CA = {
   'nav.assay': 'Assay',
 
   'idx.analysing': 'analitzant…',
+  'idx.public_server': 'Estàs veient el servidor públic, i aquest gràfic no hi és.\n\n'
+    + 'El gràfic és la vista privada del propietari: /api/history, /api/decide i /ws responen 404 '
+    + 'aquí expressament. És la garantia funcionant, no pas una errada.\n\n'
+    + 'A macOS «localhost» es resol a ::1 abans que a 127.0.0.1, així que un túnel ssh obert al '
+    + 'port 8000 envia el navegador a producció sense dir-t\'ho. Obre http://127.0.0.1:8000 o '
+    + 'tanca el túnel.',
+  'idx.chart_error': 'El gràfic no ha pogut carregar el seu històric ($1). Altrament el panell es '
+    + 'quedaria aquí dient «analitzant…» per sempre, cosa que seria pitjor que dir-t\'ho.',
+  'banner.public_server': 'Servidor públic — el gràfic és al teu local (127.0.0.1:8000)',
+  'banner.chart_error': 'El gràfic no carrega. Mira el panell.',
   'idx.connecting': 'connectant…',
   'idx.foot': 'només visual · sense ordres · <kbd>1m</kbd> és l\'única sèrie desada, la resta es '
     + 'resamplea a partir d\'ella',
