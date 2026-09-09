@@ -89,6 +89,7 @@ jobs:
         # run the deploy script. It opens no shell, forwards no ports, reads no files.
         run: |
           ssh -i ~/.ssh/deploy -o BatchMode=yes -o ConnectTimeout=20 \
+              -o ServerAliveInterval=15 -o ServerAliveCountMax=8 \
               root@${{ secrets.VPS_HOST }} "${{ github.sha }}"
 
       - name: Check that it answers from outside

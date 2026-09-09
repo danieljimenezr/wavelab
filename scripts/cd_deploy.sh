@@ -52,6 +52,11 @@ check_health() {
             [ "$seen_ok" = 0 ] && log "responding and warming up…"
             seen_ok=1
         fi
+        # A heartbeat every 30 s. Warmup can take minutes, and a deploy that prints nothing for
+        # that long looks wedged to a human and looks idle to whatever NAT sits on the ssh
+        # connection — a silent pipe is exactly what gets collected, and the deploy then reports
+        # failure for a rollout that actually worked.
+        [ $((i % 10)) -eq 0 ] && log "still waiting for ready ($((i*3))s of $((ATTEMPTS*3))s)"
         sleep 3
     done
     return 1
