@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from wavelab.core.clock import SimClock
 from wavelab.core.types import Bar, Decision, MaturityLevel, Verdict
 from wavelab.validation.replay import (
     ReplayDivergence,
@@ -116,6 +117,51 @@ class TestHarness:
             replay(correct(), [unclosed])
 
 
+class TestTheHarnessContract:
+    """The harness is only worth what it REFUSES. These are the ways it could go quiet."""
+
+    def test_it_refuses_to_certify_an_engine_on_three_bars(self, bars_small):
+        """A green tick from a harness that only saw three bars is worse than no harness at all.
+
+        The lookahead detector works by replaying PREFIXES: below four bars there is no prefix
+        left to compare, so the check runs over nothing and returns quietly. If the minimum is
+        ever dropped, someone points CI at a short fixture, sees green, and ships a repainting
+        engine believing it was checked.
+        """
+        with pytest.raises(ValueError, match="at least 4"):
+            assert_replay_deterministic(correct(), bars_small[:3])
+
+        # The refusal is not pedantry. On one bar there is no prefix at all, so an engine we KNOW
+        # reads the future would come back certified instead of caught.
+        with pytest.raises(ValueError, match="at least 4"):
+            assert_replay_deterministic(with_lookahead(), bars_small[:1])
+
+    def test_it_advances_the_sim_clock_to_the_close_of_every_bar(self, bars_small):
+        """Everything causal in this project asks the clock what time it is.
+
+        `@causal` refuses a `now_ms` it was not handed, and the pivot store answers `as_of(now)`.
+        If replay left the clock parked at the first bar, every one of those guards would be
+        evaluated against the wrong instant — and they would all evaluate as SAFE, because a clock
+        stuck in the past can never see anything from the future. The guards would keep passing
+        while protecting nothing, which is the failure mode this whole file exists to prevent.
+        """
+        clock = SimClock(bars_small[0].open_time_ms)
+        seen: list[tuple[int, int]] = []
+
+        def on_bar(state, bar):
+            seen.append((clock.now_ms(), bar.close_time_ms))
+            return state, None
+
+        replay(streaming(on_bar, lambda: None), bars_small, clock=clock)
+
+        assert len(seen) == len(bars_small), "the engine was not called once per bar"
+        off = [(t, exp) for t, exp in seen if t != exp]
+        assert not off, (
+            f"the clock did not follow the bars: {len(off)} of {len(seen)} bars were processed at "
+            f"the wrong instant, first {off[0][0]} while the bar closed at {off[0][1]}"
+        )
+
+
 class TestDiffPath:
     def test_it_names_the_nested_path(self):
         a = _decision(BAR := None, 1.0) if False else None  # noqa: F841
@@ -124,8 +170,43 @@ class TestDiffPath:
         assert "lengths" in diff_path((1,), (1, 2))
         assert "different types" in diff_path(1, "1")
 
+    def test_it_names_the_key_inside_a_dict(self):
+        """The engine's real output is a dict: `decide()` returns one, hypotheses and all.
+
+        So dicts are the shape this walker actually meets in CI. If it stops comparing key SETS,
+        a divergence in a missing key surfaces as a KeyError thrown from inside the harness: the
+        lookahead report the user needs turns into a stack trace with no field name in it, which
+        is exactly the half hour of guessing `diff_path` was written to save.
+        """
+        assert diff_path({"verdict": "watch"}, {"verdict": "watch"}) is None
+
+        p = diff_path({"plan": {"stop": 106880.0}}, {"plan": {"stop": 106884.5}})
+        assert p is not None and "'plan'" in p and "'stop'" in p and "106884.5" in p, p
+
+        missing = diff_path({"verdict": "watch"}, {"maturity": 0})
+        assert missing is not None and "keys" in missing, (
+            f"a dict that lost a key was not reported as a key-set difference: {missing!r}"
+        )
+
     def test_it_walks_into_dataclasses(self, bars_small):
         d1 = _decision(bars_small[0], 1.0)
         d2 = _decision(bars_small[0], 2.0)
         p = diff_path(d1, d2)
         assert "reasons" in p and "ema=" in p
+
+    def test_it_names_the_field_instead_of_dumping_the_object(self, bars_small):
+        """`output[137].plan.stop: 106880.0 != 106884.5` is the entire point of this function.
+
+        A `Decision` prints its every field in its repr, so a walker that stopped descending into
+        dataclasses and just compared the two objects would still produce a message with the words
+        `reasons` and `ema=` in it — it would look like it worked. What the reader gets instead is
+        two forty-field objects side by side and the half hour of eye-work this was written to
+        save, at the exact moment they are being told their engine reads the future.
+        """
+        p = diff_path(_decision(bars_small[0], 1.0), _decision(bars_small[0], 2.0))
+        assert p is not None
+        assert p.startswith("reasons"), (
+            f"the first difference is in `reasons`, but the report begins with {p[:60]!r}: the "
+            "walker is comparing whole objects instead of locating the field"
+        )
+        assert "Decision(" not in p, f"the report dumps the whole object instead of the field: {p}"

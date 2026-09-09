@@ -59,8 +59,23 @@ async def test_caps_concurrency():
     assert peak <= 2, f"{peak} ran at once against a cap of 2"
 
 
+async def test_the_queue_wait_is_the_declared_one():
+    """The 25 s wait is a product decision, so it is pinned rather than left to the default.
+
+    The test below overrides it to keep CI honest about time; this is what stops that override
+    from also silently becoming the production value.
+    """
+    assert RateLimiter().acquire_timeout_s == 25.0
+
+
 async def test_rejects_when_saturated():
-    lim = RateLimiter(max_concurrent=1, per_hour=100, per_minute=100)
+    """The give-up path, without spending the whole timeout waiting for it.
+
+    This test used to wall-clock the real 25 s wait: it was 25.00 s of a 28 s suite — 88% of every
+    run on every push — to observe a `TimeoutError` being turned into a `TooBusy`. The behaviour
+    under test is the conversion, not the duration, and the duration is pinned by the test above.
+    """
+    lim = RateLimiter(max_concurrent=1, per_hour=100, per_minute=100, acquire_timeout_s=0.05)
     lim._Ctx  # noqa: B018
     async with lim.slot("a"):
         # With the only slot taken and a short wait, the second caller has to give up.

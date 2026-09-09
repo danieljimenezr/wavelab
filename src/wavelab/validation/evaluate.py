@@ -8,7 +8,8 @@ Four controls, and not one of them is optional:
    segment and leaks information from one into the other.
 
 2. **Base rate.** The question is not "is it right?" but "is it right MORE often than simply being
-   in the market with no criterion at all?". In an asset that rose 1,748%, any long strategy is
+   in the market with no criterion at all?". In an asset that rose 1,748% over 2017-2026, any
+   long strategy is
    right a lot, and that is not an edge: it is the market's drift.
 
 3. **Effective n.** Signals that overlap inside the horizon are ONE observation, not several.
@@ -108,7 +109,8 @@ def evaluate_all(
             # ★ RETURN IN EXCESS OF THE DRIFT, not raw return.
             #
             # If the Reality Check is fed `sig * fwd`, the winning strategy will always be the one
-            # that spends the MOST TIME long, because BTC rose 1,748% over the sample. That is not
+            # that spends the MOST TIME long, because BTC rose 1,748% over the 2017-2026
+            # sample measured here. That is not
             # timing skill: it is beta, and buying beta costs nothing.
             #
             # Subtracting the mean drift (`fwd - base_ret`) turns it into the right question:

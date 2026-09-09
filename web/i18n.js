@@ -495,10 +495,6 @@ const SERVER_ES = {
     'Si el resultado se desploma al retrasar la señal una sola barra, la estrategia está usando '
     + 'información que no habrías tenido en tiempo real. Es la prueba más barata que existe y la '
     + 'que tumba más estrategias.',
-  ['In an asset that rose 1,748%, any mostly-long rule looks right. What counts is whether it is '
-  + 'right MORE often than being in the market at a random instant.']:
-    'En un activo que ha subido un 1.748%, cualquier regla casi siempre larga parece acertar. Lo '
-    + 'que cuenta es si acierta MÁS veces que estar en el mercado en un instante al azar.',
   ['Hundreds of filters are generated that enter and exit at random with the same frequency and '
   + 'the same time spent inside the market. If your strategy is not clearly above them, what you '
   + 'have is exposure, not judgement.']:
@@ -651,10 +647,6 @@ const SERVER_CA = {
     'Si el resultat s\'esfondra en retardar el senyal una sola barra, l\'estratègia està fent '
     + 'servir informació que no hauries tingut en temps real. És la prova més barata que hi ha i '
     + 'la que en tomba més.',
-  ['In an asset that rose 1,748%, any mostly-long rule looks right. What counts is whether it is '
-  + 'right MORE often than being in the market at a random instant.']:
-    'En un actiu que ha pujat un 1.748%, qualsevol regla gairebé sempre llarga sembla encertar. El '
-    + 'que compta és si encerta MÉS vegades que ser al mercat en un instant a l\'atzar.',
   ['Hundreds of filters are generated that enter and exit at random with the same frequency and '
   + 'the same time spent inside the market. If your strategy is not clearly above them, what you '
   + 'have is exposure, not judgement.']:
@@ -841,6 +833,16 @@ const PATTERNS = [
   // errors the importer raises. These are the FIRST thing a user with a messy spreadsheet sees,
   // so leaving them in English would greet a Spanish speaker with English at the exact moment
   // something went wrong.
+  // The figure is measured from the series in hand, not fixed: it was 1,748% over 2017-2026 and it
+  // moves with every bar that arrives, and it is different again for a CSV of the user's own
+  // prices. $1 goes through localiseNumber, so `1,748` reads `1.748` here.
+  [new RegExp('^In an asset that rose (.+?)%, any mostly-long rule looks right\\. What counts is '
+    + 'whether it is right MORE often than being in the market at a random instant\\.$'), {
+    es: 'En un activo que ha subido un $1%, cualquier regla casi siempre larga parece acertar. Lo '
+      + 'que cuenta es si acierta MÁS veces que estar en el mercado en un instante al azar.',
+    ca: 'En un actiu que ha pujat un $1%, qualsevol regla gairebé sempre llarga sembla encertar. '
+      + 'El que compta és si encerta MÉS vegades que ser al mercat en un instant a l\'atzar.',
+  }],
   [new RegExp("^I can't find the time column\\. Columns: (.+?)\\. "
     + "It should be called something like: (.+?)$"), {
     es: 'No encuentro la columna de tiempo. Columnas: $1. Debería llamarse algo como: $2',
@@ -1078,7 +1080,11 @@ export function t(key, vars) {
  */
 function localiseNumber(g) {
   if (LOCALE[lang].startsWith('en')) return g;
-  return /^-?\d+(\.\d+)?%?$/.test(g) ? g.replace('.', ',') : g;
+  // Anchored on a WHOLE well-formed English number: optional sign, optional 3-digit grouping,
+  // optional decimals, optional percent. That shape cannot be a date (2024-03-14), an identifier
+  // (`close`), a column list or a pandas message, so nothing else can be caught by accident.
+  if (!/^-?\d{1,3}(,\d{3})*(\.\d+)?%?$/.test(g) && !/^-?\d+(\.\d+)?%?$/.test(g)) return g;
+  return g.replace(/,/g, '\u0000').replace(/\./g, ',').replace(/\u0000/g, '.');
 }
 
 export function tx(text) {

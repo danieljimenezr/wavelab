@@ -39,6 +39,10 @@ class RateLimiter:
     max_concurrent: int = 2
     per_hour: int = 30
     per_minute: int = 6
+    #: How long a caller queues for a free slot before being told to come back. The default is the
+    #: production value and is part of the contract; it is a field only so that the test for the
+    #: give-up path does not have to spend 25 real seconds of every CI run waiting for it.
+    acquire_timeout_s: float = 25.0
     _sem: asyncio.Semaphore | None = None
     _hist: dict[str, deque] = field(default_factory=dict)
 
@@ -75,7 +79,8 @@ class RateLimiter:
         async def __aenter__(self):
             self.lim._check_ip(self.ip)
             try:
-                await asyncio.wait_for(self.lim._sem.acquire(), timeout=25)
+                await asyncio.wait_for(self.lim._sem.acquire(),
+                                       timeout=self.lim.acquire_timeout_s)
             except TimeoutError:
                 raise TooBusy(
                     "there are too many validations under way right now. Try again in a minute: "

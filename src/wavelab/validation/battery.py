@@ -10,7 +10,9 @@ The five, in order of brutality:
    that was inflating CAGR from 26% to 99%.
 
 2. **Base rate.** Is it right more often than being in the market at any old moment? In an asset
-   that rose 1,748%, any mostly-long rule is right a lot, and that is not skill.
+   that rose 1,748% over the 2017-2026 sample this was written against, any mostly-long
+   rule is right a lot, and that is not skill. The figure the user is shown is computed
+   from the series in hand, not from this comment.
 
 3. **Random control at the same exposure.** Random filters that enter and exit at the same
    frequency and spend the same time in the market. If the strategy does not beat their median,
@@ -173,8 +175,9 @@ def run_battery(
         "base_rate", "Is it right more often than any old moment?",
         bool(prop > base) if has_prop else None,
         prop * 100 if has_prop else 0.0, base * 100, "% per period",
-        "In an asset that rose 1,748%, any mostly-long rule looks right. What counts is whether "
-        "it is right MORE often than being in the market at a random instant.",
+        f"In an asset that rose {(c[-1] / c[0] - 1) * 100:,.0f}%, any mostly-long rule looks "
+        "right. What counts is whether it is right MORE often than being in the market at a "
+        "random instant.",
         f"strategy {prop*100:+.3f}% vs base {base*100:+.3f}% per period"
         if has_prop else "far too few signals"))
 

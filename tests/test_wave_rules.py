@@ -8,16 +8,18 @@ the eye and are not.
 from __future__ import annotations
 
 import json
+from itertools import permutations, product
 from pathlib import Path
 from typing import ClassVar
 
 import pytest
-from hypothesis import assume, given, settings
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from wavelab.core.types import Direction
+from wavelab.core.types import Direction, RuleVerdict
 from wavelab.waves.rules import (
     ImpulseState,
+    RuleSet,
     check_impulse,
     fib_projection,
     fib_retracement,
@@ -111,6 +113,161 @@ class TestPartialNonTerminals:
             )
 
 
+class TestTheHardRulesAreStrict:
+    """Elliott's three hard rules are all inequalities, and every one of them is STRICT.
+
+    w2 must stay above the origin, w3 must go BEYOND the end of w1, w4 must STAY OUT of w1's
+    territory. Landing exactly on the limit is a break, not a pass — "equal" is not "beyond".
+
+    Loosening any of them to `>=` costs real money in a way that is invisible in a backtest built
+    with the same loose rule. A w2 accepted at exactly 100% retracement puts the invalidation at the
+    entry price, so the card offers a trade whose R is zero. A w4 that comes to rest exactly on P1
+    has overlapped, and overlap is the commonest reason a five-wave reading has to be thrown away:
+    accepting it keeps a dead count on the screen, still emitting entries.
+
+    Equality is also the one place random floats never land, which is why these are written out by
+    hand instead of drawn.
+    """
+
+    #: Mirror point for the SHORT reflection. Every value here is exact in binary, so a
+    #: disagreement between the two directions is the rules disagreeing, never the arithmetic.
+    MIRROR: ClassVar[float] = 300.0
+
+    @pytest.mark.parametrize("rule,pts", [
+        ("R1",  [100.0, 130.0, 100.0]),                 # w2 retraces EXACTLY 100% of w1
+        ("R2b", [100.0, 130.0, 115.0, 130.0]),          # w3 stops EXACTLY at the end of w1
+        ("R3",  [100.0, 130.0, 115.0, 160.0, 130.0]),   # w4 comes to rest EXACTLY on P1
+    ])
+    @pytest.mark.parametrize("direction", [Direction.LONG, Direction.SHORT])
+    def test_landing_exactly_on_the_limit_already_breaks_the_rule(self, rule, pts, direction):
+        p = pts if direction is Direction.LONG else [self.MIRROR - x for x in pts]
+        r = check_impulse(p, direction)
+        assert r.broken == (rule,), (
+            f"{direction.name} {p} sits EXACTLY on {rule}'s limit and the engine broke "
+            f"{list(r.broken)} instead of just ({rule},): the hard rules are strict, "
+            f"'equal' is not 'beyond'"
+        )
+        assert not r.valid, f"{rule} accepted a count that only TOUCHES its limit"
+
+    @pytest.mark.parametrize("name,pts", [
+        # w1 = w3 = 30, w5 = 20
+        ("w3 ties with w1", [100.0, 130.0, 115.0, 145.0, 135.0, 155.0]),
+        # w3 = w5 = 25, w1 = 30
+        ("w3 ties with w5", [100.0, 130.0, 115.0, 140.0, 132.0, 157.0]),
+    ])
+    @pytest.mark.parametrize("direction", [Direction.LONG, Direction.SHORT])
+    def test_a_wave_3_that_TIES_for_shortest_is_not_the_shortest(self, name, pts, direction):
+        """R2 forbids w3 being THE shortest of 1/3/5. A tie is not that.
+
+        Tightening the comparison to `<=` rejects perfectly legal counts, and a rejection here is
+        silent: the structure simply stops being offered and nobody sees the trade that was not
+        taken. Equal lengths are common in the real market precisely because Fibonacci relations
+        between waves are what the whole method is built on.
+        """
+        p = pts if direction is Direction.LONG else [self.MIRROR - x for x in pts]
+        r = check_impulse(p, direction)
+        assert r.valid, (
+            f"{name} ({direction.name}) was rejected, breaking {list(r.broken)}: R2 says w3 is "
+            f"never THE SHORTEST, and a wave tied with another is not the shortest"
+        )
+
+    @pytest.mark.parametrize("direction", [Direction.LONG, Direction.SHORT])
+    def test_a_fifth_that_only_REACHES_the_third_is_already_truncated(self, direction):
+        """Truncation is w5 failing to EXCEED the end of w3, and merely reaching it is failing.
+
+        The flag is the whole point of the case: a truncated fifth is exhaustion, so it is legal
+        (rejecting it throws away the counts you most want near a top) but it must be labelled. An
+        unflagged truncation reads on the card as an ordinary impulse with the trend intact, at the
+        exact moment the trend is ending.
+        """
+        pts = [100.0, 130.0, 115.0, 160.0, 140.0, 160.0]   # P5 lands exactly on P3
+        p = pts if direction is Direction.LONG else [self.MIRROR - x for x in pts]
+        r = check_impulse(p, direction)
+        assert r.valid, f"a truncated fifth is LEGAL and was rejected: broke {list(r.broken)}"
+        assert r.truncated, (
+            f"{direction.name} w5 ended exactly ON w3's extreme and was not flagged as truncated: "
+            "reaching is not exceeding, and this is the shape of a top"
+        )
+
+
+class TestTheInvalidationIsWhereTheCountActuallyDies:
+    """★ The card's biggest number has to be the price at which THIS structure becomes false.
+
+    The design's best property is that the invalidation comes out of the rule engine instead of
+    being assembled downstream, so it cannot drift away from the rule that justifies it. This
+    checks the thing that property is FOR, at every partial state: the invalidation price is
+    exactly the frontier for the last vertex — one tick on the live side and the count still
+    stands, one tick past it (or exactly on it) and an evaluable rule breaks.
+
+    Drift in either direction is expensive and silent. A stop set looser than the frontier holds a
+    position that the engine already knows is dead. A stop set tighter than it is stopped out of a
+    count that is still valid, and the card's R:R and position size were computed from that number.
+    """
+
+    #: Prefixes of one hand-checked long impulse. COMPLETE is excluded on purpose: once w5 exists
+    #: the structure is finished, and its invalidation governs the move that follows rather than
+    #: the placement of the last vertex.
+    CASES: ClassVar[dict[ImpulseState, list[float]]] = {
+        ImpulseState.AT_2: [100.0, 130.0, 115.0],
+        ImpulseState.AT_3: [100.0, 130.0, 115.0, 160.0],
+        ImpulseState.AT_4: [100.0, 130.0, 115.0, 160.0, 140.0],
+    }
+
+    @pytest.mark.parametrize("state", list(CASES))
+    @pytest.mark.parametrize("direction", [Direction.LONG, Direction.SHORT])
+    def test_the_last_vertex_is_alive_on_one_side_of_it_and_dead_on_the_other(self, state,
+                                                                             direction):
+        pts = self.CASES[state]
+        if direction is Direction.SHORT:
+            pts = [300.0 - x for x in pts]
+        sign = 1 if direction is Direction.LONG else -1
+        tick = 0.5
+
+        r = check_impulse(pts, direction)
+        assert r.valid, f"the {state.value} fixture must start out valid; broke {list(r.broken)}"
+        assert r.state is state
+        price, rule = invalidation_for(state, pts, direction)
+        assert price == r.invalidation_price, (
+            f"{state.value}: check_impulse says the count dies at {r.invalidation_price} and "
+            f"invalidation_for says {price} — the stop and its reason have drifted apart"
+        )
+
+        alive = [*pts[:-1], price + sign * tick]
+        assert check_impulse(alive, direction).valid, (
+            f"{state.value} {direction.name}: the last vertex a tick on the LIVE side of the "
+            f"invalidation ({price}) was rejected, breaking "
+            f"{list(check_impulse(alive, direction).broken)}. The stop is tighter than the rules: "
+            f"it would close a count that is still standing"
+        )
+
+        for label, last in (("exactly on", price), ("a tick past", price - sign * tick)):
+            dead = check_impulse([*pts[:-1], last], direction)
+            assert not dead.valid, (
+                f"{state.value} {direction.name}: the last vertex {label} the invalidation "
+                f"({price}, from {rule}) and every rule still holds. The card would keep a dead "
+                f"count on screen with a stop that never triggers"
+            )
+
+    def test_a_rule_nobody_can_evaluate_yet_invalidates_nothing(self):
+        """R2 degrades to a guideline while w5 is missing, and 100% of entries are taken before w5
+        exists. If an unevaluable verdict could veto, every partial count would be rejected and the
+        engine would offer no entries at all — the annotation toy this design exists not to be."""
+        rs = RuleSet(
+            state=ImpulseState.AT_2,
+            direction=Direction.LONG,
+            verdicts=(RuleVerdict("R1", True, 100.0, "holds"),
+                      RuleVerdict("R2", False, 130.0, "cannot be known yet", evaluable=False)),
+            invalidation_price=100.0,
+            invalidation_rule="R1",
+            archetype="w2",
+        )
+        assert rs.valid, "a NON-EVALUABLE verdict vetoed the count: it may not invalidate anything"
+        assert rs.broken == (), (
+            f"a non-evaluable rule was reported as broken ({list(rs.broken)}): the card would name "
+            "a rule that was never actually tested"
+        )
+
+
 class TestOverlap:
     """Prechter's exception: in futures and commodities wave 4 is allowed to overlap."""
 
@@ -127,27 +284,63 @@ class TestOverlap:
 
 
 class TestSymmetry:
-    """The rules are written once with s=+1/-1. A bear is a bull reflected."""
+    """The rules are written once with s=+1/-1. A bear is a bull reflected.
 
-    @given(pts=st.lists(st.floats(50, 500, allow_nan=False), min_size=6, max_size=6, unique=True))
-    @settings(max_examples=150, deadline=None)
-    def test_reflecting_the_prices_gives_the_same_verdict(self, pts):
-        mirror = [1000.0 - p for p in pts]
-        # `1000.0 - p` is NOT an exact operation, and that is a property of binary floating point,
-        # not of the rules. One ULP at 50 is 7.1e-15 but at 950 it is 1.1e-13, so two prices a few
-        # ULPs apart down at the bottom of the range collapse onto a single float once mirrored:
-        # 50.0 and 50.00000000000001 both come back as exactly 950.0. When that happens `mirror`
-        # is a DIFFERENT six-point structure rather than a reflection of this one, and the two
-        # verdicts disagreeing says nothing about whether the rules are symmetric — which is the
-        # only thing this test is for. So require the mirror to preserve every pairwise ordering
-        # before comparing verdicts. Real prices sit on a tick grid where this never arises; the
-        # `unique=True` above is not enough, because uniqueness is not preserved by the mirror.
-        assume(all((pts[j] > pts[i]) == (mirror[j] < mirror[i])
-                   for i in range(len(pts)) for j in range(i + 1, len(pts))))
-        a = check_impulse(pts, Direction.LONG)
-        b = check_impulse(mirror, Direction.SHORT)
-        assert a.valid == b.valid
-        assert set(a.broken) == set(b.broken)
+    This used to be a Hypothesis test over random floats, and it was a much weaker guard than it
+    looked: a deliberately introduced asymmetry in R1 showed up in 0.17% of draws and needed some
+    4,000 examples to surface, while the test ran 150. It passed because it rarely looked at
+    anything interesting, not because the rules were symmetric.
+
+    Random floats are the wrong instrument here. What the rules actually compare is the ORDERING of
+    six points plus three lengths, so the structure space is small and can be walked exhaustively.
+    And a strict-vs-non-strict slip — `<` where `<=` belongs — is invisible everywhere EXCEPT at
+    equality, which is precisely where independent random floats never land.
+
+    The mirror is exact by construction: every value below is representable in binary and so is
+    `M - x`, so a disagreement is the rules disagreeing and never the arithmetic.
+    """
+
+    @staticmethod
+    def _asymmetries(structures, mirror_about):
+        out = []
+        for pts in structures:
+            pts = list(pts)
+            a = check_impulse(pts, Direction.LONG)
+            b = check_impulse([mirror_about - x for x in pts], Direction.SHORT)
+            broken_a = sorted(v.rule for v in a.verdicts if not v.ok)
+            broken_b = sorted(v.rule for v in b.verdicts if not v.ok)
+            if a.valid != b.valid or broken_a != broken_b:
+                out.append(f"{pts}: long valid={a.valid} broke {broken_a} | "
+                           f"short valid={b.valid} broke {broken_b}")
+        return out
+
+    def test_every_ordering_of_six_points_mirrors(self):
+        """All 720 permutations: exhaustive over the strict-ordering patterns the rules can see."""
+        bad = self._asymmetries(permutations([10.0, 20.0, 30.0, 40.0, 50.0, 60.0]), 70.0)
+        assert not bad, "the rules are not direction-symmetric:\n" + "\n".join(bad[:10])
+
+    @pytest.mark.parametrize("name,pts", [
+        ("R1  P2 == P0",     [100.0, 130.0, 100.0, 160.0, 140.0, 175.0]),
+        ("R2b P3 == P1",     [100.0, 130.0, 115.0, 130.0, 125.0, 145.0]),
+        ("R3  P4 == P1",     [100.0, 130.0, 115.0, 160.0, 130.0, 175.0]),
+        ("R2  len3 == len1", [100.0, 130.0, 115.0, 145.0, 135.0, 190.0]),
+        ("R2  len3 == len5", [100.0, 160.0, 130.0, 160.0, 140.0, 170.0]),
+        ("all rules tied",   [100.0, 130.0, 100.0, 130.0, 130.0, 160.0]),
+        ("degenerate flat",  [100.0, 100.0, 100.0, 100.0, 100.0, 100.0]),
+    ])
+    def test_the_rule_boundaries_mirror(self, name, pts):
+        """Each rule sitting exactly ON its own boundary. This is where a `<`/`<=` slip lives, and
+        it is the one place independent random floats will never put you."""
+        bad = self._asymmetries([pts], 200.0)
+        assert not bad, f"{name} is not direction-symmetric:\n" + "\n".join(bad)
+
+    def test_ties_everywhere_mirror(self):
+        """4,096 structures over a four-value grid, so equal points are the norm rather than a
+        once-in-a-million draw. Exhaustive, deterministic, and about 20x more boundary contact than
+        the Hypothesis version managed in 150 tries."""
+        bad = self._asymmetries(product([100.0, 110.0, 120.0, 130.0], repeat=6), 230.0)
+        assert not bad, (f"{len(bad)} of 4096 tied structures are not direction-symmetric:\n"
+                         + "\n".join(bad[:10]))
 
     @given(f=st.floats(0.1, 50.0, allow_nan=False))
     @settings(max_examples=50, deadline=None)

@@ -64,8 +64,10 @@ def resolve_triple_barrier(
 
     for i in range(n):
         hi, lo = float(highs[i]), float(lows[i])
-        fav = s * (hi - entry) if long else s * (entry - lo)
-        adv = s * (entry - lo) if long else s * (hi - entry)
+        # The `if long else` already picks the right side of the bar; multiplying by `s` on top of
+        # it negated both excursions for shorts, so every short label came back mae_r=mfe_r=0.
+        fav = (hi - entry) if long else (entry - lo)
+        adv = (entry - lo) if long else (hi - entry)
         mfe = max(mfe, fav / risk)
         mae = max(mae, adv / risk)
 
