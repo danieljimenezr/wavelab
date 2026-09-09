@@ -23,13 +23,26 @@ SCHEMA = (Path(__file__).parent / "schema" / "trials.sql")
 
 
 def _git_sha() -> tuple[str, bool]:
+    """Provenance for a trial row. Returns ("?", False) when git cannot answer.
+
+    ``check=True`` is load-bearing, not style. Without it a failing `git status --porcelain`
+    (index.lock held by a concurrent git, a read-only checkout, git missing from PATH mid-run)
+    exits non-zero with an EMPTY stdout, and `bool("")` is False — so the row got written as a
+    REAL short sha with dirty=0, i.e. "this trial ran on a pristine tree at abc1234" when nobody
+    knows that. That is the failure mode this whole module exists to prevent: the trial log is the
+    one record that cannot be reconstructed afterwards, and a silently clean-looking provenance is
+    worse than no provenance, because the second one is visibly a "?" and the first one is not.
+
+    So a failure of EITHER command demotes the pair to the ("?", False) sentinel: dirty=False is
+    only ever paired with an unknown sha, never with a real one.
+    """
     try:
         sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True,
-                             text=True, timeout=5).stdout.strip() or "?"
+                             text=True, timeout=5, check=True).stdout.strip() or "?"
         dirty = bool(subprocess.run(["git", "status", "--porcelain"], capture_output=True,
-                                    text=True, timeout=5).stdout.strip())
+                                    text=True, timeout=5, check=True).stdout.strip())
         return sha, dirty
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  — no git, no repo, timeout, non-zero exit: all mean "unknown"
         return "?", False
 
 

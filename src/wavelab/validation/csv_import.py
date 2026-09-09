@@ -94,8 +94,12 @@ def _to_ms(col: pd.Series, report: list[str]) -> np.ndarray:
             "nor a date. Is this the right column?")
     try:
         dt = pd.to_datetime(col, utc=True, format="mixed")
-    except Exception as e:  # noqa: BLE001
-        raise ImportError_(f"the dates could not be interpreted: {e}") from None
+    except Exception:  # noqa: BLE001
+        # Deliberately NOT forwarding pandas' message: it is English, it names pandas internals,
+        # and it does not say what to do. The first value and the accepted shapes do.
+        raise ImportError_(
+            f"the dates could not be interpreted. The first one reads «{col.iloc[0]}». Use a shape "
+            "like 2024-03-14, 2024-03-14 18:00, or an epoch in seconds or milliseconds.") from None
     report.append(f"dates read as text (e.g. «{col.iloc[0]}»)")
     return (dt.astype("int64") // 1_000_000).to_numpy()
 
@@ -150,11 +154,11 @@ def parse_signals_csv(content: bytes | str, time_col: str | None = None,
     cs = signal_col or _detect(list(df.columns), _SIGNAL_COLS)
     if ct is None:
         raise ImportError_(
-            f"I can't find the time column. Columns: {list(df.columns)}. "
+            f"I can't find the time column. Columns: {', '.join(map(str, df.columns))}. "
             f"It should be called something like: {', '.join(_TIME_COLS[:6])}")
     if cs is None:
         raise ImportError_(
-            f"I can't find the signal column. Columns: {list(df.columns)}. "
+            f"I can't find the signal column. Columns: {', '.join(map(str, df.columns))}. "
             f"It should be called something like: {', '.join(_SIGNAL_COLS[:6])}")
     report.append(f"time column: «{ct}» · signal column: «{cs}»")
 

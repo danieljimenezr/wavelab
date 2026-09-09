@@ -136,7 +136,7 @@ def _hold(entry: np.ndarray, flat: np.ndarray) -> np.ndarray:
 
 
 def _squeeze_release(s: Series) -> np.ndarray:
-    o, h, l, c = _ohlc(s)
+    _o, h, l, c = _ohlc(s)
     up, mid, lo = talib.BBANDS(c, 20, 2.0, 2.0, 0)
     ema = talib.EMA(c, 20)
     atr = talib.ATR(h, l, c, 20)
@@ -357,7 +357,7 @@ register(Hypothesis(
 
 
 def _nr7_breakout(s: Series) -> np.ndarray:
-    o, h, l, c = _ohlc(s)
+    _o, h, l, c = _ohlc(s)
     tr = talib.TRANGE(h, l, c)
     min7 = talib.MIN(tr, 7)
     is_nr7 = np.where(np.isnan(tr) | np.isnan(min7), np.nan, (tr <= min7).astype(float))
@@ -394,7 +394,7 @@ register(Hypothesis(
 
 
 def _inside_bar_breakout(s: Series) -> np.ndarray:
-    o, h, l, c = _ohlc(s)
+    _o, h, l, c = _ohlc(s)
     h1, l1 = _shift(h, 1), _shift(l, 1)
     h2, l2 = _shift(h, 2), _shift(l, 2)
     out = np.zeros(c.size, dtype=np.int8)
@@ -482,7 +482,7 @@ register(Hypothesis(
 
 
 def _keltner_breakout(s: Series) -> np.ndarray:
-    o, h, l, c = _ohlc(s)
+    _o, h, l, c = _ohlc(s)
     ema = talib.EMA(c, 20)
     atr = talib.ATR(h, l, c, 10)
     ok = ~(np.isnan(ema) | np.isnan(atr))
@@ -528,7 +528,7 @@ register(Hypothesis(
 
 
 def _chandelier_trail(s: Series) -> np.ndarray:
-    o, h, l, c = _ohlc(s)
+    _o, h, l, c = _ohlc(s)
     atr = talib.ATR(h, l, c, 22)
     hh = talib.MAX(h, 22)
     ll = talib.MIN(l, 22)

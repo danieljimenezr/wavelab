@@ -81,8 +81,8 @@ def build_plan(h: Hypothesis, price: float, atr: float, cfg: PlanConfig | None =
 
     if h.archetype not in ("w2", "w4"):
         return PlanResult(None, False, 0, 0, 0, 0, 1.0,
-                          (f"state '{h.terminal_label}' offers no entry; "
-                           "inside wave 3 you manage, you do not enter.",))
+                          ((f"state '{h.terminal_label}' offers no entry; "
+                            "inside wave 3 you manage, you do not enter."),))
 
     if h.archetype == "w2":
         # Wave 2 complete, wave 3 beginning: Elliott's highest-quality entry.
@@ -108,8 +108,8 @@ def build_plan(h: Hypothesis, price: float, atr: float, cfg: PlanConfig | None =
 
     if lo >= hi:
         return PlanResult(None, False, 0, 0, 0, 0, 1.0,
-                          ("the entry zone is empty once truncated against the invalidation: "
-                           "there is nowhere left to enter above the stop.",))
+                          (("the entry zone is empty once truncated against the invalidation: "
+                            "there is nowhere left to enter above the stop."),))
 
     entry = (lo + hi) / 2.0
 
@@ -140,14 +140,14 @@ def build_plan(h: Hypothesis, price: float, atr: float, cfg: PlanConfig | None =
                        f"{size:.0%}, the stop is NOT tightened")
     if stop_atr < cfg.min_stop_atr:
         return PlanResult(None, False, rr_t2, cost_r, p_req, stop_atr, 1.0,
-                          (f"stop at {stop_atr:.2f} ATR: it sits inside the noise floor "
-                           f"(<{cfg.min_stop_atr} ATR) and any wick would sweep it.",))
+                          ((f"stop at {stop_atr:.2f} ATR: it sits inside the noise floor "
+                            f"(<{cfg.min_stop_atr} ATR) and any wick would sweep it."),))
 
     if cost_r > cfg.max_cost_r:
         return PlanResult(None, False, rr_t2, cost_r, p_req, stop_atr, size,
-                          (f"the round trip in fees takes {cost_r:.0%} of R "
-                           f"(maximum {cfg.max_cost_r:.0%}): the stop is too close for any "
-                           "plausible edge to survive the fees.",))
+                          ((f"the round trip in fees takes {cost_r:.0%} of R "
+                            f"(maximum {cfg.max_cost_r:.0%}): the stop is too close for any "
+                            "plausible edge to survive the fees."),))
 
     in_zone = lo <= price <= hi
     if not in_zone:

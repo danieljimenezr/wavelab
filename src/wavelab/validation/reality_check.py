@@ -140,7 +140,7 @@ def reality_check(
     # finishes. Aggregating to block means first (which is what the moving-block bootstrap does
     # anyway) drops the cost to K*n_blocks and gives the same statistic: the mean of a resample of
     # blocks IS the mean of those blocks' means.
-    L = max(2, int(round(block)))
+    L = max(2, round(block))
     nb = n // L
     if nb >= 30:
         B = Mc[:, : nb * L].reshape(K, nb, L).mean(axis=2)     # (K, n_blocks)

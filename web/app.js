@@ -252,7 +252,7 @@ function drawPlan(h) {
 
 function hypothesisRow(h, top) {
   const money = (v) => '$' + fmt(v, 0);
-  const head = `<h4>${h.label} <span class="lbl">· ${t(h.direction === 'LONG' ? 'hyp.long' : 'hyp.short')}
+  const head = `<h4>${tx(h.label)} <span class="lbl">· ${t(h.direction === 'LONG' ? 'hyp.long' : 'hyp.short')}
     · ${t('hyp.fit', { score: h.score })}</span>${h.truncated ? `<span class="badge">${t('hyp.truncated')}</span>` : ''}</h4>`;
 
   if (!h.viable) {

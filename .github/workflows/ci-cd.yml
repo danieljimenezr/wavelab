@@ -49,8 +49,11 @@ jobs:
         run: uv sync --frozen --group dev
 
       - name: Lint
-        run: uv run ruff check src tests
-        continue-on-error: true   # lint reports; the tests are what decide
+        # Blocking, and `.` on purpose: it is the exact command that gets run locally, so the gate
+        # cannot pass on a narrower path set than the one that was verified. ruff is version-ranged
+        # in pyproject for the same reason — a minor bump ships new rules, and a lint step that can
+        # turn the pipeline red for something nobody pushed is a lint step people learn to ignore.
+        run: uv run ruff check .
 
       - name: Tests
         # The ones marked `net` are excluded: they depend on Binance answering, and a pipeline that

@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
+from typing import Self
 
 import httpx
 
@@ -99,7 +100,7 @@ class BinanceREST:
             supports_aux=frozenset({"funding", "open_interest", "long_short", "liquidation"}),
         )
 
-    async def __aenter__(self) -> BinanceREST:
+    async def __aenter__(self) -> Self:
         self._client = httpx.AsyncClient(timeout=30.0, http2=True, follow_redirects=True)
         return self
 

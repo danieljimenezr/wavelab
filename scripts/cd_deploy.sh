@@ -48,6 +48,17 @@ check_health() {
             log "healthy after $((i*3))s"
             return 0
         fi
+        if echo "$r" | grep -q '"failed":true'; then
+            # The third state, and the only one worth giving up on early. Warm-up crashed, so
+            # `ready` will NEVER arrive and every remaining attempt is dead time. Until
+            # /api/status grew `failed`, a crashed start looked EXACTLY like a slow one on the
+            # wire, so this loop sat out all six minutes and then rolled back with "the health
+            # check failed" and no cause. The cause was in the process's own stdout the whole
+            # time; now it is in the payload too, so print it and stop.
+            log "WARM-UP FAILED on the new revision; not waiting out the deadline"
+            log "  $(echo "$r" | sed -n 's/.*"error":"\([^"]*\)".*/\1/p')"
+            return 1
+        fi
         if echo "$r" | grep -q '"ok":true'; then
             [ "$seen_ok" = 0 ] && log "responding and warming up…"
             seen_ok=1
@@ -75,10 +86,29 @@ deploy() {
     check_health
 }
 
+# This script is installed by cd_setup.sh, NOT by the deploy, so it does not update itself the way
+# everything else does. That drift is invisible: it only surfaces the day a deploy fails for a
+# reason the newer version would have handled. It has already happened once — the copy on the
+# server was still polling /api/estado after the codebase was translated, so the health check could
+# never have passed, and the rollout survived only because ssh died before the rollback ran.
+#
+# So: after a deploy that WORKED, adopt the version that came with it. Not before — a bash script
+# is read incrementally as it runs, and overwriting the one currently executing is how you get a
+# syntax error halfway through your own deployment. Next run uses it; this run finishes as itself.
+adopt_new_self() {
+    local incoming="$DEST/scripts/cd_deploy.sh"
+    [ -r "$incoming" ] || return 0
+    cmp -s "$incoming" "$0" && return 0
+    bash -n "$incoming" || { log "WARNING: the incoming cd_deploy.sh does not parse; keeping this one"; return 0; }
+    install -m 700 -o root -g root "$incoming" "$0" \
+        && log "cd_deploy.sh updated itself; the next deploy runs the new one"
+}
+
 log "deploying $NEW_SHA"
 if deploy "$NEW_SHA"; then
     log "OK: $(git rev-parse --short HEAD) running and responding"
     curl -s --max-time 5 "$HEALTH_URL" | head -c 200; echo
+    adopt_new_self
     exit 0
 fi
 

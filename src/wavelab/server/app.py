@@ -15,6 +15,7 @@ import contextlib
 import json
 import os
 import time
+import traceback
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -118,6 +119,11 @@ class App:
         self._tasks: list = []
         #: False while warming up. A probe has to be able to tell "starting" from "broken".
         self.ready = False
+        #: Set when warmup() raised, and the ONLY thing that makes "broken" distinguishable from
+        #: "starting": both leave `ready` False forever, so `ready` alone cannot tell them apart.
+        #: `_start` runs in a task nobody awaits until shutdown, so without this the exception is
+        #: parked in the task object and never printed — see the comment in `_start`.
+        self.startup_error: str | None = None
 
     # ------------------------------------------------------------------ startup
 
@@ -264,7 +270,7 @@ class App:
 APP = App()
 
 
-async def _start(app_: "App") -> None:
+async def _start(app_: App) -> None:
     """Warms up in the BACKGROUND and only then turns the feeds on.
 
     The warm-up used to live in the server's startup hook, and uvicorn does not accept connections
@@ -280,7 +286,24 @@ async def _start(app_: "App") -> None:
     "starting" from "broken", which is exactly what a probe is for.
     """
     import anyio
-    await anyio.to_thread.run_sync(app_.warmup)
+    try:
+        await anyio.to_thread.run_sync(app_.warmup)
+    except Exception as e:  # noqa: BLE001 — a crashed warm-up must never be silent
+        # This task is created with create_task and only gathered at shutdown, so an exception
+        # raised here used to sit in the task object with NOTHING in the log: `ready` stayed False
+        # forever and /api/status kept answering {"ok":true,"ready":false,"warming_up":{...}} —
+        # byte for byte what a healthy slow start looks like. The deploy then burned its whole
+        # 6-minute deadline and rolled back with no clue why, and twenty minutes went into chasing
+        # a "hung" process that had in fact already died. Record it, log it, keep serving.
+        app_.startup_error = f"{type(e).__name__}: {e}"
+        # One print, not print() plus traceback.print_exc(): those land on different streams and
+        # journald interleaves them, which is how you get a traceback with no idea which line
+        # introduced it.
+        print(f"[server] WARM-UP FAILED, the service will NOT become ready: {app_.startup_error}\n"
+              f"{traceback.format_exc()}", flush=True)
+        # Deliberately NOT re-raised. The process staying alive and answering is the whole point:
+        # a dead port is indistinguishable from a machine that never booted.
+        return
     app_.ready = True
     app_._tasks = [asyncio.create_task(app_.supervise_feed(), name="feed-supervisor"),
                    asyncio.create_task(app_.run_health(), name="health")]
@@ -414,8 +437,8 @@ async def _validate_csv(request: Request, tf: str) -> JSONResponse:
                 "With fewer, none of the five tests can conclude anything."}, status_code=400)
         report = imp.report + [
             f"{imp.n_long} long, {imp.n_short} short, {imp.n_flat} flat",
-            f"validated on YOUR series of {len(imp.ts_ms):,} rows, between "
-            f"{_date_str(imp.ts_ms.min())} and {_date_str(imp.ts_ms.max())}",
+            (f"validated on YOUR series of {len(imp.ts_ms):,} rows, between "
+             f"{_date_str(imp.ts_ms.min())} and {_date_str(imp.ts_ms.max())}"),
         ]
         return JSONResponse(_battery_own_series(imp.ts_ms, imp.price, imp.signal,
                                                 "your strategy (CSV with prices)",
@@ -432,11 +455,11 @@ async def _validate_csv(request: Request, tf: str) -> JSONResponse:
 
     inside = (w.ts >= imp.ts_ms.min()) & (w.ts <= imp.ts_ms.max())
     report = imp.report + [
-        "your CSV has no price column: it is validated against OUR BTCUSDT series. "
-        "If you trade a different asset, add a `price` column.",
+        ("your CSV has no price column: it is validated against OUR BTCUSDT series. "
+         "If you trade a different asset, add a `price` column."),
         f"{imp.n_long} long, {imp.n_short} short, {imp.n_flat} flat in your file",
-        f"aligned to {int(inside.sum()):,} {tf} bars between "
-        f"{_date_str(imp.ts_ms.min())} and {_date_str(imp.ts_ms.max())}",
+        (f"aligned to {int(inside.sum()):,} {tf} bars between "
+         f"{_date_str(imp.ts_ms.min())} and {_date_str(imp.ts_ms.max())}"),
     ]
     return JSONResponse(_series_and_battery(tf, sig, "your strategy (CSV)", {"report": report}))
 
@@ -599,12 +622,25 @@ async def status() -> JSONResponse:
     `ok` means "the process is alive and serving". `ready` means "it can actually do work now".
     Keeping the two apart is what lets a deployment wait without mistaking a slow start for a
     breakdown.
+
+    `failed`/`error` are the third state, and they are what make that promise true. Warm-up
+    crashing leaves `ready` False exactly like warm-up still running does, so the two states used
+    to be identical on the wire and a probe had no way to stop waiting. `failed` is the signal to
+    stop: it will never become ready.
+
+    `ok` stays True when `failed` is True, on purpose — the process IS alive and serving, and that
+    is precisely the fact that distinguishes this from a refused connection. Read `ready` and
+    `failed`, never `ok` alone. `warming_up` goes None once it has failed so that a dead start
+    cannot keep reporting progress it is not making.
     """
     return JSONResponse({
         "ok": True,
         "ready": APP.ready,
+        "failed": APP.startup_error is not None,
+        "error": APP.startup_error,
         "public": PUBLIC,
-        "warming_up": None if APP.ready else {"months": APP._warm_n, "month": APP._warm_month},
+        "warming_up": None if (APP.ready or APP.startup_error) else
+                      {"months": APP._warm_n, "month": APP._warm_month},
         "limits": LIMITS.stats,
         "mode": APP.engine.state.health.mode.value,
     })
@@ -624,7 +660,7 @@ if WEB.exists():
 def main() -> None:
     import uvicorn
     uvicorn.run("wavelab.server.app:app", host="127.0.0.1",
-                port=int(os.environ.get("WAVELAB_PORT", 8000)), log_level="warning")
+                port=int(os.environ.get("WAVELAB_PORT", "8000")), log_level="warning")
 
 
 if __name__ == "__main__":

@@ -236,7 +236,7 @@ def run_battery(
     # not forty. So we measure the mean run length of the signal itself.
     sig_flips = np.abs(np.diff(np.concatenate([[0.0], np.sign(sig)]))) > 0
     n_runs = max(1, int(sig_flips.sum()))
-    mean_dur = max(horizon_bars, int(round(active.sum() / n_runs)) if n_runs else horizon_bars)
+    mean_dur = max(horizon_bars, round(active.sum() / n_runs) if n_runs else horizon_bars)
     n_ef = effective_n(np.asarray(ts_ms)[: n][active], mean_dur, bar_ms)
     tests.append(Test(
         "effective_n", "Are there enough INDEPENDENT observations?",

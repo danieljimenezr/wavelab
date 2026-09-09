@@ -546,6 +546,24 @@ const SERVER_ES = {
     + 'de VIGILAR.',
   'the entry zone is on the far side of the stop.':
     'la zona de entrada está al otro lado del stop.',
+  // The w4 zone is truncated so it can never invade wave 1's territory, and the truncation can
+  // consume it entirely. Rare, but it is the ONLY rejection that carries no number, so it cannot
+  // be reached by any pattern: without this line it is the one refusal a Spanish reader gets in
+  // English.
+  ['the entry zone is empty once truncated against the invalidation: there is nowhere left to '
+  + 'enter above the stop.']:
+    'la zona de entrada queda vacía al truncarla contra la invalidación: no queda sitio donde '
+    + 'entrar por encima del stop.',
+  // The chart label for the hypothesis, from `Hypothesis.terminal_label` in waves/matcher.py.
+  // It is the single most prominent server string on the decision page — the heading of every
+  // hypothesis card — and it rendered in English in every language until now, because app.js
+  // interpolated `h.label` raw instead of through tx(). It also leaks INTO an otherwise
+  // translated sentence: the "state «…» offers no entry" refusal captures this label in $1, so a
+  // Spanish reader was getting "el estado «w2 complete → inside w3» no ofrece entrada".
+  'w2 complete → inside w3': 'onda 2 completa → dentro de la onda 3',
+  'w3 complete → inside w4': 'onda 3 completa → dentro de la onda 4',
+  'w4 complete → inside w5': 'onda 4 completa → dentro de la onda 5',
+  'five complete → ABC expected': 'cinco completas → se espera ABC',
   'not available': 'no disponible',
 
   // the rule editor's help: the KEYS are the DSL and never change, only these descriptions
@@ -575,6 +593,19 @@ const SERVER_ES = {
   'your strategy (CSV)': 'tu estrategia (CSV)',
   'your strategy (CSV with prices)': 'tu estrategia (CSV con precios)',
   'your rule': 'tu regla',
+
+  // The rule editor's refusals that carry NO computed number, so they are exact matches and not
+  // patterns. All four fell through in English, and the group LOOKED covered because the one
+  // refusal beside them — `expression not allowed` — has a pattern: an entry that is present for
+  // its noisiest neighbour is not evidence for the quiet ones.
+  'write comparisons one at a time: `a > b and b > c`, not `a > b > c`':
+    'escribe las comparaciones de una en una: `a > b and b > c`, no `a > b > c`',
+  'functions can only be called by name': 'las funciones solo se pueden llamar por su nombre',
+  'functions do not take keyword arguments': 'las funciones no aceptan argumentos con nombre',
+  ['the rule has to produce a series the same size as the prices (did you write a constant '
+  + 'instead of a comparison?)']:
+    'la regla tiene que producir una serie del mismo tamaño que los precios (¿has escrito una '
+    + 'constante en lugar de una comparación?)',
 
   // the two fixed refusals: the concurrency limiter, and the look-ahead guard in shift()
   ['there are too many validations under way right now. Try again in a minute: each one takes a '
@@ -669,6 +700,20 @@ const SERVER_CA = {
     + 'passar de VIGILAR.',
   'the entry zone is on the far side of the stop.':
     'la zona d\'entrada és a l\'altra banda del stop.',
+  ['the entry zone is empty once truncated against the invalidation: there is nowhere left to '
+  + 'enter above the stop.']:
+    'la zona d\'entrada queda buida en truncar-la contra la invalidació: no hi queda cap lloc on '
+    + 'entrar per damunt del stop.',
+  // The chart label for the hypothesis, from `Hypothesis.terminal_label` in waves/matcher.py.
+  // It is the single most prominent server string on the decision page — the heading of every
+  // hypothesis card — and it rendered in English in every language until now, because app.js
+  // interpolated `h.label` raw instead of through tx(). It also leaks INTO an otherwise
+  // translated sentence: the "state «…» offers no entry" refusal captures this label in $1, so a
+  // Spanish reader was getting "el estado «w2 complete → inside w3» no ofrece entrada".
+  'w2 complete → inside w3': 'ona 2 completa → dins de l\'ona 3',
+  'w3 complete → inside w4': 'ona 3 completa → dins de l\'ona 4',
+  'w4 complete → inside w5': 'ona 4 completa → dins de l\'ona 5',
+  'five complete → ABC expected': 'cinc completes → s\'espera ABC',
   'not available': 'no disponible',
 
   'closing price': 'preu de tancament',
@@ -697,6 +742,15 @@ const SERVER_CA = {
   'your strategy (CSV)': 'la teva estratègia (CSV)',
   'your strategy (CSV with prices)': 'la teva estratègia (CSV amb preus)',
   'your rule': 'la teva regla',
+
+  'write comparisons one at a time: `a > b and b > c`, not `a > b > c`':
+    'escriu les comparacions d\'una en una: `a > b and b > c`, no pas `a > b > c`',
+  'functions can only be called by name': 'les funcions només es poden cridar pel seu nom',
+  'functions do not take keyword arguments': 'les funcions no accepten arguments amb nom',
+  ['the rule has to produce a series the same size as the prices (did you write a constant '
+  + 'instead of a comparison?)']:
+    'la regla ha de produir una sèrie de la mateixa mida que els preus (has escrit una constant '
+    + 'en comptes d\'una comparació?)',
 
   // the two fixed refusals: the concurrency limiter, and the look-ahead guard in shift()
   ['there are too many validations under way right now. Try again in a minute: each one takes a '
@@ -810,9 +864,12 @@ const PATTERNS = [
     ca: 'la columna de temps té valors al voltant de $1, que no semblen ni una marca de temps ni '
       + 'una data. És aquesta la columna correcta?',
   }],
-  [/^the dates could not be interpreted: (.+?)$/, {
-    es: 'no se han podido interpretar las fechas: $1',
-    ca: 'no s\'han pogut interpretar les dates: $1',
+  [new RegExp('^the dates could not be interpreted\\. The first one reads «(.+?)»\\. Use a shape '
+    + 'like 2024-03-14, 2024-03-14 18:00, or an epoch in seconds or milliseconds\\.$'), {
+    es: 'no se han podido interpretar las fechas. La primera dice «$1». Usa un formato como '
+      + '2024-03-14, 2024-03-14 18:00, o una marca de tiempo en segundos o milisegundos.',
+    ca: 'no s\'han pogut interpretar les dates. La primera diu «$1». Fes servir un format com '
+      + '2024-03-14, 2024-03-14 18:00, o una marca de temps en segons o mil·lisegons.',
   }],
   [/^could not read the CSV: (.+?)$/, {
     es: 'no se ha podido leer el CSV: $1',
@@ -903,12 +960,18 @@ const PATTERNS = [
   // groups are Python type names, identifiers and the function/series lists: those are the
   // vocabulary of the expression language itself and are copied over untouched on purpose —
   // translating `close` or `BitXor` would name something the editor does not accept.
-  [new RegExp('^expression not allowed: (.+?)\\. Only comparisons, arithmetic, and the listed '
-    + 'functions\\. No imports, no attributes, no indexing, no lambdas\\.$'), {
-    es: 'expresión no permitida: $1. Solo se aceptan comparaciones, aritmética y las funciones de '
-      + 'la lista. Sin imports, sin atributos, sin indexación, sin lambdas.',
-    ca: 'expressió no permesa: $1. Només s\'accepten comparacions, aritmètica i les funcions de la '
-      + 'llista. Sense imports, sense atributs, sense indexació, sense lambdes.',
+  // This one tracks `_Interpreter.visit()` in expr.py word for word, and it has already drifted
+  // once: expr.py grew "`and`/`or`/`not` and the functions on the list are accepted" while the
+  // regex here still said "and the listed functions". Nothing broke and nothing was reported —
+  // the anchored regex simply stopped matching, so the commonest error in the editor rendered in
+  // English on a Spanish page while this entry sat here looking present.
+  [new RegExp('^expression not allowed: (.+?)\\. Only comparisons, arithmetic, `and`/`or`/`not` '
+    + 'and the functions on the list are accepted\\. No imports, no attributes, no indexing, no '
+    + 'lambdas\\.$'), {
+    es: 'expresión no permitida: $1. Solo se aceptan comparaciones, aritmética, `and`/`or`/`not` '
+      + 'y las funciones de la lista. Sin imports, sin atributos, sin indexación, sin lambdas.',
+    ca: 'expressió no permesa: $1. Només s\'accepten comparacions, aritmètica, `and`/`or`/`not` i '
+      + 'les funcions de la llista. Sense imports, sense atributs, sense indexació, sense lambdes.',
   }],
   [/^only numbers are accepted, not (.+?)$/, {
     es: 'solo se aceptan números, no $1',
@@ -1002,13 +1065,37 @@ export function t(key, vars) {
 }
 
 /** Text that came from the API (English): exact match first, then by pattern, then untouched. */
+/**
+ * A captured group that is ENTIRELY a number gets the reader's decimal separator.
+ *
+ * The server writes `2.9%` and the stat tiles are formatted with Intl, so the Spanish page was
+ * showing `2,9%` in the tile and `2.9%` in the sentence explaining it, three lines apart. Same
+ * number, two spellings; it reads as two different figures.
+ *
+ * Strict on purpose. Only a bare number, optionally signed, optionally a percentage — so a date
+ * (2024-03-14), an identifier (`close`), a column list and a pandas message all pass through
+ * untouched. Anything looser and this would start rewriting the user's own data back at them.
+ */
+function localiseNumber(g) {
+  if (LOCALE[lang].startsWith('en')) return g;
+  return /^-?\d+(\.\d+)?%?$/.test(g) ? g.replace('.', ',') : g;
+}
+
 export function tx(text) {
   if (!text || lang === 'en') return text;
   const table = SERVER[lang];
   if (table && table[text]) return table[text];
   for (const [re, tr] of PATTERNS) {
     const m = re.exec(text);
-    if (m && tr[lang]) return tr[lang].replace(/\$(\d)/g, (_, i) => m[Number(i)] ?? '');
+    // A capture can itself be a translatable sentence. The chart label is: the "state «…» offers
+    // no entry" refusal embeds `terminal_label`, so a Catalan reader was getting a Catalan
+    // sentence with «w3 complete → inside w4» sitting in the middle of it. Look each group up in
+    // the table before substituting; anything not in it — a number, `close`, a pandas message —
+    // passes through untouched, which is what the $-groups are for.
+    if (m && tr[lang]) return tr[lang].replace(/\$(\d)/g, (_, i) => {
+      const g = m[Number(i)] ?? '';
+      return (table && table[g]) || localiseNumber(g);
+    });
   }
   return text;
 }

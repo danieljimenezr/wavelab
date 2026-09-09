@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from wavelab.config import AppConfig, AssetConfig, EngineConfig, config_hash, load_config
 
@@ -38,8 +39,14 @@ def test_adding_an_asset_requires_no_code(tmp_path: Path):
 
 def test_instrument_metadata_is_mandatory():
     """With no tick_size the stop is undefined; with no fees you inherit BTC's economics."""
-    with pytest.raises(Exception):
+    # `pytest.raises(Exception)` here asserted almost nothing: pydantic's ValidationError IS a
+    # ValueError, but so is every accident — a typo in the field name would raise too and the test
+    # would still have gone green while proving the opposite of its name. Pin the exception AND
+    # which fields were missing, so that giving tick_size or qty_step a default breaks this test.
+    with pytest.raises(ValidationError) as exc:
         AssetConfig(symbol="X")
+    assert {e["loc"][0] for e in exc.value.errors() if e["type"] == "missing"} == {
+        "tick_size", "qty_step"}
 
 
 class TestInvariants:

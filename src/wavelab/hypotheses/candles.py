@@ -527,7 +527,7 @@ def _range_gap(s: Series) -> np.ndarray:
     out = np.zeros(len(s), dtype=np.int8)
     if len(s) < _MIN_BARS:
         return out
-    _o, h, l, c = _ohlc(s)
+    _o, h, l, _c = _ohlc(s)
     h1, l1 = _lag(h, 1), _lag(l, 1)
     ok = _no_nan(h, l, h1, l1)
     out[ok & (l > h1)] = -1

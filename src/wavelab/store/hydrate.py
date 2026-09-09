@@ -72,7 +72,16 @@ async def hydrate(
         print("[hydrate] the archive returned no months at all", file=sys.stderr)
         return 1
     if quick:
-        cutoff = date.today().replace(day=1) - timedelta(days=730)
+        # UTC, not local. `date.today()` is the machine's civil date, and the archive's month keys
+        # are UTC. The two disagree for a 2h window in Spain (CEST = UTC+2) — and it only CHANGES
+        # the answer when that window also crosses a month boundary, because of the .replace(day=1)
+        # snap: run at 00:30 local on the 1st and the local date says "1st" while UTC still says
+        # "last day of the previous month", so the cutoff moves a whole month and --quick fetches
+        # 25 months instead of 24. Harmless for the bar grid (ingest is idempotent and these are
+        # whole-month keys), but it made the same run answer differently depending on the box's
+        # timezone, and the daily-file loop below already computes its `today` as UTC — the two
+        # notions of "today" inside one hydrate must not come from different clocks.
+        cutoff = datetime.now(UTC).date().replace(day=1) - timedelta(days=730)
         months = [m for m in months if m >= cutoff]
     print(f"[hydrate] {len(months)} months: {months[0]:%Y-%m} → {months[-1]:%Y-%m}", flush=True)
 

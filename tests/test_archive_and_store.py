@@ -32,9 +32,10 @@ def _csv(start_ms: int, n: int, tf_ms: int, *, micros: bool, header: bool) -> by
     mul = 1000 if micros else 1
     rows = []
     if header:
-        rows.append(",".join([
-            "open_time", "open", "high", "low", "close", "volume", "close_time",
-            "quote_volume", "count", "taker_buy_volume", "taker_buy_quote_volume", "ignore"]))
+        # Binance's own header, verbatim and in order: the parser keys off these names, so this
+        # is one constant line, not a list to be joined at runtime.
+        rows.append("open_time,open,high,low,close,volume,close_time,"
+                    "quote_volume,count,taker_buy_volume,taker_buy_quote_volume,ignore")
     for i in range(n):
         ot = (start_ms + i * tf_ms) * mul
         ct = ot + tf_ms * mul - (1 * mul)

@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from wavelab.core.types import Direction
@@ -49,7 +50,10 @@ class TestPartialNonTerminals:
     """★ 100% of entries live inside INCOMPLETE impulses. An engine that only evaluates finished
     structures is an annotation toy."""
 
-    P = [100.0, 130.0, 115.0, 160.0, 140.0, 155.0]
+    #: ClassVar, not an instance attribute: these are hand-labelled vertices, shared read-only by
+    #: every test in the class. Do not move them into __init__ and do not touch a price — the whole
+    #: point is that the same six numbers produce a different state at each prefix length.
+    P: ClassVar[list[float]] = [100.0, 130.0, 115.0, 160.0, 140.0, 155.0]
 
     @pytest.mark.parametrize("n,state,archetype", [
         (3, ImpulseState.AT_2, "w2"),
@@ -110,7 +114,8 @@ class TestPartialNonTerminals:
 class TestOverlap:
     """Prechter's exception: in futures and commodities wave 4 is allowed to overlap."""
 
-    P = [100.0, 130.0, 115.0, 160.0, 125.0, 175.0]   # w4=125 < w1=130 -> it overlaps
+    # w4=125 < w1=130 -> it overlaps
+    P: ClassVar[list[float]] = [100.0, 130.0, 115.0, 160.0, 125.0, 175.0]
 
     def test_it_is_rejected_by_default(self):
         assert not check_impulse(self.P).valid
@@ -127,8 +132,20 @@ class TestSymmetry:
     @given(pts=st.lists(st.floats(50, 500, allow_nan=False), min_size=6, max_size=6, unique=True))
     @settings(max_examples=150, deadline=None)
     def test_reflecting_the_prices_gives_the_same_verdict(self, pts):
+        mirror = [1000.0 - p for p in pts]
+        # `1000.0 - p` is NOT an exact operation, and that is a property of binary floating point,
+        # not of the rules. One ULP at 50 is 7.1e-15 but at 950 it is 1.1e-13, so two prices a few
+        # ULPs apart down at the bottom of the range collapse onto a single float once mirrored:
+        # 50.0 and 50.00000000000001 both come back as exactly 950.0. When that happens `mirror`
+        # is a DIFFERENT six-point structure rather than a reflection of this one, and the two
+        # verdicts disagreeing says nothing about whether the rules are symmetric — which is the
+        # only thing this test is for. So require the mirror to preserve every pairwise ordering
+        # before comparing verdicts. Real prices sit on a tick grid where this never arises; the
+        # `unique=True` above is not enough, because uniqueness is not preserved by the mirror.
+        assume(all((pts[j] > pts[i]) == (mirror[j] < mirror[i])
+                   for i in range(len(pts)) for j in range(i + 1, len(pts))))
         a = check_impulse(pts, Direction.LONG)
-        b = check_impulse([1000.0 - p for p in pts], Direction.SHORT)
+        b = check_impulse(mirror, Direction.SHORT)
         assert a.valid == b.valid
         assert set(a.broken) == set(b.broken)
 
