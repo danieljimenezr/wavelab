@@ -45,6 +45,19 @@ class Signal:
     outcome: Outcome | None = None
     null_outcome: Outcome | None = None
 
+    # The control arm's own geometry. It is computed inside the resolution loop and used to book
+    # `null_outcome`, and until it was recorded here the twin was unobservable: `edge_vs_null` is
+    # the project's headline number and the only thing that could be asserted about the arm it is
+    # measured against was how many bars it ran for. Four separate faults in these four lines
+    # survived the whole suite — a twin entering on the signal's own bar, one whose target lands
+    # on the losing side, one whose stop is on the wrong side of its entry, one whose risk is
+    # rescaled — and each of them moves `edge_vs_null` by more than its own magnitude, one of
+    # them by 24x, including sign.
+    null_ts_ms: int | None = None
+    null_entry: float | None = None
+    null_stop: float | None = None
+    null_target: float | None = None
+
     @property
     def net_r(self) -> float:
         """R net of fees. The gross figure is a brochure number."""
@@ -165,6 +178,7 @@ def run_backtest(
         e = float(C[j]); risk = abs(s.entry - s.stop); rr = abs(s.target - s.entry) / risk
         st = e - risk if is_long else e + risk
         tg = e + risk * rr if is_long else e - risk * rr
+        s.null_ts_ms, s.null_entry, s.null_stop, s.null_target = htf_ts[j], e, st, tg
         s.null_outcome = resolve_triple_barrier(
             e, st, tg, H[j + 1:], L[j + 1:], C[j + 1:], max_bars=max_bars_hold, long=is_long)
 

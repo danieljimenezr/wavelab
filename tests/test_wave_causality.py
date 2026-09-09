@@ -255,6 +255,165 @@ class TestTheGreyLineIsAPromise:
             "count did not confirm: the published line is off by a tick"
         )
 
+    def test_touching_the_line_is_enough_on_the_LOW_side_too(self):
+        """The same promise, made about a low. Half of the confirmations in the product are these.
+
+        The gate is written twice, once per direction, so it can be tightened on one side only —
+        and a one-sided tightening is invisible: a low that confirms by price rising EXACTLY to the
+        published line simply stops confirming, the leg is never drawn, and nothing anywhere
+        reports a count that was not made. The test above pins the high side; without this one the
+        low side has no tick-exactness guard at all.
+
+        The arithmetic is exact in binary on purpose: the flat warm-up puts the threshold on the
+        0.5% floor of 100.0, so the low's published line lands on 100.0 to the bit and a bar can
+        touch it without a rounding error deciding the outcome.
+        """
+        z = ZigZag()
+        for i in range(15):
+            z.update(_T0 + i * TF_4H.ms, 100.0, 100.0, 100.0)
+        # Down through the high's line, closing back at 100.0 so the LOW's own threshold is the
+        # same 0.5 floor and its line lands on an exact binary value.
+        assert z.update(_T0 + 15 * TF_4H.ms, 100.0, 99.5, 100.0) is not None, (
+            "sanity: the bar came down through the high's line and the high did not confirm"
+        )
+        prov = z.store.provisional_as_of(10**15)
+        assert prov is not None and prov.kind is PivotKind.LOW and prov.price == 99.5
+        line = z.confirm_price()
+        assert line == 100.0, f"the low's line should sit on the 0.5 floor above 99.5, got {line}"
+
+        confirmed = z.update(_T0 + 16 * TF_4H.ms, line, 99.5, 99.75)
+        assert confirmed is not None, (
+            f"the bar rose to exactly {line}, the price the grey line was drawn at, and the low "
+            "did not confirm: the promise is kept on highs and broken on lows"
+        )
+        assert confirmed.kind is PivotKind.LOW
+
+
+class TestAPivotIsPricedAtTheExtremeItMarks:
+    """★ A pivot's price is the price the market actually printed at its own bar.
+
+    Everything downstream is a distance measured from that number: the leg lengths R2 compares, the
+    Fibonacci ratios the guideline score ranks on, the ``confirm_price`` line, and the invalidation
+    the card is sold on. Get the number wrong and the count is still perfectly well-formed — the
+    legs join up, the rules pass, the chart looks right — it is simply anchored to a price that
+    never happened.
+
+    The place this goes wrong is the direction flip. ``update`` decides ``up_px``/``down_px`` once
+    at the top, from ``on_close``; the two lines that seed the NEW extreme after a confirmation sit
+    forty lines further down, and re-deriving the price there from ``close`` reads as a tidy-up. It
+    is not observable through the confirmation machinery, because the wrong price is then used
+    consistently by both the published line and the gate that fires on it.
+    """
+
+    def test_a_flip_down_seeds_the_new_low_from_the_bar_s_wick(self):
+        z = ZigZag()
+        for i in range(15):
+            z.update(_T0 + i * TF_4H.ms, 100.0, 100.0, 100.0)
+        # The bar that confirms the high: it trades down to 95 and closes back up at 99.4, the
+        # ordinary shape of a flush. The low of that bar is the new pivot, not its close.
+        z.update(_T0 + 15 * TF_4H.ms, 100.0, 95.0, 99.4)
+
+        prov = z.store.provisional_as_of(10**15)
+        assert prov is not None and prov.kind is PivotKind.LOW
+        assert prov.price == 95.0, (
+            f"the flip bar traded down to 95.0 and closed at 99.4, and the new low was placed at "
+            f"{prov.price}: a 4.6% error in the pivot's own price, on the bar the count turns. "
+            "Every leg measured from here is wrong by that much"
+        )
+        assert prov.idx == 15 and prov.ts_ms == _T0 + 15 * TF_4H.ms
+
+    def test_a_flip_up_seeds_the_new_high_from_the_bar_s_wick(self):
+        """The mirror. A fault seeded on one branch only would leave the count biased in one
+        direction, which is the hardest kind to see on a chart."""
+        z = ZigZag()
+        for i in range(15):
+            z.update(_T0 + i * TF_4H.ms, 100.0, 100.0, 100.0)
+        z.update(_T0 + 15 * TF_4H.ms, 100.0, 95.0, 99.4)          # high confirms, now hunting a low
+        assert z.update(_T0 + 16 * TF_4H.ms, 105.0, 95.0, 95.6) is not None, (
+            "sanity: the low should have confirmed on a bar that ran 10 points above it"
+        )
+
+        prov = z.store.provisional_as_of(10**15)
+        assert prov is not None and prov.kind is PivotKind.HIGH
+        assert prov.price == 105.0, (
+            f"the flip bar ran up to 105.0 and closed at 95.6, and the new high was placed at "
+            f"{prov.price}"
+        )
+
+    @pytest.mark.parametrize("on_close", [False, True])
+    def test_every_flip_seeds_the_new_extreme_by_the_rule_the_knob_selected(self, on_close):
+        """The general statement — checked at the moment the extreme is SEEDED, on every flip.
+
+        This test used to inspect only the pivots that survived to the end of the run, and that is
+        almost no test at all: a wrongly-seeded extreme is overwritten by the very next bar that
+        makes a real one, so a mispriced seed reaches a finished pivot only when the flip bar
+        itself turns out to be the pivot AND nothing between the flip and the confirmation trades
+        past its close. Measured over 50 seeds of this fixture, the survivor-only form caught a
+        seeding fault on 5 of them — one seed in ten, and one bad pivot out of ~57 when it fired.
+        It read as the strongest test in the class and was by an order of magnitude the weakest.
+        Checking the provisional at each confirmation exercises every flip in the series instead
+        of the one or two that happen to survive.
+
+        The ``on_close`` parametrisation is the other half, and it is the half that was missing.
+        ``update`` picks ``up_px``/``down_px`` from the knob once at the top; the two lines that
+        seed the new extreme after a confirmation sit forty lines below, and re-deriving the price
+        there from the raw wick reads as a tidy-up. With the default ``on_close=False`` the wick
+        IS the selected price, so nothing in the class could see the difference. Switch the knob
+        on — the operator's explicit instruction that wicks are noise on this asset — and a
+        detector that ignores it anchors a third of its pivots to the very prices they excluded,
+        while the badge on the panel goes on saying close-confirmed.
+        """
+        ts, h, l, c = _series(400, seed=6)
+        z = ZigZag(ZigZagConfig(on_close=on_close))
+        flips = 0
+        for i in range(ts.size):
+            got = z.update(int(ts[i]), float(h[i]), float(l[i]), float(c[i]))
+            if got is None:
+                continue
+            flips += 1
+            prov = z.store.provisional_as_of(int(ts[i]))
+            assert prov is not None and prov.idx == i and prov.ts_ms == int(ts[i]), (
+                f"the flip on bar {i} did not seed a new provisional pivot on that same bar"
+            )
+            if on_close:
+                expected = c[i]
+            else:
+                expected = l[i] if prov.kind is PivotKind.LOW else h[i]
+            assert prov.price == expected, (
+                f"on_close={on_close}: the flip on bar {i} seeded its new {prov.kind.name} at "
+                f"{prov.price}, but that bar ran [{l[i]}, {h[i]}] and closed at {c[i]}, so the "
+                f"price selected by the configuration is {expected}. Every leg, ratio and "
+                "invalidation measured from this pivot is anchored to a price the operator's "
+                "own setting says to ignore"
+            )
+        assert flips >= 20, (
+            f"only {flips} flips in 400 bars: the fixture stopped exercising the property and "
+            "this test now proves almost nothing"
+        )
+
+    def test_every_pivot_sits_on_its_own_bar_s_high_or_low(self):
+        """The cheap end-state sweep, kept as a second and weaker net.
+
+        It says nothing the per-flip test above does not say better; it is here because it is the
+        statement a reader of the chart would make ("no pivot is drawn at a price its bar did not
+        trade"), and it would catch a fault introduced anywhere other than the seeding lines.
+        """
+        ts, h, l, c = _series(400, seed=6)
+        z = detect_batch(ts, h, l, c)
+        pivs = z.store.as_of(10**15)
+        assert len(pivs) >= 5, "sanity: the series has to produce pivots to say anything"
+
+        prov = z.store.provisional_as_of(10**15)
+        for p in (*pivs, prov):
+            if p is None:
+                continue
+            expected = h[p.idx] if p.kind is PivotKind.HIGH else l[p.idx]
+            assert p.price == expected, (
+                f"the {p.kind.name} at bar {p.idx} is priced {p.price}, but that bar ran "
+                f"[{l[p.idx]}, {h[p.idx]}] and closed at {c[p.idx]}: the pivot is drawn at a price "
+                "the market did not make on the bar it is drawn on"
+            )
+
 
 class TestTheThresholdIsWorthWhatItSays:
     """The threshold is what separates structure from noise, and both of its terms earn their keep.
@@ -295,6 +454,33 @@ class TestTheThresholdIsWorthWhatItSays:
             "an 8% rally followed by an 8% selloff confirmed no pivot at all: the threshold is not "
             "a floor any more, it is a wall"
         )
+
+    def test_the_floor_is_a_percentage_of_the_CLOSE_not_of_the_wick(self):
+        """``min_pct * close`` — the close, on the bar of the extreme.
+
+        The two candidates differ by the wick-to-close distance, which is small, and that is why
+        the difference is worth pinning rather than shrugging at: it is small and it is
+        SYSTEMATICALLY DIRECTIONAL. A high latches off a price above its close and a low off a
+        price below it, so in a range-bound market lows would confirm a shade more readily than
+        highs, the count would acquire a downward bias, and no reading of the chart would ever
+        attribute it to this line.
+
+        The warm-up here is flat with a deliberately wide wick, so the ATR term (0.06) is nowhere
+        near the floor and the latched value is exactly 0.5% of one of two prices: 100.0 (the
+        close, correct) or 100.02 (the high).
+        """
+        z = ZigZag()
+        for i in range(15):
+            z.update(_T0 + i * TF_4H.ms, 100.02, 99.98, 100.0)
+
+        prov = z.store.provisional_as_of(10**15)
+        assert prov is not None and prov.price == 100.02, "sanity: the extreme is the bar's high"
+        assert prov.thr_at_extreme == 0.5, (
+            f"the frozen threshold came out {prov.thr_at_extreme!r}; on a tape this quiet the "
+            "floor binds and it is 0.5% of the CLOSE (100.0 -> 0.5), not of the extreme price "
+            "the wick reached (100.02 -> 0.5001)"
+        )
+        assert z.confirm_price() == 100.02 - 0.5
 
     def test_k_is_a_knob_and_turning_it_changes_something(self):
         """``k`` is the one setting that gets tuned per asset. If the sensitivity it is supposed to
@@ -441,6 +627,66 @@ class TestWhatIsDrawnSaysWhatItKnows:
                 "confirmation time, or it will be read as settled"
             )
 
+    def test_the_confirmation_time_on_the_wire_is_the_CONFIRMATION_not_the_extreme(self):
+        """★ The test above checks only whether ``confirmed_ts`` is None. Any non-None value
+        satisfies it — including the pivot's own extreme timestamp, which is the located/confirmed
+        conflation this whole module exists to prevent, reintroduced at the single point where the
+        data leaves the process.
+
+        ``legs_as_of`` is what the server hands the chart, so this field is the wire contract. A
+        consumer replaying "what was knowable at t" off a backdated ``confirmed_ts`` would place
+        every leg at its extreme instead of at the bar it became knowable — a median of a few bars
+        of free lookahead, hundreds in a trend, and it makes the replay look better rather than
+        raising anything.
+        """
+        ts, h, l, c = _series(400, seed=6)
+        z = detect_batch(ts, h, l, c)
+        by_ts = {p.ts_ms: p for p in z.store.as_of(10**15)}
+        legs = z.legs_as_of(10**15)
+        checked = 0
+
+        for leg in legs:
+            if leg["tentative"]:
+                continue
+            p = by_ts[leg["ts"]]
+            assert leg["confirmed_ts"] == p.confirmed_ts_ms, (
+                f"the leg at ts={leg['ts']} goes out on the wire stamped "
+                f"{leg['confirmed_ts']} while the store says it became knowable at "
+                f"{p.confirmed_ts_ms}: the chart and the count disagree about WHEN"
+            )
+            assert leg["confirmed_ts"] > leg["ts"], (
+                f"the leg at ts={leg['ts']} claims it was confirmed at {leg['confirmed_ts']}, its "
+                "own extreme or earlier. An extreme is never knowable on its own bar, so on the "
+                "wire the confirmation time is always strictly later than the vertex"
+            )
+            checked += 1
+
+        assert checked >= 5, f"only {checked} confirmed legs: the fixture proves too little"
+
+    def test_a_consumer_that_asks_for_settled_legs_only_is_given_settled_legs_only(self):
+        """``include_provisional=False`` is a public parameter with no caller in ``src/`` today.
+
+        That is precisely why it needs pinning now: an argument nothing exercises is an argument
+        nothing protects, and the first caller will be a route sending a confirmed-only view to a
+        consumer that asked for settled data. Ignore the flag there and the tentative leg goes out
+        stripped of the one field — ``tentative`` — that would have let the consumer notice, so it
+        is read as a settled vertex that will then silently move.
+        """
+        ts, h, l, c = _series(400, seed=6)
+        z = detect_batch(ts, h, l, c)
+        full = z.legs_as_of(10**15)
+        settled = z.legs_as_of(10**15, include_provisional=False)
+
+        assert [x for x in full if x["tentative"]], "sanity: the fixture must produce a live leg"
+        assert not [x for x in settled if x["tentative"]], (
+            "a caller that asked to suppress the provisional leg was sent it anyway, and it is "
+            "the leg that moves"
+        )
+        assert settled == full[:-1], (
+            "suppressing the provisional leg changed something other than dropping the last one: "
+            f"{len(settled)} legs against {len(full)}"
+        )
+
     def test_a_windowed_chart_still_anchors_its_first_leg(self):
         """``since_ms`` is how the server sends only the visible window. A leg needs two vertices,
         so the window has to reach one pivot further back than it shows: without that the first leg
@@ -521,6 +767,28 @@ class TestATR:
         assert tr == pytest.approx(20.5), (
             f"true range came out {tr}; the bar is only 1.0 tall but it gapped 19.5 away from the "
             "previous close, so the range that was actually traded through is 20.5"
+        )
+
+    def test_the_gap_is_measured_in_BOTH_directions(self):
+        """The test above gaps UP, and an up-gap is carried entirely by the ``high - prev_close``
+        term. Drop the absolute value from the OTHER term and it stays green, because that term is
+        never the one that decides an up-gap.
+
+        A down-gap is where the low-side term is the one that matters, and a down-gap is not the
+        exotic case: it is the crash, the liquidation cascade and the bar that prints when a feed
+        comes back after an outage. Without the absolute value the true range there collapses to
+        the bar's own height, so the ATR — and with it the ZigZag threshold — is understated
+        precisely and only when the market falls. The detector then manufactures structure in the
+        most violent part of the tape and reports it as ordinary, and it does so in one direction
+        only, which is the shape of bias nobody spots on a chart.
+        """
+        a = WilderATR(1)                    # period 1: the first value IS the true range, exactly
+        assert a.update(100.0, 99.0, 99.5) is None
+        tr = a.update(80.5, 79.5, 80.0)     # the whole bar sits 19.0 BELOW the previous close
+        assert tr == pytest.approx(20.0), (
+            f"true range came out {tr}; the bar is 1.0 tall and gapped DOWN 19.0 from the previous "
+            "close of 99.5, so the range actually traded through is 20.0. A down-gap has to count "
+            "for exactly as much as an up-gap"
         )
 
     def test_it_is_not_ready_before_the_period(self):

@@ -1,22 +1,33 @@
-"""The archive's two silent-corruption traps, and the store's idempotence.
+"""The archive's two silent-corruption traps, the store's idempotence, and the feeds that write it.
 
-Hermetic: the ZIPs are manufactured here, reproducing Binance's TWO real formats. The test against
-real data exists too, marked `net`, and is excluded by default.
+Hermetic: the ZIPs are manufactured here, reproducing Binance's TWO real formats; the HTTP and
+WebSocket layers are driven through stub transports and scripted messages, so nothing here touches
+the network. The test against real data exists too, marked `net`, and is excluded by default.
+
+This file is the ONLY place that exercises `wavelab.feeds` and `wavelab.store`: hydration, the REST
+weight governor, the reconnect gap-heal seam and the liquidation log have no other coverage, so a
+fault in any of them is invisible everywhere else.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
+import json
+import os
+import time
 import zipfile
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
+import httpx
 import numpy as np
 import pandas as pd
 import pytest
 
 from wavelab.core.timeframes import TF_1H, TF_1M
+from wavelab.feeds import binance_klines, binance_ws
 from wavelab.feeds.base import Market
 from wavelab.feeds.binance_archive import (
     MicrosecondBoundaryError,
@@ -24,6 +35,15 @@ from wavelab.feeds.binance_archive import (
     parse_klines_zip,
     verify_checksum,
 )
+from wavelab.feeds.binance_klines import KlineFeed
+from wavelab.feeds.binance_rest import (
+    WEIGHT_BUDGET,
+    BinanceREST,
+    RateLimitCircuitOpen,
+    WeightGovernor,
+)
+from wavelab.feeds.liquidations import LiquidationRecorder
+from wavelab.store import hydrate as hydrate_mod
 from wavelab.store.bars import BarStore
 
 JAN_2025 = 1735689600000   # 2025-01-01T00:00:00Z in ms
@@ -203,6 +223,46 @@ class TestIdempotentIngest:
         with pytest.raises(ValueError, match="grid"):
             s.ingest("BTCUSDT", df)
 
+    @pytest.mark.parametrize("pos", [0, 5, 9])
+    def test_ONE_bar_off_the_grid_is_enough_to_refuse_the_frame(self, tmp_path, pos):
+        """The realistic corruption is one stray timestamp in 44,640, not a whole file shifted.
+
+        That is what a partly-applied µs/ms conversion or a single realigned archive row looks
+        like, and it is the case the guard has to catch: an off-grid row that gets written is
+        then dropped by `read`'s reindex onto the minute grid, which deletes a real bar AND
+        reports the minute it belonged to as a gap. No exception, no log line, one candle gone
+        and one hole invented. A guard that only fires when EVERY row is off the grid passes a
+        uniformly shifted test file and waves the real thing through.
+        """
+        s = BarStore(tmp_path)
+        df = self._df(10)
+        idx = df.index.to_numpy().copy()
+        idx[pos] += 1
+        df.index = pd.Index(idx, name="open_time_ms")
+        with pytest.raises(ValueError, match="grid"):
+            s.ingest("BTCUSDT", df)
+        assert s.months("BTCUSDT") == [], (
+            "a frame refused for being off the grid still wrote bars into the store")
+
+    def test_bars_that_arrive_out_of_order_are_STORED_in_time_order(self, tmp_path):
+        """A REST page arrives newest-first and a spreadsheet export is often reversed too.
+
+        Sortedness of the month file is not cosmetic: `iter_months` decides whether a month
+        overlaps the requested range by reading `index[0]` and `index[-1]`, which only mean
+        min and max on a sorted file. Stored in arrival order, a whole month reads as being
+        outside every range — the warmup then replays ZERO bars and the live engine starts with
+        no structure at all, while the store cheerfully reports the month as present.
+        """
+        s = BarStore(tmp_path)
+        df = self._df(100)
+        s.ingest("BTCUSDT", df.iloc[::-1])
+        stored = pd.read_parquet(tmp_path / "BTCUSDT" / "2025-01.parquet")
+        assert stored.index.is_monotonic_increasing, (
+            "the month file was written in arrival order; its index is not sorted")
+        lo, hi = JAN_2025, JAN_2025 + 9 * TF_1M.ms
+        assert [k for k, _ in s.iter_months("BTCUSDT", lo, hi)] == ["2025-01"], (
+            "iter_months skipped a month it holds, because the stored index is unsorted")
+
 
 @pytest.mark.net
 def test_real_data_on_both_sides_of_the_format_change():
@@ -219,7 +279,6 @@ def test_real_data_on_both_sides_of_the_format_change():
             df = parse_klines_zip(raw, TF_1M, "BTCUSDT", Market.SPOT, month)
             assert len(df) == n
             assert 2024 <= pd.Timestamp(int(df.index[0]), unit="ms").year <= 2025
-
 
 class TestTheContentIsActuallyThere:
     """Regression for a bug that walked straight past five tests.
@@ -253,6 +312,35 @@ class TestTheContentIsActuallyThere:
         for c in ("open", "high", "low", "close", "volume", "quote_volume", "trades"):
             assert df[c].sum() > 0, f"column {c} sums to zero: probably NaN or empty"
 
+    def test_a_duplicate_inside_one_frame_resolves_the_same_way_the_parser_resolves_it(
+            self, tmp_path):
+        """Two write paths answer the same question — which row wins when a minute arrives twice —
+        and only one of them was pinned.
+
+        `parse_klines_zip` keeps the FIRST row and has a test saying so. `ingest` keeps the first
+        too, and nothing said so, which means the two could silently drift apart. That matters
+        because they see the same minute: the archive publishes a month, the REST backfill re-reads
+        its tail, and a minute present in both arrives once through each path. If the paths
+        disagree about which copy wins, the price of that minute depends on which path happened
+        to run — and the anti-join against what is already stored makes that choice permanent,
+        because the loser is never revisited.
+
+        Whichever rule is chosen is defensible; the two being written down in one place and tested
+        in the other is not.
+        """
+        i = pd.Index([JAN_2025, JAN_2025, JAN_2025 + TF_1M.ms], name="open_time_ms")
+        df = pd.DataFrame({"open": 1.0, "high": 2.0, "low": 0.5,
+                           "close": [1.0, 2.0, 3.0], "volume": 10.0}, index=i)
+        s = BarStore(tmp_path)
+        r = s.ingest("BTCUSDT", df)
+
+        assert r.written == 2, f"the duplicated minute was stored twice: {r.written} rows written"
+        stored = s.read("BTCUSDT", JAN_2025, JAN_2025 + TF_1M.ms)
+        assert stored["close"].iloc[0] == 1.0, (
+            f"the store kept close={stored['close'].iloc[0]} for a minute that arrived as 1.0 then "
+            "2.0, while `parse_klines_zip` keeps the first. The two write paths disagree about "
+            "the price of the same minute, and the anti-join makes the winner permanent")
+
 
 class TestShiftedGrid:
     """2017-12-04 06:00 → 2017-12-18 10:00: Binance's grid was shifted by 20.799 s. That is
@@ -275,6 +363,47 @@ class TestShiftedGrid:
         rows = [f"{base + i*60000 + 45000},1,1,1,1,1,{base+(i+1)*60000},1,1,1,1,0" for i in range(5)]
         with pytest.raises(ValueError, match="botched conversion"):
             parse_klines_zip(_zip(("\n".join(rows) + "\n").encode()), TF_1M, "BTCUSDT")
+
+    @pytest.mark.parametrize("offset", [TF_1M.ms // 2 - 1, TF_1M.ms // 2])
+    def test_half_a_timeframe_is_the_exact_line_between_shifted_and_botched(self, offset):
+        """Where the guard sits decides whether a file is repaired or refused, and the two
+        outcomes are opposites: below the line the bars are real and get realigned, on or above it
+        they are a unit-conversion artefact and must never be ingested.
+
+        Tested at the boundary itself, because that is the only place the two can be told apart.
+        A guard written one millisecond loose accepts an exactly-half-a-minute shift — the shape a
+        half-applied µs/ms conversion actually produces — and silently rewrites every timestamp in
+        the month instead of stopping the hydration.
+        """
+        base = JAN_2025
+        rows = [_row(base + offset), _row(base + 60_000 + offset)]
+        if offset >= TF_1M.ms // 2:
+            with pytest.raises(ValueError, match="botched conversion"):
+                parse_klines_zip(_zip_rows(rows), TF_1M, "BTCUSDT")
+            return
+        df = parse_klines_zip(_zip_rows(rows), TF_1M, "BTCUSDT")
+        assert df.attrs["max_offset_ms"] == offset, (
+            f"a {offset} ms shift is under half a minute and must be realigned and recorded, "
+            f"attrs say {df.attrs.get('max_offset_ms')}")
+        assert (df.index.to_numpy() % TF_1M.ms == 0).all(), "some bars are still off the grid"
+
+    def test_a_shifted_bar_belongs_to_the_minute_that_CONTAINS_it(self):
+        """Realignment may only move a timestamp BACKWARDS, onto the minute already in progress.
+
+        Landing on the grid is not enough: rounding a 06:00:20.799 bar up to 06:01 is just as
+        aligned and files a whole fortnight of real trades one bar into the future. Every ATR
+        window, every resample and every pivot index in that stretch is then off by one, forever,
+        with no error and no attr to give it away — the audit record would say `realigned: 20401`
+        either way.
+        """
+        base = JAN_2025
+        originals = [base + 20_799, base + 60_000 + 20_799, base + 120_000 + 20_799]
+        df = parse_klines_zip(_zip_rows([_row(t) for t in originals]), TF_1M, "BTCUSDT")
+        stored = [int(t) for t in df.index]
+        assert stored == [t - (t % TF_1M.ms) for t in originals], (
+            f"bars were not filed under the minute containing them: {stored} from {originals}")
+        assert all(s <= o for s, o in zip(stored, originals, strict=True)), (
+            f"realignment moved a bar FORWARD in time: {stored} from {originals}")
 
     def test_the_guard_is_driven_by_the_WORST_offset_not_a_typical_one(self):
         """A real file is not uniformly shifted: most rows sit on the grid and a few do not.
@@ -537,6 +666,43 @@ class TestWritesAreAtomic:
                      if not p.name.endswith(".parquet")]
         assert not leftovers, f"temp files survived a successful ingest: {leftovers}"
 
+    def test_two_processes_never_share_a_temp_file(self, tmp_path, monkeypatch):
+        """The rename is only atomic if the thing being renamed belongs to one writer.
+
+        Two processes over the same data directory — a second server started by hand beside the
+        one already running is all it takes — that write into the SAME temp name interleave their
+        bytes and then rename the mixture into place: half of one month and half of another,
+        landing as a file that looks valid. Observed, not theoretical. Cleanup on failure is
+        already covered; what is not is that the name distinguishes the writers at all.
+        """
+        seen: list[str] = []
+        real = pd.DataFrame.to_parquet
+
+        def spy(self, target, *a, **kw):
+            seen.append(Path(target).name)
+            return real(self, target, *a, **kw)
+
+        monkeypatch.setattr(pd.DataFrame, "to_parquet", spy)
+        for fake_pid, start in ((4242, JAN_2025), (9797, JAN_2025 + 10 * TF_1M.ms)):
+            monkeypatch.setattr(os, "getpid", lambda pid=fake_pid: pid)
+            BarStore(tmp_path).ingest("BTCUSDT", self._df(10, start))
+
+        assert len(seen) == 2, f"expected one write per ingest, got {seen}"
+        # Inequality alone is NOT the property. A per-process counter, a random suffix seeded at
+        # import, a monotonic serial — all of them make these two names differ inside one process
+        # and collide across two, which is the only case that matters. I verified it: replacing
+        # the PID with a module-level counter leaves the whole suite green, and two servers over
+        # the same directory then pick the same temp name on their first write apiece. So the
+        # assertion has to be that the name is a function of the PID that was patched.
+        assert seen[0] != seen[1], (
+            f"two processes wrote the same month through the same temp file ({seen[0]}): "
+            "whichever renames last publishes a mixture of both")
+        for pid, name in zip((4242, 9797), seen, strict=True):
+            assert str(pid) in name, (
+                f"process {pid} wrote to {name!r}, which does not carry its pid. Whatever "
+                "distinguishes these two names is something both processes would agree on if "
+                "they started separately, so the collision this test is named for is still open")
+
 
 class TestIterMonthsStaysInsideTheRange:
     """`iter_months` feeds the server's warmup, and the pivot detector is PATH DEPENDENT."""
@@ -580,3 +746,542 @@ class TestIterMonthsStaysInsideTheRange:
         assert int(df.index[0]) == lo and int(df.index[-1]) == hi, (
             f"bars outside [{lo}, {hi}] leaked through: "
             f"{int(df.index[0])}..{int(df.index[-1])}")
+
+    FEB_2025 = 1738368000000  # 2025-02-01T00:00:00Z in ms
+
+    def test_a_month_overlapping_only_ONE_end_of_the_range_is_trimmed_too(self, tmp_path):
+        """The production call is `iter_months(symbol, 0, until_ms)`: every month after the first
+        overlaps the range on one side only.
+
+        A trim that needs BOTH ends to stick out therefore never fires on the case the server
+        actually makes, and the month holding `until_ms` is yielded whole. The warmup then replays
+        weeks of bars that had not happened yet at `until_ms` and rebuilds the pivot state — which
+        is path dependent — out of the future. Nothing raises; the chart renders structure that
+        never existed, which is the exact look-ahead the engine is built to prevent.
+        """
+        s = BarStore(tmp_path)
+        s.ingest("BTCUSDT", self._df(3 * 44_640))
+
+        end = self.FEB_2025 + 10 * TF_1M.ms       # range starts before every month, ends mid-Feb
+        seen = list(s.iter_months("BTCUSDT", 0, end))
+        for key, df in seen:
+            assert int(df.index[-1]) <= end, (
+                f"{key} yielded bars past until_ms: {int(df.index[-1])} > {end}")
+        assert sum(len(d) for _, d in seen) == 44_640 + 11, (
+            "the warmup was fed a different number of bars than the range contains")
+
+        start = self.FEB_2025 + 10 * TF_1M.ms     # the mirror: range starts mid-Feb, never ends
+        mirror = list(s.iter_months("BTCUSDT", start))
+        # A generator that silently yields nothing satisfies the loop below without executing it
+        # once, so the count comes first: two months and change, minus the ten trimmed minutes.
+        assert sum(len(d) for _, d in mirror) == 2 * 44_640 - 10, (
+            f"the mirror range yielded {sum(len(d) for _, d in mirror)} bars across "
+            f"{len(mirror)} months; an empty or short generator would satisfy the loop below "
+            "without ever running it")
+        for key, df in mirror:
+            assert int(df.index[0]) >= start, (
+                f"{key} yielded bars from before the requested start: "
+                f"{int(df.index[0])} < {start}")
+
+    def test_the_month_that_begins_exactly_at_the_range_END_is_not_dropped(self, tmp_path):
+        """`until_ms` is inclusive everywhere else in the store, and it has to be here too.
+
+        A cutoff landing exactly on midnight of the 1st is not an edge case a caller avoids: the
+        chart and the warmup both ask for whole periods. Treating that month as "past the range"
+        drops its first bar — and one missing 1m bar at a month boundary is a hole the resampler
+        turns into a short hour, silently.
+        """
+        s = BarStore(tmp_path)
+        s.ingest("BTCUSDT", self._df(3 * 44_640))
+        out = dict(s.iter_months("BTCUSDT", 0, self.FEB_2025))
+        assert "2025-02" in out, (
+            "the month starting exactly at end_ms was skipped whole; its first bar is inside "
+            "an inclusive range")
+        assert [int(t) for t in out["2025-02"].index] == [self.FEB_2025], (
+            f"expected exactly the boundary bar from 2025-02, got {len(out['2025-02'])} bars")
+
+
+# ----------------------------------------------------------------------------------------
+# Hydration. The project's one irreversible action, against an archive that could be
+# geo-blocked any morning — and until now not reachable from a single test.
+# ----------------------------------------------------------------------------------------
+
+def _month_zip(month: date, n: int = 3, *, content_month: date | None = None) -> bytes:
+    """A well-formed monthly ZIP. `content_month` lets the bytes disagree with the URL."""
+    src = content_month or month
+    start = int(pd.Timestamp(src, tz="UTC").value // 1_000_000)
+    return _zip(_csv(start, n, TF_1M.ms, micros=False, header=False))
+
+
+def _archive_transport(files: dict[str, bytes], *, checksums: dict[str, str] | None = None):
+    """Serves the manufactured archive: the ZIP, its .CHECKSUM, and 404 for everything else."""
+    checksums = checksums or {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url.endswith(".CHECKSUM"):
+            raw = files.get(url.removesuffix(".CHECKSUM"))
+            if raw is None:
+                return httpx.Response(404)
+            digest = checksums.get(url.removesuffix(".CHECKSUM"), hashlib.sha256(raw).hexdigest())
+            return httpx.Response(200, text=f"{digest}  x.zip")
+        raw = files.get(url)
+        return httpx.Response(200, content=raw) if raw is not None else httpx.Response(404)
+
+    return httpx.MockTransport(handler)
+
+
+class TestTheDownloadIsVerifiedBeforeItIsBelieved:
+    """`_fetch` is the only thing standing between a truncated download and nine years of history."""
+
+    @pytest.mark.parametrize("kind", ["all_zeros", "last_character", "first_character"])
+    async def test_a_body_that_does_not_match_its_published_checksum_never_reaches_the_caller(
+            self, kind):
+        """A truncated ZIP frequently decompresses "fine" and yields a month with half its bars.
+
+        Nothing downstream can tell that month from a real one — the parser sees valid rows, the
+        store ingests them, and `coverage` reports the missing minutes as an ordinary Binance
+        outage. Skipping the verification is therefore not a smaller safety margin, it is the
+        difference between a loud failure now and a permanently short history nobody re-derives.
+
+        The near-misses are the point of the parametrisation. Every other checksum case in this
+        file serves a digest that matches exactly, and this one used to serve `"0" * 64` — maximally
+        wrong, so the suite pinned that A comparison happens and not that the WHOLE digest is
+        compared. I verified a prefix-only comparison (`got[:16] != expected[:16]`) survives the
+        all-zeros case; a digest differing in its last character alone does not let it.
+        """
+        url = monthly_url("BTCUSDT", TF_1M, date(2025, 1, 1))
+        raw = _month_zip(date(2025, 1, 1))
+        good = hashlib.sha256(raw).hexdigest()
+        bad = {
+            "all_zeros": "0" * 64,
+            "last_character": good[:-1] + ("f" if good[-1] != "f" else "0"),
+            "first_character": ("f" if good[0] != "f" else "0") + good[1:],
+        }[kind]
+        assert bad != good and len(bad) == len(good), "the fixture must be a well-formed near-miss"
+
+        transport = _archive_transport({url: raw}, checksums={url: bad})
+        async with httpx.AsyncClient(transport=transport) as client:
+            with pytest.raises(ValueError, match="checksum"):
+                await hydrate_mod._fetch(client, url)
+
+    async def test_a_body_that_matches_is_returned_untouched(self):
+        """The other half: a verifier that rejects everything is as broken as one that accepts
+        everything, and only the rejecting half would be caught by a hydration that ingests
+        nothing."""
+        url = monthly_url("BTCUSDT", TF_1M, date(2025, 1, 1))
+        raw = _month_zip(date(2025, 1, 1))
+        async with httpx.AsyncClient(transport=_archive_transport({url: raw})) as client:
+            assert await hydrate_mod._fetch(client, url) == raw
+
+    async def test_a_month_the_archive_never_published_is_not_an_error(self):
+        """A symbol listed mid-month leaves legitimate 404s in the range; a hydration that treats
+        them as failures stops on the first one and never reaches the months that do exist."""
+        url = monthly_url("BTCUSDT", TF_1M, date(2017, 1, 1))
+        async with httpx.AsyncClient(transport=_archive_transport({})) as client:
+            assert await hydrate_mod._fetch(client, url) is None
+
+
+class TestHydrationWritesWhatTheURLPromised:
+    """End-to-end over a stub transport: no network, real parse, real store."""
+
+    def _run(self, tmp_path, monkeypatch, months: list[date], files: dict[str, bytes],
+             *, concurrency: int = 6):
+        monkeypatch.setattr(hydrate_mod, "list_available_months", lambda *a, **kw: list(months))
+        transport = _archive_transport(files)
+        real_client = httpx.AsyncClient
+
+        def fake_client(*a, **kw):
+            return real_client(transport=transport, follow_redirects=True)
+
+        monkeypatch.setattr(hydrate_mod.httpx, "AsyncClient", fake_client)
+        return hydrate_mod.hydrate("BTCUSDT", tmp_path, concurrency=concurrency)
+
+    async def test_a_month_whose_contents_disagree_with_its_name_stops_the_hydration(
+            self, tmp_path, monkeypatch):
+        """The archive's naming convention is checked at the download that relies on it.
+
+        `parse_klines_zip` can only enforce the advertised month if hydration tells it which month
+        it asked for. Left out, a file republished under the wrong name — or an off-by-one in a
+        URL builder — writes January bars into whatever partition their timestamps fall in, and
+        the month files stop meaning what their names say. `iter_months` and `coverage` both read
+        those names, and the mistake is found nine years of history later.
+        """
+        feb = date(2025, 2, 1)
+        url = monthly_url("BTCUSDT", TF_1M, feb)
+        files = {url: _month_zip(feb, content_month=date(2025, 1, 1))}
+        with pytest.raises(ValueError, match="outside the advertised month"):
+            await self._run(tmp_path, monkeypatch, [feb], files)
+        assert BarStore(tmp_path / "bars").months("BTCUSDT") == [], (
+            "a file whose contents disagree with its name was ingested anyway")
+
+    async def test_every_published_month_is_downloaded_and_ingested(self, tmp_path, monkeypatch):
+        """Hydration downloads in batches, and a batch is the one place a slice can quietly lose
+        an element: no error, no retry, just months absent from the store. The hole then sits in
+        the middle of the history, where `read` reports it as a gap indistinguishable from a real
+        Binance outage — and hydration is not re-run, because it said it succeeded.
+        """
+        months = [date(2025, m, 1) for m in range(1, 6)]
+        files = {monthly_url("BTCUSDT", TF_1M, m): _month_zip(m) for m in months}
+        assert await self._run(tmp_path, monkeypatch, months, files, concurrency=2) == 0
+        store = BarStore(tmp_path / "bars")
+        assert store.months("BTCUSDT") == [f"{m:%Y-%m}" for m in months], (
+            "months published by the archive are missing from the store after a clean hydration")
+
+    async def test_the_newest_stored_month_is_downloaded_again(self, tmp_path, monkeypatch):
+        """The most recent stored month was ingested mid-month, so it is INCOMPLETE by
+        construction.
+
+        Skipping it because its file exists leaves a permanent hole at the join between the
+        archive and the live feed — the newest end of the history, which is the part every chart
+        and every warmup reads. Ingest is idempotent, so re-downloading it costs one file.
+        """
+        jan = date(2025, 1, 1)
+        store = BarStore(tmp_path / "bars")
+        partial = pd.DataFrame(
+            {"open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 10.0},
+            index=pd.Index([JAN_2025], name="open_time_ms"))
+        store.ingest("BTCUSDT", partial)
+
+        files = {monthly_url("BTCUSDT", TF_1M, jan): _month_zip(jan, n=3)}
+        await self._run(tmp_path, monkeypatch, [jan], files)
+        out = store.read("BTCUSDT", JAN_2025, JAN_2025 + 2 * TF_1M.ms)
+        assert len(out) == 3 and not out["is_gap"].any(), (
+            f"the incomplete newest month was not refreshed: {len(out)} bars, "
+            f"{int(out['is_gap'].sum())} still missing")
+
+
+class TestTheWeightGovernor:
+    """6000 weight per minute per IP. Going over gives a 429 and then a 418 — an IP ban lasting
+    from two minutes to three days, which for an application living off a public feed is total
+    downtime. The brake is the single number this class exists to enforce, and it had no test."""
+
+    @pytest.fixture
+    def slept(self, monkeypatch):
+        calls: list[float] = []
+
+        async def fake_sleep(s):
+            calls.append(s)
+
+        monkeypatch.setattr("wavelab.feeds.binance_rest.asyncio.sleep", fake_sleep)
+        return calls
+
+    @pytest.mark.parametrize("ratio", [0.5, 0.7])
+    async def test_it_brakes_at_the_configured_ratio_and_not_at_the_edge(self, slept, ratio):
+        """Braking at the budget instead of before it is not a smaller margin: the used-weight
+        header arrives with the response, so by the time the counter reads 6000 the request that
+        took it there is already gone. The whole point of the ratio is to stop while the answer
+        can still change the outcome."""
+        brake = int(WEIGHT_BUDGET * ratio)
+        g = WeightGovernor(WEIGHT_BUDGET, ratio)
+        g.used = brake - 1
+        await g.wait_if_needed()
+        assert not slept, f"the governor waited at {g.used} of {WEIGHT_BUDGET}, below its brake"
+
+        g.used = brake
+        await g.wait_if_needed()
+        assert slept, (
+            f"the governor did not brake at {brake} of {WEIGHT_BUDGET} ({ratio:.0%}); it is "
+            "running to the edge of the budget, where the next request earns a 418")
+        assert g.used == 0, "the used-weight counter was not reset after waiting out the minute"
+
+    async def test_a_ban_is_raised_and_never_slept_off(self, slept):
+        """A 418 is a switch to the fallback feed, not a retry. Sleeping and trying again extends
+        the ban, which is how two minutes becomes three days."""
+        g = WeightGovernor()
+        g.banned_until = time.monotonic() + 60
+        with pytest.raises(RateLimitCircuitOpen, match="banned"):
+            await g.wait_if_needed()
+        assert not slept, "the client waited out an IP ban instead of failing over"
+
+
+class TestTheRestKlineMapping:
+    """`fetch_klines` and `heal_gap` are how every bar missed during an outage gets back in."""
+
+    def _kline(self, open_ms: int) -> list:
+        # Binance's array, in order. Every field a different number, so an index slip shows up.
+        return [open_ms, "100.0", "102.0", "98.0", "101.0", "5.0",
+                open_ms + 59_999, "7.0", 8, "9.0", "10.0", "0"]
+
+    def _rest(self, handler) -> BinanceREST:
+        c = BinanceREST()
+        c._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        return c
+
+    async def test_every_field_of_the_kline_array_lands_in_its_own_column(self):
+        """The REST array is twelve positional fields with no names on them, and the two that are
+        easiest to confuse — `close_time` at 6 and `quote_volume` at 7 — sit next to each other.
+
+        Reading 6 as the quote volume writes a 13-digit timestamp into a price-times-size field on
+        every bar the backfill produces. It is not a crash: the bars merge into the store beside
+        archive bars that carry a real number, and any volume statistic computed across the join
+        is nonsense from then on.
+        """
+        def handler(request):
+            return httpx.Response(200, json=[self._kline(JAN_2025)])
+
+        rest = self._rest(handler)
+        bars = await rest.fetch_klines("btcusdt", TF_1M, JAN_2025, JAN_2025 + TF_1M.ms)
+        assert len(bars) == 1
+        b = bars[0]
+        got = (b.open_time_ms, b.open, b.high, b.low, b.close, b.volume,
+               b.quote_volume, b.trades, b.taker_buy_base, b.taker_buy_quote)
+        assert got == (JAN_2025, 100.0, 102.0, 98.0, 101.0, 5.0, 7.0, 8, 9.0, 10.0), (
+            f"a kline field was read from the wrong position in the array: {got}")
+        assert b.is_closed and b.n_source_bars == TF_1M.expected_source_bars
+
+    async def test_paging_a_gap_resumes_AFTER_the_last_bar_it_received(self):
+        """Healing an outage is a paginated loop, and where the next page starts is the whole of
+        it: resume from the first bar of the page just read and the loop asks for the same window
+        again, one minute further on each time. A day-long gap becomes ~1,400 identical REST calls
+        instead of two — 2 weight each, against a 6,000/min budget — which is the request storm
+        that earns the 418 the governor exists to avoid, while the gap itself never closes.
+        """
+        starts: list[int] = []
+        page1 = [self._kline(JAN_2025 + i * TF_1M.ms) for i in range(1000)]
+        page2 = [self._kline(JAN_2025 + i * TF_1M.ms) for i in range(1000, 1500)]
+
+        def handler(request):
+            st = int(request.url.params["startTime"])
+            starts.append(st)
+            if st == JAN_2025:
+                return httpx.Response(200, json=page1)
+            if st == JAN_2025 + 1000 * TF_1M.ms:
+                return httpx.Response(200, json=page2)
+            return httpx.Response(200, json=[])
+
+        rest = self._rest(handler)
+        end = JAN_2025 + 1499 * TF_1M.ms
+        bars = await rest.heal_gap("BTCUSDT", TF_1M, JAN_2025, end)
+        ts = [b.open_time_ms for b in bars]
+        assert starts == [JAN_2025, JAN_2025 + 1000 * TF_1M.ms], (
+            f"the second page did not resume after the first one's last bar: {starts}")
+        assert ts == list(range(JAN_2025, end + TF_1M.ms, TF_1M.ms)), (
+            f"the healed gap is not the contiguous range asked for: {len(ts)} bars, "
+            f"{ts[:1]}..{ts[-1:]}")
+
+
+class TestTheGapHealSeam:
+    """Binance cuts the WebSocket every 24 h BY DESIGN, so this seam is crossed daily. A hole
+    there raises nothing at all: it just makes a window of N bars span more time than it claims."""
+
+    def _msg(self, open_ms: int, *, closed: bool = True) -> dict:
+        return {
+            "_ts_ingest_ms": open_ms + TF_1M.ms,
+            "k": {"t": open_ms, "o": "100.0", "h": "102.0", "l": "98.0", "c": "101.0",
+                  "v": "5.0", "q": "7.0", "n": 8, "V": "9.0", "Q": "10.0", "x": closed},
+        }
+
+    async def test_the_seam_repeats_no_bar_and_loses_none(self, monkeypatch):
+        """Both directions are silent and both are damaging. A minute lost at the seam is a hole
+        the resampler turns into a short hour; a minute delivered twice doubles that minute's
+        volume, distorts the ATR and manufactures a pivot — and the engine consumes the bar before
+        the store ever gets the chance to deduplicate it.
+        """
+        t0 = JAN_2025
+        feed = KlineFeed("BTCUSDT")
+        asked: list[tuple[int, int]] = []
+
+        async def fake_heal(start_ms: int, end_ms: int):
+            asked.append((start_ms, end_ms))
+            # What REST returns: every bar from start_ms onwards, including ones we already have.
+            return [binance_klines._to_bar(self._msg(t)["k"], "BTCUSDT", TF_1M)
+                    for t in range(t0 - TF_1M.ms, t0 + 3 * TF_1M.ms, TF_1M.ms)
+                    if t >= start_ms]
+
+        async def fake_stream_json(base, streams, **kw):
+            if kw.get("on_connect"):
+                kw["on_connect"]()
+            for t in (t0 + 2 * TF_1M.ms, t0 + 3 * TF_1M.ms):
+                yield self._msg(t)
+
+        feed.heal = fake_heal
+        monkeypatch.setattr(binance_klines, "stream_json", fake_stream_json)
+
+        out = [b.open_time_ms async for b in feed.stream(start_ms=t0)]
+
+        assert asked, "no heal was requested at all across the seam"
+        assert asked[0][0] == t0 - TF_1M.ms, (
+            f"the heal window starts at {asked[0][0]}, not one bar back at {t0 - TF_1M.ms}. "
+            "The overlap is exactly one minute and it is written down in a source comment and "
+            "nowhere else: start later and the boundary bar falls between the two feeds and is "
+            "lost on every reconnect; start earlier and every reconnect re-fetches history for "
+            "nothing, spending REST weight on the one code path that runs when the feed is "
+            "already in trouble")
+        assert out == sorted(set(out)), f"the seam delivered a bar twice or out of order: {out}"
+        assert all(t > t0 for t in out), (
+            f"a bar the caller already had was delivered again across the seam: {out}")
+        assert out == list(range(t0 + TF_1M.ms, out[-1] + TF_1M.ms, TF_1M.ms)), (
+            f"a minute is missing between the healed bars and the live ones: {out}")
+
+    def test_a_bar_that_is_still_forming_does_not_claim_a_full_period(self):
+        """The in-flight bar is emitted between closes so the chart can move, and it is the one
+        bar whose coverage is a lie waiting to be believed: stamped with a full period's source
+        count it is indistinguishable from a closed bar, and a partial minute's high and low then
+        get treated as a settled extreme by the pivot detector."""
+        forming = binance_klines._to_bar(self._msg(JAN_2025, closed=False)["k"], "BTCUSDT", TF_1M)
+        assert not forming.is_closed
+        assert forming.n_source_bars == 0, (
+            f"a forming bar claims {forming.n_source_bars} source bars, so it reads as complete")
+        closed = binance_klines._to_bar(self._msg(JAN_2025)["k"], "BTCUSDT", TF_1M)
+        assert closed.n_source_bars == TF_1M.expected_source_bars
+
+
+class TestTheSocketStampsAndAddressesItsOwnMessages:
+    """`stream_json` itself, which no test reached: every WebSocket test in this file scripts
+    messages straight past it, so its three lines of real logic ran nowhere.
+
+    Nothing here opens a socket. `websockets.connect` is replaced with a fake that records the URL
+    it was handed and yields one scripted frame, which is enough to exercise the guard, the path
+    builder and the stamping.
+    """
+
+    @staticmethod
+    def _fake_connect(seen: list[str], frames: list[str]):
+        class _WS:
+            async def recv(self):
+                if not frames:
+                    raise asyncio.CancelledError
+                return frames.pop(0)
+
+        class _Conn:
+            def __init__(self, url, **kw):
+                seen.append(url)
+
+            async def __aenter__(self):
+                return _WS()
+
+            async def __aexit__(self, *a):
+                return False
+
+        return _Conn
+
+    async def _first(self, monkeypatch, streams, frames):
+        seen: list[str] = []
+        monkeypatch.setattr(binance_ws.websockets, "connect",
+                            self._fake_connect(seen, list(frames)))
+        out = []
+        try:
+            async for msg in binance_ws.stream_json(binance_ws.SPOT_WS, streams):
+                out.append(msg)
+        except asyncio.CancelledError:
+            pass
+        return seen, out
+
+    @pytest.mark.parametrize("streams", [
+        ["BTCUSDT@kline_1m"],                          # the whole name shouted
+        ["btcusdt@kline_1m", "ETHUSDT@kline_1m"],      # one of several, which is the likelier slip
+    ])
+    async def test_an_uppercase_stream_name_is_refused_before_anything_is_opened(
+            self, monkeypatch, streams):
+        """The module's own docstring calls this «a perfect silent failure»: in uppercase the
+        connection opens, Binance accepts it, and not one message ever arrives. There is no error
+        and no disconnect to notice — the feed simply goes quiet forever, which is the single
+        hardest failure in the system to attribute, because every other symptom points at the
+        market being closed or the machine being asleep. And `stream_json` reconnects INDEFINITELY,
+        so nothing ever gives up and reports.
+
+        The transport is stubbed even though the guard is supposed to raise before reaching it.
+        That is deliberate and it is not belt-and-braces: without the stub, a regression that
+        removed the guard would send this test to the real Binance endpoint and then loop on the
+        backoff forever, so the suite would hang rather than fail. A test whose failure mode is a
+        hung deploy gate is worse than the bug it was meant to catch.
+        """
+        seen: list[str] = []
+        monkeypatch.setattr(binance_ws.websockets, "connect", self._fake_connect(seen, []))
+        with pytest.raises(ValueError, match="LOWERCASE"):
+            async for _ in binance_ws.stream_json(binance_ws.SPOT_WS, streams):
+                pass
+        assert not seen, (
+            f"the guard let an uppercase name through and a connection to {seen} was attempted: "
+            "that socket opens, stays open, and delivers nothing for the life of the process")
+
+    async def test_the_ingest_stamp_is_in_MILLISECONDS_like_everything_else(self, monkeypatch):
+        """★ `_ts_ingest_ms` is not a diagnostic. `KlineFeed.stream` passes it straight through as
+        the END of the gap-heal window, and `heal` opens with `if end_ms <= start_ms: return []`.
+
+        Stamped in seconds it is ~1.7e9 against a `last_closed_ms` of ~1.7e12, so the end is
+        always before the start and gap healing is silently and permanently DISABLED on every
+        reconnect — not mis-stamped, disabled — while the seam it exists to close is crossed daily
+        by design. The same value drives `silent_seconds`, so the watchdog would also read about
+        1.7 million seconds of silence, forever.
+
+        The seam test above cannot see this: it scripts `_ts_ingest_ms` itself, so the line that
+        actually stamps it never runs there.
+        """
+        frame = json.dumps({"e": "kline", "k": {"t": JAN_2025, "x": True}})
+        before = int(time.time() * 1000)
+        _, out = await self._first(monkeypatch, ["btcusdt@kline_1m"], [frame])
+        after = int(time.time() * 1000)
+
+        assert len(out) == 1, "the fake transport should have delivered exactly one message"
+        stamp = out[0]["_ts_ingest_ms"]
+        assert isinstance(stamp, int) and before <= stamp <= after, (
+            f"_ts_ingest_ms came back {stamp}, outside the [{before}, {after}] window this call "
+            "ran in. Everything in the system compares against integer milliseconds; in seconds "
+            "the heal window's end lands three orders of magnitude before its start and the gap "
+            "heal is dead on every reconnect, with nothing raising"
+        )
+        assert 1_600_000_000_000 < stamp < 4_000_000_000_000, (
+            f"{stamp} is not a plausible epoch in MILLISECONDS")
+
+    @pytest.mark.parametrize("streams,expect", [
+        (["btcusdt@kline_1m"], "/ws/btcusdt@kline_1m"),
+        (["btcusdt@kline_1m", "ethusdt@kline_1m"],
+         "/stream?streams=btcusdt@kline_1m/ethusdt@kline_1m"),
+    ])
+    async def test_one_stream_and_several_use_the_addresses_binance_defines(
+            self, monkeypatch, streams, expect):
+        """Binance has two endpoints and they are not interchangeable. `/ws/<name>` delivers bare
+        payloads; `/stream?streams=` wraps every message in `{"stream":…, "data":…}`, which the
+        unwrapping branch below depends on. Address a single stream through the combined endpoint
+        and the payload arrives wrapped while the caller reads it bare — every field comes back
+        missing, on a connection that is up and delivering.
+        """
+        seen, _ = await self._first(monkeypatch, streams, [])
+        assert seen and seen[0] == binance_ws.SPOT_WS + expect, (
+            f"{len(streams)} stream(s) were addressed to {seen[0] if seen else None!r}, not "
+            f"{binance_ws.SPOT_WS + expect!r}")
+
+    async def test_a_combined_frame_is_unwrapped_and_labelled_with_its_stream(self, monkeypatch):
+        """The other half of the same contract: a wrapped frame has to be flattened, and the
+        stream it came from kept, or a multi-symbol feed cannot tell whose bar it is holding."""
+        frame = json.dumps({"stream": "ethusdt@kline_1m", "data": {"e": "kline", "k": {"t": 1}}})
+        _, out = await self._first(
+            monkeypatch, ["btcusdt@kline_1m", "ethusdt@kline_1m"], [frame])
+        assert out and out[0]["e"] == "kline" and out[0]["k"] == {"t": 1}, (
+            f"the combined frame was not unwrapped: {out}")
+        assert out[0]["_stream"] == "ethusdt@kline_1m", (
+            "the stream name is the only thing saying which symbol this bar belongs to")
+
+
+class TestTheLiquidationLogIsAppendOnly:
+    """Every hour not recorded is lost forever: there is no archive to backfill liquidations from."""
+
+    def test_reopening_a_day_appends_to_it_instead_of_truncating_it(self, tmp_path):
+        """The recorder reconnects on any exception, and a day's file is reopened whenever the
+        day key changes — including back to a day already written, which a clock skew, a late
+        message or a restart all produce.
+
+        Opened for writing rather than appending, that reopen empties the file: hours of recorded
+        cascades disappear at the moment of the reconnect, and the recorder carries on happily
+        counting messages. Nothing reads the file until much later, when the gap is unexplainable.
+        """
+        rec = LiquidationRecorder(tmp_path, "okx")
+        d1 = int(datetime(2026, 9, 9, 12, 0, tzinfo=UTC).timestamp() * 1000)
+        d2 = d1 + int(timedelta(days=1).total_seconds() * 1000)
+
+        for ts, line in ((d1, "first"), (d2, "next day"), (d1, "back again")):
+            fh = rec._file(ts)
+            fh.write(line + "\n")
+            fh.flush()
+
+        day1 = tmp_path / "okx-2026-09-09.jsonl"
+        assert day1.exists(), (
+            f"the day's file is not named after the day: {sorted(p.name for p in tmp_path.iterdir())}")
+        assert day1.read_text().splitlines() == ["first", "back again"], (
+            "reopening the day truncated it: the liquidations recorded before the reconnect "
+            f"are gone ({day1.read_text()!r})")
+        assert (tmp_path / "okx-2026-09-10.jsonl").read_text().splitlines() == ["next day"], (
+            "two different days were written into one file, so the daily rollover is not a "
+            "rollover at all")

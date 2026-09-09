@@ -18,8 +18,15 @@ import pandas as pd
 import pytest
 
 from wavelab.backtest.run import BacktestResult, Signal, run_backtest
-from wavelab.core.timeframes import BY_NAME, TF_1H, TF_1M, TF_15M, resample_from_1m
-from wavelab.core.types import Direction, MaturityLevel, Verdict
+from wavelab.core.timeframes import (
+    BY_NAME,
+    MIN_SOURCE_COVERAGE,
+    TF_1H,
+    TF_1M,
+    TF_15M,
+    resample_from_1m,
+)
+from wavelab.core.types import Direction, MaturityLevel, PivotKind, Verdict
 from wavelab.engine import live as live_module
 from wavelab.engine.live import LiveEngine, Mode
 from wavelab.labeling.barriers import Outcome, resolve_triple_barrier
@@ -47,6 +54,27 @@ def bars_20d() -> list:
 def backtest_20d(bars_20d) -> BacktestResult:
     return run_backtest(bars_20d, trigger_tf=TRIGGER_TF, timeframes=TIMEFRAMES,
                         max_bars_hold=MAX_BARS_HOLD, cooldown_bars=COOLDOWN_BARS)
+
+
+@pytest.fixture(scope="module")
+def replay_20d(bars_20d):
+    """The same 20 days again, this time keeping what `decide()` published on every trigger bar.
+
+    The backtest throws the cards away and keeps only the numbers it copied off them, so nothing
+    downstream can tell whether the copy is faithful. Two of the properties below are exactly that
+    question, and they need both halves side by side. One extra pass over the bars costs ~0.09s.
+    """
+    e = LiveEngine(SYMBOL, list(TIMEFRAMES), 8192, TRIGGER_TF)
+    trigger = BY_NAME[TRIGGER_TF]
+    cards: dict[int, dict] = {}
+    closes: dict[int, float] = {}
+    for b in bars_20d:
+        for htf in e.on_bar_1m(b):
+            if htf.tf is not trigger:
+                continue
+            closes[htf.open_time_ms] = htf.close
+            cards[htf.open_time_ms] = e.decide(TRIGGER_TF, htf.close)
+    return e, cards, closes
 
 
 class TestLiveResampling:
@@ -120,6 +148,38 @@ class TestLiveResampling:
         )
         w = e.state.rings["1h"].window(1)
         assert bool(w.is_gap[0]), "the thin hour was stored in the ring without its gap flag"
+
+    @pytest.mark.parametrize(("minutes", "gap"), [(53, True), (54, False), (55, False)])
+    def test_the_coverage_line_is_drawn_where_the_constant_says(self, minutes, gap):
+        """Both neighbouring tests probe 30/60 and 60/60 — nowhere near where the line actually is.
+
+        A real feed does not lose half an hour; it loses three or four minutes, right against the
+        90% line. So the boundary is where every hour a live user ever sees gets classified, and
+        both ways of getting it wrong are silent. Comparing inclusively relabels the last good hour
+        a gap; dropping the constant so any missing minute counts flags virtually every hour on a
+        real feed. Either one poisons `gaps_in_window`, the health badge and every downstream
+        filter that skips gapped bars, and the bars themselves still look perfectly ordinary.
+        """
+        assert int(MIN_SOURCE_COVERAGE * 60) == 54, (
+            f"the 1h coverage floor moved to {int(MIN_SOURCE_COVERAGE * 60)} minutes; the cases "
+            "below were chosen to straddle 54 and no longer straddle anything"
+        )
+        e = _engine()
+        closed: list = []
+        # The 2nd hour loses its minutes from the front; the closing minute always survives.
+        for b in make_bars(120, tf=TF_1M, drop=set(range(60, 120 - minutes))):
+            closed += e.on_bar_1m(b)
+
+        thin = [b for b in closed if b.tf is TF_1H][-1]
+        assert thin.n_source_bars == minutes, (
+            f"the fixture built the 2nd hour from {thin.n_source_bars} minutes instead of "
+            f"{minutes}: this case no longer sits where it was aimed"
+        )
+        assert thin.is_gap is gap, (
+            f"an hour made of {minutes} of its 60 minutes was labelled is_gap={thin.is_gap}; the "
+            f"90% floor is 54 minutes, so it must be {gap}. The gap flag is being decided by a "
+            "different rule from the one the constant declares"
+        )
 
     def test_the_in_flight_bar_closes_nothing(self):
         e = _engine()
@@ -236,6 +296,76 @@ class TestCatchUpMode:
         )
 
 
+    def _live(self, now: dict) -> LiveEngine:
+        """An engine warmed up to `now` and emitting. `_engine` is built under the patched clock,
+        so `check_clock` starts from `now` with no jump behind it."""
+        e = _engine()
+        e.warmup(make_bars(600, tf=TF_1M, start_ms=T0))
+        e.update_health(connected=True, reconnects=0, healed=0, silent_seconds=0.0)
+        assert e.state.health.mode is Mode.LIVE and e.emitting, "precondition: LIVE and emitting"
+        return e
+
+    def test_two_trigger_bars_of_silence_is_not_yet_an_outage(self, monkeypatch):
+        """Where the outage detector fires decides whether the tool is usable at all.
+
+        The round-trip test above jumps eight trigger bars, so it holds for any tolerance from one
+        bar to seven and says nothing about where the line is. Widen the tolerance and the engine
+        keeps emitting through an outage it did not notice — an entry zone at a price that has
+        already gone, which is the failure CATCH_UP exists to prevent. Tighten it and ordinary
+        scheduling jitter reads as an outage and the tool goes mute during normal operation. Both
+        sides of the declared threshold — strictly more than two trigger bars — are pinned here.
+        """
+        now = {"ms": T0 + 600 * TF_1M.ms}
+        monkeypatch.setattr(live_module.time, "time", lambda: now["ms"] / 1000.0)
+        e = self._live(now)
+
+        now["ms"] += 2 * TF_15M.ms
+        assert e.check_clock() is Mode.LIVE, (
+            "a gap of exactly two trigger bars was called an outage: the tolerance is 'more than "
+            "two', and a tighter one makes ordinary scheduling jitter silence the tool"
+        )
+        now["ms"] += 3 * TF_15M.ms
+        assert e.check_clock() is Mode.CATCH_UP, (
+            "three trigger bars of wall clock went by with no data and the engine still calls "
+            "itself LIVE: it will publish an entry zone at a price that is 45 minutes stale"
+        )
+        assert not e.emitting
+
+    def test_catching_up_ends_exactly_when_the_lag_is_back_inside_one_trigger_bar(
+        self, monkeypatch
+    ):
+        """CATCH_UP is left on a lag threshold, and both mistakes are silent and opposite.
+
+        Leave it too early and the engine emits while still behind the market — the thing the mode
+        exists to stop. Leave it too late (or never) and the tool stays mute after the hole is
+        filled, which the user reads as broken. The round-trip test only ever measures a lag of
+        essentially zero against a lag of eight bars, so anything between one and eight bars passes
+        it. Here the boundary itself is exercised: at exactly one trigger bar behind, the engine is
+        caught up; at two, it is not.
+        """
+        now = {"ms": T0 + 600 * TF_1M.ms}
+        monkeypatch.setattr(live_module.time, "time", lambda: now["ms"] / 1000.0)
+        e = self._live(now)
+        last = e.state.health.last_closed_ms
+
+        e.state.health.mode = Mode.CATCH_UP
+        now["ms"] = last + 2 * TF_15M.ms
+        h = e.update_health(connected=True, reconnects=1, healed=0, silent_seconds=0.0)
+        assert h.lag_bars == pytest.approx(2.0), f"the fixture is not two bars behind: {h.lag_bars}"
+        assert e.state.health.mode is Mode.CATCH_UP and not e.emitting, (
+            "the engine declared itself caught up two trigger bars behind the market: every zone "
+            "it now publishes is priced off a bar that closed 30 minutes ago"
+        )
+
+        now["ms"] = last + TF_15M.ms
+        h = e.update_health(connected=True, reconnects=1, healed=0, silent_seconds=0.0)
+        assert h.lag_bars == pytest.approx(1.0), f"the fixture is not one bar behind: {h.lag_bars}"
+        assert e.state.health.mode is Mode.LIVE and e.emitting, (
+            "one trigger bar of lag is the freshest a bar-closing engine can ever be, and it was "
+            "still refused: the engine never leaves CATCH_UP and stays mute for the session"
+        )
+
+
 class TestTheDecisionCard:
     def test_the_verdict_never_goes_above_watch_while_the_maturity_is_prior(self, bars_20d):
         """PRIOR means not one trade of ours has resolved yet.
@@ -268,6 +398,50 @@ class TestTheDecisionCard:
             "not one hypothesis was ever viable AND inside its entry zone over 20 days, so the "
             "cap above was never actually exercised: this test proves nothing as it stands"
         )
+
+    def test_every_pivot_it_counts_is_an_extreme_of_the_bar_it_is_stamped_on(self, replay_20d):
+        """The wire between the resampler and the detector is tested by nothing at either end.
+
+        The resampler is checked against pandas, bar for bar; the detector is checked directly with
+        bars the test hands it. In between sits one call — `det.update(ts, high, low, close)` — and
+        its four arguments are three floats of the same magnitude and a timestamp. Swap high and
+        low there and every swing high is located at the bar's LOW; shift the timestamp by one
+        period and every pivot is attributed to its neighbour. Both keep producing a perfectly
+        well-formed count, and every leg length, Elliott ratio, entry zone and invalidation the
+        user is shown is then measured off the wrong number. Nothing raises, and no comparison
+        against the resampler can see it, because the resampled bars are correct.
+
+        A swing high is the HIGH of its bar and a swing low is the LOW of it (`on_close=False`).
+        That is the whole claim, and it ties price and timestamp together, so it holds the
+        arguments in place on both counts.
+        """
+        e, _, _ = replay_20d
+        ring = e.state.rings[TRIGGER_TF]
+        w = ring.window(len(ring))
+        at = {int(ts): i for i, ts in enumerate(w.ts)}
+        pivots = e.state.detectors[TRIGGER_TF].store.as_of(int(w.ts[-1]))
+        assert len(pivots) >= 10, (
+            f"only {len(pivots)} confirmed pivots over 20 days: too few for this to mean anything"
+        )
+        kinds = {p.kind for p in pivots}
+        assert kinds == {PivotKind.HIGH, PivotKind.LOW}, (
+            f"only {kinds} appear, so one of the two branches is never checked here"
+        )
+
+        for p in pivots:
+            assert p.ts_ms in at, (
+                f"a pivot is stamped at {p.ts_ms}, which is not the open time of any bar in the "
+                f"{TRIGGER_TF} ring: the detector is being fed a timestamp the engine never stored"
+            )
+            i = at[p.ts_ms]
+            side = "high" if p.kind is PivotKind.HIGH else "low"
+            want = float(w.high[i]) if p.kind is PivotKind.HIGH else float(w.low[i])
+            assert p.price == want, (
+                f"the {p.kind.name} pivot at {p.ts_ms} is priced at {p.price}, but that bar's "
+                f"{side} is {want} (open {w.open[i]}, high {w.high[i]}, low {w.low[i]}, close "
+                f"{w.close[i]}). The detector is not being handed this bar's extremes: every leg "
+                "measured from this pivot describes a price the market never traded at"
+            )
 
 
 class TestTheTripleBarrier:
@@ -498,6 +672,113 @@ class TestTheTripleBarrier:
             f"{sl.mfe_r}"
         )
 
+    @pytest.mark.parametrize("long", [True, False])
+    def test_touching_the_barrier_is_enough(self, long):
+        """Both barriers are prices an order actually sits at, so bars land on them to the tick.
+
+        A target is a published fib level rounded to the venue's tick and a stop is the Elliott
+        invalidation: they are not two independent floats whose equality is a measure-zero event,
+        they are the exact prices everyone's resting orders cluster on. Make either comparison
+        strict and a trade filled at its target is not booked as a win — it falls through to
+        whatever the LATER bars do, so the label is not merely missing, it is a different trade.
+        The error is systematic, it lands on the trades that touched their level and turned, and
+        both directions carry a separate comparison.
+        """
+        entry, risk = 100.0, 5.0
+        stop = entry - risk if long else entry + risk
+        target = entry + 2 * risk if long else entry - 2 * risk
+        near = entry + 1.0 if long else entry - 1.0
+
+        tp = resolve_triple_barrier(
+            entry, stop, target,
+            np.array([target if long else near]), np.array([near if long else target]),
+            np.array([entry]), max_bars=5, long=long,
+        )
+        assert (tp.barrier, tp.bars) == ("tp", 1), (
+            f"a bar whose extreme reached the target exactly was booked as {tp.barrier} after "
+            f"{tp.bars} bars: a fill at the level is a fill, and this trade is now labelled by "
+            "bars that came after it closed"
+        )
+        assert tp.r == pytest.approx(2.0), f"a 2R target booked {tp.r}R"
+
+        sl = resolve_triple_barrier(
+            entry, stop, target,
+            np.array([near if long else stop]), np.array([stop if long else near]),
+            np.array([entry]), max_bars=5, long=long,
+        )
+        assert (sl.barrier, sl.bars) == ("sl", 1), (
+            f"a bar whose extreme reached the stop exactly was booked as {sl.barrier} after "
+            f"{sl.bars} bars: the trade was stopped out and the label says it was still open"
+        )
+        assert sl.r == -1.0, f"a stop-out costs exactly -1R, it booked {sl.r}R"
+
+    def test_a_trade_that_never_traded_against_the_entry_has_no_adverse_excursion(self):
+        """Every MAE assertion in this file uses a bar that DID go against the trade.
+
+        So the sign of the adverse term is never exercised, and taking its absolute value — the
+        one-character edit that makes both excursions "how far it moved" — passes all of them. What
+        comes out then is a floor under MAE equal to the favourable move, on precisely the trades
+        that never suffered one. A stop-tightening rule reading that table sees every winner
+        drawing down before it worked, and tightens stops that were never threatened.
+        """
+        out = resolve_triple_barrier(
+            100.0, 95.0, 110.0,                       # risk = 5
+            np.array([104.0, 105.0]), np.array([101.0, 102.0]), np.array([103.0, 104.0]),
+            max_bars=2,
+        )
+        assert out.barrier == "vertical", f"nothing was touched, expected 'vertical': {out}"
+        assert out.mae_r == 0.0, (
+            f"the price never traded below the entry, so the adverse excursion is 0R, not "
+            f"{out.mae_r}R: the sign of the adverse term is being thrown away"
+        )
+        assert out.mfe_r == pytest.approx(1.0), (
+            f"the high of 105 is 5 points in favour of a 5-point risk: MFE is 1.0R, not {out.mfe_r}"
+        )
+
+    @pytest.mark.parametrize(
+        ("fine_high", "fine_low", "barrier", "ambiguous"),
+        [
+            ([111.0, 96.0], [99.0, 94.0], "tp", False),    # the minutes say the target came first
+            ([101.0, 112.0], [94.0, 99.0], "sl", False),   # the minutes say the stop came first
+            (None, None, "sl", True),                      # no minutes: pessimistic and flagged
+        ],
+    )
+    def test_the_excursions_survive_the_tie_break_too(
+        self, fine_high, fine_low, barrier, ambiguous
+    ):
+        """The excursion test next door reaches the plain `tp` and `sl` returns and stops there.
+
+        `resolve_triple_barrier` builds an `Outcome` at five places, and the three inside the
+        both-barriers-in-one-bar branch — tie broken to the target, tie broken to the stop, and no
+        1m data at all — are reached by nothing that looks at `mae_r` or `mfe_r`. They pass `mae`
+        and `mfe` positionally into adjacent float fields, so the swap is invisible in review and
+        invisible here. Those are also the most violent bars in the sample, the ones where a
+        stop-tighten rule would be fitted to the widest excursions it will ever see — while
+        believing the best case was the worst.
+
+        The single bar below is identical in all three cases: it went 6 points against a 5-point
+        risk and 12 in favour, so 1.2R and 2.4R can never be mistaken for each other.
+        """
+        kw = {}
+        if fine_high is not None:
+            kw = {"fine_highs": [np.array(fine_high)], "fine_lows": [np.array(fine_low)]}
+        out = resolve_triple_barrier(
+            100.0, 95.0, 110.0,                       # risk = 5
+            np.array([112.0]), np.array([94.0]), np.array([100.0]),
+            max_bars=5, **kw,
+        )
+        assert (out.barrier, out.ambiguous) == (barrier, ambiguous), (
+            f"the fixture no longer reaches the branch it names: expected {barrier} "
+            f"(ambiguous={ambiguous}), got {out.barrier} (ambiguous={out.ambiguous})"
+        )
+        assert out.mae_r == pytest.approx(1.2), (
+            f"the low of 94 is 6 points against a 5-point risk: MAE is 1.2R, not {out.mae_r}R"
+        )
+        assert out.mfe_r == pytest.approx(2.4), (
+            f"the high of 112 is 12 points in favour of a 5-point risk: MFE is 2.4R, not "
+            f"{out.mfe_r}R"
+        )
+
     def test_it_refuses_a_trade_whose_stop_is_its_entry(self):
         """Every label is a ratio to |entry - stop|. A zero there poisons silently.
 
@@ -585,6 +866,90 @@ class TestTheBacktest:
                     f"{s.target} — a short's stop goes above the entry and its target below it"
                 )
 
+    def test_a_signal_books_the_trade_the_card_actually_offered(self, backtest_20d, replay_20d):
+        """★ The geometry of the label has to be the geometry of the plan on screen.
+
+        The barrier module's opening paragraph is about this and calls it subtle and lethal: label
+        a trade with a stop the interface never showed — a flat ATR multiple where the card
+        published the Elliott invalidation, or T1 where the card quoted the R:R to T2 — and every
+        probability the user is given describes a DIFFERENT trade from the one they take. Nothing
+        downstream can find it, because every expectancy it is compared against came out of the
+        same labels, and the archetype id still matches.
+
+        The neighbouring resolution test cannot see any of it either: it recomputes each outcome
+        from the signal's own recorded stop and target, so a signal is checked against itself. This
+        is the other side of that — the recorded numbers against the card that was published on
+        that bar, replayed here down a separate pass of the engine.
+        """
+        assert backtest_20d.signals, "no signals: this test is checking an empty list"
+        _, cards, closes = replay_20d
+        for s in backtest_20d.signals:
+            assert s.ts_ms in cards, (
+                f"the signal at {s.ts_ms} is stamped at an instant no {TRIGGER_TF} bar closed on: "
+                "it is not pointing at the decision that produced it"
+            )
+            assert s.entry == closes[s.ts_ms], (
+                f"the signal at {s.ts_ms} was entered at {s.entry}; the bar that carried that "
+                f"decision closed at {closes[s.ts_ms]}. The fill is at a price the decision never "
+                "saw"
+            )
+            arch = s.archetype.rsplit("_", 1)[0]
+            want_dir = "LONG" if s.direction is Direction.LONG else "SHORT"
+            published = [h for h in cards[s.ts_ms]["hypotheses"]
+                         if h["viable"] and h["archetype"] == arch
+                         and h["direction"] == want_dir]
+            assert published, (
+                f"the signal at {s.ts_ms} claims a viable {want_dir} {arch}, and the card for that "
+                "bar published no such hypothesis at all"
+            )
+            recorded = (s.stop, s.target, s.rr, s.score, s.cost_r, s.size_factor, s.invalidation)
+            offered = [(h["stop"], h["targets"][1], h["rr_t2"], h["score"], h["cost_r"],
+                        h["size_factor"], h["invalidation_price"]) for h in published]
+            assert recorded in offered, (
+                f"the signal at {s.ts_ms} booked (stop, target, rr, score, cost_r, size, "
+                f"invalidation) = {recorded}, and no {want_dir} {arch} on that card offered those "
+                f"numbers — the card offered {offered}. The trade being measured is not the trade "
+                "that was shown"
+            )
+
+    def test_the_booked_R_R_is_the_zone_s_and_not_the_fill_s_and_that_is_recorded_here(
+        self, backtest_20d
+    ):
+        """CHARACTERISATION, not approval. This pins a known inconsistency so it cannot move
+        without someone deciding that it should.
+
+        The test above proves the signal faithfully COPIES the card's numbers. It does not — and
+        by construction cannot — say those numbers are consistent with each other, and they are
+        not. `build_plan` computes `rr_t2` and `cost_r` from `entry = (zone_lo + zone_hi) / 2`, the
+        middle of the published entry zone; `run_backtest` fills at `htf.close`. Measured on this
+        fixture: 131 of 132 signals carry an R:R describing a different entry price from the one
+        their outcome is booked at, the worst by 2.29R.
+
+        So `expectancy_r` is measured off the fill and `rr` is quoted off the zone, and the two
+        travel side by side in the same report. That is a source decision to make — book at the
+        zone midpoint, or recompute the plan's arithmetic at the fill — and not one a test should
+        make quietly. Until it is made, the discrepancy is asserted rather than left as folklore:
+        anyone who resolves it will see this test go red and have to say which way they went.
+
+        See docs/TEST_COVERAGE.md, "Known inconsistencies the suite pins rather than fixes".
+        """
+        resolved = [s for s in backtest_20d.signals if s.outcome]
+        assert len(resolved) >= 20, "too few signals for this to characterise anything"
+
+        geometric = [abs(s.target - s.entry) / abs(s.entry - s.stop) for s in resolved]
+        drift = [abs(g - s.rr) for g, s in zip(geometric, resolved, strict=True)]
+        disagreeing = sum(1 for d in drift if d > 0.01)
+
+        assert disagreeing > len(resolved) // 2, (
+            f"only {disagreeing} of {len(resolved)} signals show the zone/fill R:R discrepancy. "
+            "If it has been fixed, that is good news and this test has to go: delete it and move "
+            "the entry in docs/TEST_COVERAGE.md from «known inconsistencies» to «verified». If it "
+            "has merely moved, find out where"
+        )
+        # Every signal still records the R:R its own card published, whatever entry that was
+        # computed at. That half IS a real invariant and it is what the test above rests on.
+        assert all(s.rr > 0 for s in resolved), "an R:R must at least be positive"
+
     def test_the_fees_are_subtracted_and_paying_more_can_only_make_it_worse(self, backtest_20d):
         """A backtest that reports gross R is a brochure. The user pays the taker fee twice.
 
@@ -637,6 +1002,113 @@ class TestTheBacktest:
             "signal itself"
         )
 
+    def test_the_control_is_held_for_the_same_window_as_the_trade_it_controls(self, backtest_20d):
+        """The twin copies the signal's stop and target in R. The third barrier is time.
+
+        Its window is the one parameter of the control that is not derived from the signal's
+        geometry, so it is the one that can silently drift — and holding time is not a detail of a
+        triple-barrier trade, it is a third of its definition. Give the control twice as long and
+        it gets twice as many chances to reach the same target before its time runs out, so
+        `edge_vs_null` stops being a paired difference and becomes a comparison between a 12-bar
+        trade and a 24-bar one. The direction of that bias is towards understating the edge, which
+        is the direction nobody investigates.
+        """
+        twinned = [s for s in backtest_20d.signals if s.null_outcome]
+        assert len(twinned) >= 20, f"only {len(twinned)} twins: too few to check"
+        at_the_limit = sum(1 for s in twinned if s.null_outcome.bars == MAX_BARS_HOLD)
+        assert at_the_limit > 0, (
+            "not one control ran to the end of its holding window, so a longer window would look "
+            "identical here and this test proves nothing"
+        )
+        for s in twinned:
+            # `1 <=` is NOT asserted here: `resolve_triple_barrier` returns `i + 1` on every
+            # barrier path and `n >= 1` on the vertical one, so a lower bound of 1 cannot fail for
+            # any implementation. It read as coverage and was a comment with an `assert` in front
+            # of it. The upper bound is the real content.
+            assert s.null_outcome.bars <= MAX_BARS_HOLD, (
+                f"the control for the signal at {s.ts_ms} was held {s.null_outcome.bars} bars "
+                f"against a {MAX_BARS_HOLD}-bar time barrier: it is not the same trade as the one "
+                "it is being subtracted from"
+            )
+
+    def test_the_control_is_the_same_trade_taken_at_a_different_moment(
+        self, bars_20d, backtest_20d
+    ):
+        """★ `edge_vs_null` is this project's headline number and the control arm it is measured
+        against had almost no test at all.
+
+        The twin's whole claim is «the same trade, at a nearby instant that the count did not
+        pick». Everything in that sentence is geometry — same risk, same reward in R, same
+        direction, entered LATER, resolved only from bars after its own entry — and none of it was
+        observable, so four separate faults in those four lines survived the entire suite. Measured
+        on this fixture: a twin whose target lands on the losing side turns `edge_vs_null` from
+        +0.065 to −1.540, a twin allowed to enter on the signal's own bar flips its sign, and a
+        twin allowed to resolve on its own entry bar nearly doubles the reported edge — the last
+        being lookahead the signal arm is explicitly forbidden and the control arm was not, an
+        asymmetry that flatters the strategy.
+
+        The oracle is the same shape as the signal arm's: rebuild the outcome from the offline
+        resampler, a different code path, using strictly the bars after the twin's own entry. It
+        pins all four faults at once, and it pins them per signal rather than through a summary
+        statistic that could absorb one bad twin in a hundred.
+        """
+        df = pd.DataFrame(
+            {"open": [b.open for b in bars_20d], "high": [b.high for b in bars_20d],
+             "low": [b.low for b in bars_20d], "close": [b.close for b in bars_20d],
+             "volume": [b.volume for b in bars_20d]},
+            index=pd.Index([b.open_time_ms for b in bars_20d], name="open_time_ms"),
+        )
+        offline = resample_from_1m(df, BY_NAME[TRIGGER_TF])
+        high, low, close = (offline[c].to_numpy() for c in ("high", "low", "close"))
+        at = {ts: i for i, ts in enumerate(offline.index)}
+
+        twinned = [s for s in backtest_20d.signals if s.null_outcome]
+        assert len(twinned) >= 20, f"only {len(twinned)} twins: too few to check"
+
+        for s in twinned:
+            is_long = s.direction is Direction.LONG
+            sign = 1 if is_long else -1
+            risk = abs(s.entry - s.stop)
+            null_risk = abs(s.null_entry - s.null_stop)
+
+            assert s.null_ts_ms > s.ts_ms, (
+                f"the control for the signal at {s.ts_ms} entered at {s.null_ts_ms}, on or before "
+                "the signal's own bar. A twin that overlaps the signal is partly the signal, so "
+                "the difference between them stops being a control and starts being noise "
+                "subtracted from itself"
+            )
+            assert null_risk == pytest.approx(risk, rel=1e-9), (
+                f"the control risks {null_risk} against the signal's {risk}. The twin copies the "
+                "risk in absolute terms; rescale it and the two arms are denominated in different "
+                "Rs and their difference means nothing"
+            )
+            assert sign * (s.null_stop - s.null_entry) < 0 < sign * (s.null_target - s.null_entry), (
+                f"a {s.direction.name} control entered at {s.null_entry} with its stop at "
+                f"{s.null_stop} and its target at {s.null_target}: one of them is on the wrong "
+                "side of the entry, so the twin books a profit for going the way it was betting "
+                "against and the control arm beats the strategy for free"
+            )
+            assert abs(s.null_target - s.null_entry) / null_risk == pytest.approx(
+                abs(s.target - s.entry) / risk, rel=1e-9), (
+                "the control's reward-to-risk differs from the signal's, so the paired difference "
+                "is comparing two different trades"
+            )
+
+            j = at[s.null_ts_ms]
+            expected = resolve_triple_barrier(
+                s.null_entry, s.null_stop, s.null_target,
+                high[j + 1:], low[j + 1:], close[j + 1:],
+                max_bars=MAX_BARS_HOLD, long=is_long,
+            )
+            assert (s.null_outcome.barrier, s.null_outcome.bars) == (
+                expected.barrier, expected.bars), (
+                f"the control entered at {s.null_ts_ms} was booked as {s.null_outcome.barrier} "
+                f"after {s.null_outcome.bars} bars; resolved against the bars that came after its "
+                f"own entry it is {expected.barrier} after {expected.bars}. The control arm is "
+                "being resolved with its own entry bar — the exact lookahead the signal arm is "
+                "forbidden, and it flatters the null, which understates the edge"
+            )
+
     def test_one_count_does_not_become_twenty_trades(self, backtest_20d):
         """The debounce, and it is a statistics question rather than a tidiness one.
 
@@ -645,20 +1117,37 @@ class TestTheBacktest:
         of significance downstream treats them as twenty: the sample looks four times bigger than
         it is and the confidence interval shrinks around a number that never earned it. That is
         pseudo-replication, and it is how a backtest talks itself into a strategy.
+
+        WHICH KEY the cooldown uses is a separate question, and this test could not see it. It
+        grouped by `Signal.archetype`, which carries the direction suffix (`w2_long`), while the
+        cooldown is keyed on the bare archetype (`w2`) — so a change from one to the other was
+        structurally invisible here. It is not a small change: on this fixture it takes the run
+        from 132 signals to 153 and turns `expectancy_r` from +0.043 to −0.009 and `edge_vs_null`
+        from +0.065 to −0.066. Both readings are defensible, and that is exactly why the one in
+        force has to be written down: a long and a short off the same count are either one
+        observation of that count or two observations of the market, and the answer decides
+        whether this strategy is profitable.
+
+        Both groupings are asserted below. The bare-archetype one is the strictly stronger claim
+        and it is the behaviour that ships.
         """
         tf_ms = BY_NAME[TRIGGER_TF].ms
-        last: dict[str, int] = {}
-        for s in sorted(backtest_20d.signals, key=lambda s: s.ts_ms):
-            previous = last.get(s.archetype)
-            if previous is not None:
-                apart = (s.ts_ms - previous) // tf_ms
-                assert apart >= COOLDOWN_BARS, (
-                    f"two {s.archetype} signals {apart} trigger bars apart with a cooldown of "
-                    f"{COOLDOWN_BARS}: the same count is being counted as several independent "
-                    "trades"
-                )
-            last[s.archetype] = s.ts_ms
-        assert len(last) > 1, "only one archetype fired; the debounce was barely exercised"
+        for key, label in ((lambda s: s.archetype, "archetype and direction"),
+                           (lambda s: s.archetype.rsplit("_", 1)[0], "archetype alone")):
+            last: dict[str, int] = {}
+            for s in sorted(backtest_20d.signals, key=lambda s: s.ts_ms):
+                k = key(s)
+                previous = last.get(k)
+                if previous is not None:
+                    apart = (s.ts_ms - previous) // tf_ms
+                    assert apart >= COOLDOWN_BARS, (
+                        f"two {k!r} signals {apart} trigger bars apart with a cooldown of "
+                        f"{COOLDOWN_BARS}, grouping by {label}: the same count is being counted "
+                        "as several independent trades"
+                    )
+                last[k] = s.ts_ms
+            assert len(last) > 1, (
+                f"only one key under {label}; the debounce was barely exercised")
 
     def test_the_score_filter_actually_filters(self, bars_20d, backtest_20d):
         """`min_score` is the operator saying «only the counts that fit well».
@@ -712,15 +1201,88 @@ class TestTheBacktestStatistics:
     """The report card. Every one of these numbers ends up in a decision about real money."""
 
     @staticmethod
-    def _result(*rs: float, cost_r: float = 0.0) -> BacktestResult:
+    def _result(*rs: float, cost_r: float = 0.0, nulls: tuple[float, ...] = (),
+                barriers: tuple[str, ...] = ()) -> BacktestResult:
         res = BacktestResult()
         for i, r in enumerate(rs):
             s = Signal(ts_ms=i, archetype="w2_long", direction=Direction.LONG, entry=100.0,
                        stop=95.0, target=110.0, rr=2.0, score=1.0, cost_r=cost_r,
                        size_factor=1.0, invalidation=94.0)
-            s.outcome = Outcome("tp" if r > 0 else "sl", r, 0.0, 0.0, 1)
+            s.outcome = Outcome(barriers[i] if barriers else ("tp" if r > 0 else "sl"),
+                                r, 0.0, 0.0, 1)
+            if nulls:
+                s.null_outcome = Outcome("tp" if nulls[i] > 0 else "sl", nulls[i], 0.0, 0.0, 1)
             res.signals.append(s)
         return res
+
+    def test_the_edge_is_what_the_signals_made_over_what_the_control_made(self):
+        """`edge_vs_null` is the one number that answers «is the wave count worth anything?».
+
+        It is a paired difference against a twin trade taken at a random nearby instant, and that
+        pairing is the whole reason it becomes interpretable long before the absolute hit rate
+        does. Which also means the subtraction has a direction, and nothing else on the card can
+        contradict it: turn it around and a strategy that beats its control by 3R reports −3R and
+        gets abandoned, while one that loses to a random entry reports a healthy edge and gets
+        traded. The neighbouring null-arm test only asserts the figure is not exactly zero, which
+        both orientations satisfy.
+        """
+        st = self._result(2.0, 2.0, 2.0, nulls=(-1.0, -1.0, -1.0)).stats()
+        assert st["null_expectancy_r"] == pytest.approx(-1.0), (
+            f"the control arm lost 1R on every trade, the card says {st['null_expectancy_r']}"
+        )
+        assert st["edge_vs_null"] == pytest.approx(3.0), (
+            f"signals averaging +2R against a control averaging −1R is an edge of +3R, the card "
+            f"says {st['edge_vs_null']}: the difference is being taken the wrong way round"
+        )
+
+    def test_the_fee_multiplier_charges_the_control_arm_too(self):
+        """«And if the spread were three times worse?» — asked of the treatment but not the control.
+
+        Both arms are the same trade size at the same fee, so the fee is common to the pair and has
+        to cancel out of the paired difference: turning the knob may move both expectancies, never
+        the edge between them. Charge only the signals and the sensitivity check answers a question
+        nobody asked — it compares a strategy paying triple fees against a control paying single —
+        and every edge shrinks under fee stress for a reason that is pure arithmetic. The existing
+        multiplier tests look at the signal arm alone, where the mistake is invisible.
+        """
+        res = self._result(2.0, -1.0, nulls=(1.0, -1.0), cost_r=0.1)
+        cheap, dear = res.stats(cost_mult=1.0), res.stats(cost_mult=3.0)
+        assert cheap["edge_vs_null"] == pytest.approx(0.5), (
+            f"the fixture no longer has an edge to preserve: {cheap['edge_vs_null']}"
+        )
+        assert dear["expectancy_r"] < cheap["expectancy_r"], "precondition: the knob does something"
+        assert dear["edge_vs_null"] == pytest.approx(cheap["edge_vs_null"]), (
+            f"tripling the fee moved the edge from {cheap['edge_vs_null']} to "
+            f"{dear['edge_vs_null']}: the same fee is being charged to the signals and not to "
+            "their controls, so the fee-sensitivity answer is arithmetic, not evidence"
+        )
+
+    def test_the_report_card_describes_the_trades_it_actually_resolved(self):
+        """Two figures on the card that no test reads: the barrier tally and the spread of R.
+
+        The tally is what tells an operator «half of these time out» — the single most useful thing
+        on the report, because a book that is mostly vertical exits is not the strategy anyone
+        thought they were testing. A tally that counts every trade against every barrier sums to
+        three times the sample and still reads as a plausible breakdown. `r_std` is the dispersion
+        every sizing decision leans on; sourced from the control arm it describes a different book
+        entirely, and it looks perfectly reasonable because the control is the same trade size.
+        """
+        res = self._result(2.0, -1.0, 0.5, 0.0,
+                           barriers=("tp", "sl", "vertical", "vertical"),
+                           nulls=(0.0, 0.0, 0.0, 0.0))
+        st = res.stats()
+        assert st["barriers"] == {"tp": 1, "sl": 1, "vertical": 2}, (
+            f"one target, one stop and two time exits were reported as {st['barriers']}"
+        )
+        assert sum(st["barriers"].values()) == st["n"], (
+            f"the barrier tally adds up to {sum(st['barriers'].values())} over {st['n']} resolved "
+            "trades: every trade is being counted against more than one barrier"
+        )
+        assert st["r_std"] == pytest.approx(float(np.std([2.0, -1.0, 0.5, 0.0]))), (
+            f"the spread of the signals' R is {float(np.std([2.0, -1.0, 0.5, 0.0]))}, the card "
+            f"says {st['r_std']}: it is describing a different set of trades from the expectancy "
+            "printed beside it"
+        )
 
     def test_a_breakeven_trade_is_not_a_win(self):
         """The hit rate is the number the user reads first and the one they overweight.

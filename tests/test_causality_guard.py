@@ -2,17 +2,29 @@
 
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 
 import pytest
 
 from wavelab.core.causality import AsOf, CausalityError, causal, is_causal
+from wavelab.core.clock import LiveClock, SimClock
 from wavelab.core.ring import Ring
 from wavelab.core.timeframes import TF_15M
-from wavelab.core.types import Bar, Pivot, PivotKind
+from wavelab.core.types import (
+    Bar,
+    Decision,
+    Direction,
+    MaturityLevel,
+    Pivot,
+    PivotKind,
+    Stat,
+    TradePlan,
+    Verdict,
+)
 from wavelab.waves.store import PivotStore
 
-from .conftest import SYMBOL, make_bars
+from .conftest import SYMBOL, T0, make_bars
 
 
 class TestAsOf:
@@ -361,3 +373,233 @@ class TestCausalDecorator:
             return now_ms
         with pytest.raises(TypeError, match="now_ms"):
             f(1_600_000_000.0)
+
+    @pytest.mark.parametrize("n", [1, 2, 600])
+    def test_the_walk_does_not_depend_on_how_long_the_sequence_is(self, n):
+        """A guard that inspects short sequences and waves long ones through is no guard.
+
+        The module advertises its own per-call cost, which is exactly the invitation to add a fast
+        path for the one argument that is actually long — the pivot beam. Every other sequence
+        test in this class builds a container holding a single pivot, so any predicate keyed on
+        length passes them all; the beam is the only thing that ever gets big, and it is the thing
+        that must not skip the check. The offender sits in the MIDDLE of the beam here, so a walk
+        that only looks at the ends does not pass either.
+        """
+        @causal
+        def f(now_ms: int, pivots) -> int:
+            return len(pivots)
+
+        now = 1_000_000
+        knowable = [Pivot(i, i * 1000, 10.0, PivotKind.LOW, 1.0).confirmed_at(i, i * 1000)
+                    for i in range(n)]
+        assert f(now, knowable) == n, "sanity: a beam of pivots all confirmed by now_ms goes through"
+
+        bad = n // 2
+        beam = list(knowable)
+        beam[bad] = Pivot(bad, bad * 1000, 10.0, PivotKind.LOW, 1.0).confirmed_at(bad, 9_000_000)
+        with pytest.raises(CausalityError, match=rf"pivots\[{bad}\]"):
+            f(now, beam)
+
+
+def _plan() -> TradePlan:
+    """A minimal, self-consistent long plan. The Decision guards care only that one exists."""
+    return TradePlan(
+        archetype="w2_long", direction=Direction.LONG,
+        entry_lo=100.0, entry_hi=102.0, stop=98.0,
+        invalidation_price=98.0, invalidation_rule="R1",
+        targets=(107.0,), exit_template_id="2R_48b",
+    )
+
+
+def _decision(**kw) -> Decision:
+    base = {"ts_ms": T0, "symbol": SYMBOL, "tf": TF_15M, "verdict": Verdict.ACTIONABLE,
+            "maturity": MaturityLevel.HISTORICAL, "plan": _plan()}
+    return Decision(**{**base, **kw})
+
+
+class TestAnActionableDecisionHasToBeEarned:
+    """`Decision` is the unit that gets journalled, and its three refusals are load-bearing.
+
+    Each of them can be deleted or weakened without a single test going red today, because
+    `engine/live.py` still returns plain dicts and the only `Decision` built anywhere in the repo
+    is a NO_TRADE. That means these guards will first fire on the day the engine is wired to the
+    type it was designed around — which is precisely the day nobody re-reads them.
+    """
+
+    def test_an_actionable_decision_without_a_plan_is_refused(self):
+        """ACTIONABLE means "here is the trade". With no plan there is no trade, only a claim.
+
+        Journalled, such a row says the engine told the user to act while recording nothing it
+        told them to do: no entry, no stop, no invalidation. The decision can never be scored
+        afterwards, so the outcome history quietly acquires holes exactly where it was most
+        confident.
+        """
+        with pytest.raises(ValueError, match="nothing to trade"):
+            _decision(plan=None)
+        assert _decision().actionable, "the same decision WITH a plan must construct"
+
+    def test_an_actionable_decision_while_catching_up_is_refused(self):
+        """Replaying an outage, the entry zone describes a price that has already gone.
+
+        The bars are arriving as fast as they can be fetched and the "current" price is minutes or
+        hours old; an entry drawn on it is unfillable, and a journal entry written from it is
+        scored against a fill nobody could have got. `stale` is a different flag about a different
+        thing and must not be able to excuse this one — a decision that is catching up is refused
+        whether or not anything else is wrong with it.
+        """
+        with pytest.raises(ValueError, match="CATCH_UP"):
+            _decision(catching_up=True, stale=False)
+        assert _decision(catching_up=False, stale=True).actionable, (
+            "the refusal is about catching up on a gap, not about staleness: a stale-but-live "
+            "decision is still allowed to be actionable and to say so on the card"
+        )
+
+    def test_an_actionable_decision_at_prior_maturity_is_refused(self):
+        """PRIOR means the number on the card comes from a hand-written table and nothing else.
+
+        The maturity ladder is the promise that the interface never shows more confidence than it
+        has evidence for. At PRIOR the verdict is capped at WATCH; let ACTIONABLE through and a
+        guess is presented with the same weight as nine years of purged walk-forward, which is the
+        one thing the ladder exists to make impossible.
+        """
+        with pytest.raises(ValueError, match="PRIOR"):
+            _decision(maturity=MaturityLevel.PRIOR)
+        assert _decision(maturity=MaturityLevel.HISTORICAL).actionable, (
+            "the cap is at PRIOR: a decision backed by historical evidence must still construct, "
+            "or the ladder refuses every level rather than the bottom one"
+        )
+
+    def test_the_refusals_attach_to_actionable_and_to_nothing_else(self):
+        """WATCH and NO_TRADE are how the engine says "not yet", and they must survive exactly the
+        conditions that forbid ACTIONABLE.
+
+        Widen the guards to every verdict and the engine can no longer report a planless, stale,
+        unbacked state at all: an outage replay would abort the run at the constructor instead of
+        degrading to a card that says so.
+        """
+        d = Decision(ts_ms=T0, symbol=SYMBOL, tf=TF_15M, verdict=Verdict.WATCH,
+                     maturity=MaturityLevel.PRIOR, plan=None, catching_up=True, stale=True)
+        assert not d.actionable
+
+
+class TestRiskIsMeasuredTheSameInBothDirections:
+    def test_a_short_reports_the_same_risk_and_reward_as_its_mirrored_long(self):
+        """A short's stop sits ABOVE its entry, and `abs()` is the whole of the arithmetic.
+
+        Without it the risk of every short is negative, `rr_at` falls into its `risk > 0`
+        fallback and returns a flat 0.0 for every target. Nothing raises and nothing looks empty:
+        the journal simply reports zero R:R on one side of the book, and the shorts appear to have
+        no reward for months while the longs look fine. This project has already paid for that bug
+        once.
+        """
+        long_ = TradePlan(archetype="w2_long", direction=Direction.LONG,
+                          entry_lo=100.0, entry_hi=102.0, stop=98.0,
+                          invalidation_price=98.0, invalidation_rule="R1",
+                          targets=(107.0,), exit_template_id="2R_48b")
+        short = TradePlan(archetype="w2_short", direction=Direction.SHORT,
+                          entry_lo=100.0, entry_hi=102.0, stop=104.0,
+                          invalidation_price=104.0, invalidation_rule="R1",
+                          targets=(95.0,), exit_template_id="2R_48b")
+
+        assert long_.risk_per_unit == pytest.approx(3.0)
+        assert short.risk_per_unit == pytest.approx(long_.risk_per_unit), (
+            f"the mirrored short reports risk {short.risk_per_unit} against the long's "
+            f"{long_.risk_per_unit}: a stop above the entry is measured as negative distance"
+        )
+        assert short.rr_at(95.0) == pytest.approx(long_.rr_at(107.0)), (
+            "the short's R:R does not mirror the long's; with non-positive risk `rr_at` returns "
+            "its 0.0 fallback and every short is journalled as a trade with no reward"
+        )
+        assert short.rr_at(95.0) > 0.0
+
+
+class TestTheClockOnlyEverMovesForward:
+    def test_the_sim_clock_refuses_to_go_back_and_allows_standing_still(self):
+        """`SimClock` is what makes a replay reproducible, and every one of its edges matters.
+
+        Backwards has to blow up: during a replay it means a bar arrived out of order, and quietly
+        patching that over is how a run stops being a run of the data it claims. Equality has to be
+        allowed: two bars close on the same millisecond every hour (a 15m close IS an hourly
+        close), so refusing it would abort a replay on the boundaries it exists to cross. And
+        `advance` has to ADD — turned into a `set`, `advance(500)` after an epoch timestamp rewinds
+        the clock by half a century, which the backwards guard never sees because it is not the
+        one being called.
+        """
+        c = SimClock(1000)
+
+        c.set(1000)
+        assert c.now_ms() == 1000, (
+            "re-setting the clock to the instant it already reads was refused or moved it: two "
+            "bars closing on the same millisecond would abort a replay"
+        )
+        c.set(2000)
+        assert c.now_ms() == 2000
+        with pytest.raises(ValueError, match="backwards"):
+            c.set(1999)
+        assert c.now_ms() == 2000, "a refused set must not have moved the clock"
+
+        c.advance(500)
+        assert c.now_ms() == 2500, (
+            f"advance(500) left the clock at {c.now_ms()} instead of 2500: it is assigning the "
+            "argument rather than adding it, so any advance silently rewinds the clock"
+        )
+        c.advance(0)
+        assert c.now_ms() == 2500, "advancing by zero is standing still, not an error"
+        with pytest.raises(ValueError):
+            c.advance(-1)
+
+    def test_the_live_clock_reports_unix_epoch_milliseconds(self):
+        """The unit slip class, in the class that claims to be the only caller of `time`.
+
+        Everything in the system compares against integer milliseconds. Return microseconds and
+        every fact ever recorded looks a thousandfold older than it is: the staleness check reports
+        a healthy feed as weeks dead, and the health badge is wrong in the direction that gets the
+        engine restarted rather than the direction that gets noticed.
+        """
+        t = LiveClock().now_ms()
+        assert isinstance(t, int)
+        assert abs(t - int(time.time() * 1000)) < 1000, (
+            f"LiveClock().now_ms() returned {t}, which is not the wall clock in ms "
+            f"(time.time() says {int(time.time() * 1000)})"
+        )
+        assert 1_600_000_000_000 < t < 4_000_000_000_000, (
+            f"{t} is not a plausible epoch in MILLISECONDS: seconds, microseconds and nanoseconds "
+            "all compare against bar timestamps without complaining"
+        )
+
+
+class TestAStatisticRefusesToSpeakBelowItsOwnMinimum:
+    """`Stat` exists so that a number never appears without the n it came from.
+
+    Nothing in `src/` constructs one yet, and that is the reason to pin the boundary now rather
+    than later: the class is a contract waiting for its first caller, and the first caller will
+    read `computable` and trust it. Both directions of the comparison matter and they fail
+    differently — one refuses a statistic that had exactly enough data (a blank panel, annoying),
+    the other publishes one that did not (a reassuring number out of insufficient data, which is
+    the failure this class was written to make impossible).
+    """
+
+    def test_exactly_enough_data_is_enough(self):
+        s = Stat(name="hit rate", value=0.55, n=10, n_required=10)
+        assert s.computable is True, (
+            "a statistic with exactly its required n is computable: `>=` has become `>` and the "
+            "panel goes blank at the moment it should light up"
+        )
+        assert s.missing == 0
+        assert "n=10" in s.render() and "not computable" not in s.render()
+
+    def test_one_observation_short_is_not_enough(self):
+        s = Stat(name="hit rate", value=0.55, n=9, n_required=10)
+        assert s.computable is False, (
+            "a statistic one observation short reports itself computable: the bar has moved off "
+            "n_required and a number is being published out of insufficient data"
+        )
+        assert s.missing == 1
+        assert "not computable" in s.render()
+
+    def test_a_value_that_was_never_computed_is_never_computable(self):
+        """Enough rows and still no number is a different failure from too few rows, and the
+        property has to catch it or a `None` reaches a format string as the word 'None'."""
+        s = Stat(name="hit rate", value=None, n=10_000, n_required=10)
+        assert s.computable is False
+        assert "not computable" in s.render()

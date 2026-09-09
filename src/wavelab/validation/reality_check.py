@@ -148,9 +148,6 @@ def reality_check(
             idx = rng.integers(0, nb, size=nb)
             mb = B[:, idx].mean(axis=1) * root
             maxima[b] = mb.max()
-        beats = np.zeros(K)
-        for b in range(n_boot):
-            pass
         # each strategy's individual p-value against ITS OWN null distribution
         samples = np.empty((n_boot, K))
         for b in range(n_boot):

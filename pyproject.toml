@@ -73,6 +73,13 @@ markers = [
     "slow: slow tests (long replays, hydration)",
     "net: tests that hit the internet (excluded by default in CI)",
 ]
+# A RuntimeWarning out of NumPy is this codebase's most likely silent-corruption signal: "invalid
+# value encountered in cast" is how a NaN becomes an arbitrary int8 position, and "divide by zero"
+# is how a risk of zero becomes an infinite R. Neither raises and both produce a plausible number,
+# so warnings from that family are failures here. Not ALL warnings: an unclosed-file
+# ResourceWarning in the liquidation log currently trips `-W error`, and turning that into a deploy
+# gate would be noise standing in front of the guard that matters.
+filterwarnings = ["error::RuntimeWarning"]
 
 [tool.ruff]
 line-length = 100

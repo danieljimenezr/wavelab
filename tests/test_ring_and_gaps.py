@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -27,7 +28,7 @@ from wavelab.core.timeframes import (
 )
 from wavelab.core.types import Bar
 
-from .conftest import SYMBOL, make_bars
+from .conftest import SYMBOL, T0, make_bars
 
 
 class TestRing:
@@ -122,6 +123,58 @@ class TestRing:
         with pytest.raises(GapError, match="Refusing to compute"):
             w.require_complete("ER(20)")
 
+    def test_the_gap_error_points_at_the_first_discontinuity(self):
+        """The timestamp in the message is what a person actually acts on at three in the morning.
+
+        `require_complete` refuses to compute either way, so the arithmetic is safe whichever
+        discontinuity it names — but the message is the whole of the diagnosis. Pointed at the
+        last hole instead of the first, it sends whoever is reading it to the wrong outage, in the
+        wrong hour of the archive, on the one code path that only ever runs when something has
+        already gone wrong.
+        """
+        r = Ring(SYMBOL, TF_15M, capacity=64)
+        for b in make_bars(20, drop={5, 12}):
+            r.append(b)
+        w = r.window(20)
+        assert w.n_gaps == 2, "the premise: two separate holes, so first and last differ"
+
+        whole = make_bars(20)
+        first, last = whole[6].open_time_ms, whole[13].open_time_ms
+        with pytest.raises(GapError) as excinfo:
+            w.require_complete("ER(20)")
+        assert f"ts={first}" in str(excinfo.value), (
+            f"the error says `the first at` and names ts={last} instead of ts={first}: it points "
+            "at the last discontinuity in the window, so the hunt starts at the wrong outage"
+        )
+
+    def test_len_is_what_the_ring_still_holds_once_it_has_wrapped(self):
+        """`window(len(ring))` is how every chart endpoint reads the ring, at six call sites.
+
+        Once more bars have arrived than the buffer can hold, `len` has to report what is
+        RETAINED, not how many were appended. A `len` that keeps counting arrivals asks `window`
+        for more bars than exist; `_take` clamps to that inflated number, walks the buffer round
+        two or three times and hands back repeated, non-monotonic timestamps. On an 8192-slot 1m
+        ring that lands about six days after a deploy — every chart 500s at once, with nothing in
+        the diff to point at.
+        """
+        r = Ring(SYMBOL, TF_15M, capacity=8)
+        bars = make_bars(20)
+        for b in bars:
+            r.append(b)
+
+        assert len(r) == 8, (
+            f"the ring keeps 8 bars and len() says {len(r)} after 20 appends: it is counting "
+            "arrivals rather than what survived the wrap, so window(len(ring)) over-reads"
+        )
+        retained = [b.open_time_ms for b in bars[-8:]]
+        assert list(r.window(len(r)).ts) == retained, (
+            "window(len(ring)) after a wrap is not the last 8 bars in order: the read walked past "
+            "the start of the buffer and returned bars it had already returned"
+        )
+        assert list(r.window(min(1500, len(r))).ts) == retained, (
+            "the server's own idiom, window(min(N, len(ring))), disagrees with window(len(ring))"
+        )
+
     def test_it_rejects_duplicates_and_out_of_order_bars(self):
         r = Ring(SYMBOL, TF_15M, capacity=16)
         bars = make_bars(5)
@@ -201,6 +254,77 @@ class TestRing:
             "and with it the ZigZag threshold and the confirmation of pivots"
         )
         assert len(r.provisional_window(5)) == 5
+
+    def test_a_closed_bar_absorbs_its_own_in_flight_version(self):
+        """The in-flight slot has to be EMPTIED by the bar that closes it, not merely overwritten.
+
+        The live engine parks every forming bar in the provisional slot; when its closed version
+        arrives, `append` is the only thing that drops the tentative copy. Leave it there and the
+        provisional window carries the newest candle twice — once solid, once as the dashed "?" —
+        so the user counts one more bar than exists. It also freezes `last_ts_ms`, which is what
+        the staleness check compares against the clock, one bar in the past's favour: a feed that
+        died goes on reporting itself fresh.
+        """
+        r = Ring(SYMBOL, TF_15M, capacity=16)
+        bars = make_bars(7)
+        for b in bars[:5]:
+            r.append(b)
+        r.set_provisional(replace(bars[5], is_closed=False))
+
+        r.append(bars[5])
+        with pytest.raises(ValueError, match="no in-flight bar"):
+            r.provisional_window(3)
+
+        # And with a genuinely newer in-flight bar parked, the window is one bar per slot on the
+        # grid, stamped with that bar's OPEN time.
+        in_flight = replace(bars[6], is_closed=False)
+        r.set_provisional(in_flight)
+        w = r.provisional_window(4)
+        assert list(np.diff(w.ts)) == [TF_15M.ms] * 3, (
+            f"the provisional window's timestamps are {list(w.ts)}: they repeat or skip, so the "
+            "same candle is drawn twice, once confirmed and once as a maybe"
+        )
+        assert w.last_ts_ms == in_flight.open_time_ms, (
+            "last_ts_ms is not the in-flight bar's OPEN time: taken from its close, the staleness "
+            "check reports the feed a whole bar fresher than it is and an outage stays hidden"
+        )
+
+    def test_asking_for_just_the_current_candle_returns_just_the_current_candle(self):
+        """`n` counts the in-flight bar, so `n=1` is that bar alone and `n=0` is a miscount.
+
+        This is the first boundary a chart endpoint asking for "the current candle" hits, and it
+        was broken in both directions: `n=1` built a zero-length closed window and died inside
+        NumPy on `int(ts[-1])` with a message about an axis, while `n=0` and `n=-5` silently
+        returned the same one-bar window instead of refusing. Off-by-one here is not cosmetic —
+        a window that is quietly one bar short of what was asked for is the positional-indexing
+        bug this whole module exists to prevent, arriving through the front door.
+        """
+        r = Ring(SYMBOL, TF_15M, capacity=16)
+        bars = make_bars(7)
+        for b in bars[:5]:
+            r.append(b)
+        in_flight = replace(bars[5], is_closed=False)
+        r.set_provisional(in_flight)
+
+        w1 = r.provisional_window(1)
+        assert len(w1) == 1, (
+            f"provisional_window(1) returned {len(w1)} bars: `n` counts the in-flight bar, so "
+            "one means one — any other length is a silent off-by-one on the newest candle"
+        )
+        assert int(w1.ts[0]) == in_flight.open_time_ms
+        assert w1.close[0] == in_flight.close
+        assert w1.last_ts_ms == in_flight.open_time_ms
+
+        # Each further bar reaches exactly one bar further back into the closed history.
+        for n in (2, 3, 4):
+            w = r.provisional_window(n)
+            assert len(w) == n, f"provisional_window({n}) returned {len(w)} bars"
+            assert int(w.ts[-1]) == in_flight.open_time_ms
+            assert int(w.ts[0]) == in_flight.open_time_ms - (n - 1) * TF_15M.ms
+
+        for bad in (0, -1, -5):
+            with pytest.raises(ValueError, match="must be >= 1"):
+                r.provisional_window(bad)
 
 
 class TestResampling:
@@ -320,3 +444,87 @@ class TestOnlyTheTriggerDrawsEntries:
         assert not Timeframe(3 * 60_000, "3m", TfRole.REGIME).can_emit_signals
         assert not Timeframe(3 * 60_000, "3m", TfRole.GATE).can_emit_signals
         assert not Timeframe(3 * 60_000, "3m", TfRole.SOURCE).can_emit_signals
+class TestTheUtcGridIsNotNegotiable:
+    """Every index in the system is an open_time. An instant off the grid is in no bar at all."""
+
+    #: DO NOT TRIM THIS LIST. `off=1` is the only value that kills a check weakened from
+    #: `% tf.ms != 0` to `% tf.ms > 1`: −1, 7 and `ms - 1` all satisfy `> 1` and sail through.
+    #: The parametrisation states the general claim; the kill is single-point, so removing the
+    #: "redundant-looking" first case reopens the hole in silence.
+    @pytest.mark.parametrize("off", [1, -1, 7, TF_15M.ms - 1])
+    def test_a_bar_that_misses_the_grid_is_refused_however_narrowly(self, off):
+        """One integer comparison, guarding what `Bar`'s own docstring calls the costliest
+        mistake in the project: an adapter that invents its own close_time convention.
+
+        A millisecond is the dangerous offset, not a wild one. Shift every bar by +1 ms and
+        `resample_from_1m` still buckets them correctly and the ring's step check still sees a
+        clean `tf.ms` between two equally-shifted neighbours, so the corruption travels the whole
+        way with nothing raising; shift ONE bar and the ring reports two discontinuities that do
+        not exist. Construction is the only place it can be caught, so it has to be caught for
+        every remainder rather than only for large ones.
+        """
+        with pytest.raises(ValueError, match="does not land on"):
+            Bar(symbol=SYMBOL, tf=TF_15M, open_time_ms=T0 + off,
+                open=1.0, high=2.0, low=0.5, close=1.5, volume=1.0)
+
+    def test_an_aligned_bar_covers_its_own_period_and_abuts_the_next(self):
+        """The accepting case has to pin what the grid MEANS, not echo the constructor.
+
+        `assert b.open_time_ms == T0` is what this test used to say, and a frozen dataclass makes
+        that true for every implementation that does not raise — including one with the grid check
+        deleted, or `close_time_ms` off by a period. The content is the open/close convention that
+        `Bar`'s own docstring calls the costliest mistake in the project: a bar owns the last
+        millisecond of its period and shares none with its successor. Off by one in either
+        direction and two adjacent bars either overlap on an instant or leave one in no bar at all.
+        """
+        b = Bar(symbol=SYMBOL, tf=TF_15M, open_time_ms=T0,
+                open=1.0, high=2.0, low=0.5, close=1.5, volume=1.0)
+        assert b.close_time_ms == T0 + TF_15M.ms - 1, (
+            f"close_time_ms is {b.close_time_ms}, not the last millisecond of the period "
+            f"({T0 + TF_15M.ms - 1}): the adapter has invented its own close convention"
+        )
+        nxt = Bar(symbol=SYMBOL, tf=TF_15M, open_time_ms=T0 + TF_15M.ms,
+                  open=1.0, high=2.0, low=0.5, close=1.5, volume=1.0)
+        assert nxt.open_time_ms - b.close_time_ms == 1, (
+            "two adjacent bars must abut with exactly one millisecond between close and open: "
+            "any other gap means an instant belongs to two bars or to none"
+        )
+
+    def test_coverage_is_measured_against_the_period_the_bar_claims_to_be(self):
+        """`coverage` divides by the number of 1m bars the period SHOULD contain.
+
+        Off by one in the denominator and a 59-of-60 hour reports 100% complete — the number whose
+        entire job is to say "this bar is missing data" says the opposite, and it says it in the
+        direction that manufactures confidence. Nothing in `src/` reads this property today, which
+        is exactly why it needs a test: it will be wired to a completeness badge by someone who
+        trusts it, not by someone who re-derives it.
+        """
+        h = Bar(symbol=SYMBOL, tf=TF_1H, open_time_ms=T0, open=1.0, high=2.0, low=0.5,
+                close=1.5, volume=1.0, n_source_bars=59)
+        assert h.coverage == pytest.approx(59 / 60), (
+            f"an hour built from 59 of its 60 minutes reports coverage {h.coverage}, not "
+            f"{59/60}: the denominator is not the period's own expected bar count"
+        )
+        full = replace(h, n_source_bars=60)
+        assert full.coverage == pytest.approx(1.0)
+        # A 1m bar is its own source: the ratio is degenerate and the answer is the fixed 1.0.
+        m = Bar(symbol=SYMBOL, tf=TF_1M, open_time_ms=T0, open=1.0, high=2.0, low=0.5,
+                close=1.5, volume=1.0, n_source_bars=1)
+        assert m.coverage == 1.0
+
+    def test_floor_ms_lands_on_the_bar_that_contains_the_instant(self):
+        """`floor_ms` is the one method whose job is mapping an arbitrary instant onto the grid,
+        and the direction it rounds is the whole of its meaning.
+
+        Rounded the other way, an instant is attributed to the bar AFTER the one it happened in —
+        a fact filed one bar into the future, which is this project's one fatal class of bug. The
+        error is invisible to any caller that merely checks the result is a multiple of `tf.ms`,
+        which is why the assertions here are on the value and include the fixed point.
+        """
+        assert TF_1H.floor_ms(T0) == T0, (
+            "an instant already on the grid is a fixed point; moving it means floor_ms rounds up"
+        )
+        assert TF_1H.floor_ms(T0 + TF_1H.ms - 1) == T0, (
+            "the last millisecond of an hour belongs to that hour, not to the next one"
+        )
+        assert TF_1H.floor_ms(T0 - 1) == T0 - TF_1H.ms

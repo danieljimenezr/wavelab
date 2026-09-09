@@ -14,7 +14,9 @@ from dataclasses import dataclass
 import pytest
 
 from wavelab.core.clock import SimClock
+from wavelab.core.timeframes import BY_NAME, TF_1M
 from wavelab.core.types import Bar, Decision, MaturityLevel, Verdict
+from wavelab.engine.live import LiveEngine
 from wavelab.validation.replay import (
     ReplayDivergence,
     assert_replay_deterministic,
@@ -22,6 +24,8 @@ from wavelab.validation.replay import (
     replay,
     streaming,
 )
+
+from .conftest import SYMBOL, make_bars
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +164,61 @@ class TestTheHarnessContract:
             f"the clock did not follow the bars: {len(off)} of {len(seen)} bars were processed at "
             f"the wrong instant, first {off[0][0]} while the bar closed at {off[0][1]}"
         )
+
+
+class TestTheGateIsPointedAtTheEngineThatShips:
+    """Every engine above is a stub defined in this file.
+
+    So what the gate is proven to do, it is proven to do to twenty lines of EMA written to be
+    caught. `LiveEngine` — the one function the backtest and the live route both run, the thing the
+    gate was written for — is never handed to it. The stubs prove the harness works; this proves it
+    is aimed at something.
+    """
+
+    TRIGGER = "15m"
+
+    def _engine_factory(self):
+        """`LiveEngine` behind the harness's contract: state in, one bar in, output out.
+
+        `streaming` throws the bar array away before the engine ever sees it, which is the
+        operational definition of causal — the engine can only answer from what `on_bar` handed it.
+        The output is the decision card, because that is what reaches the user: verdict, points,
+        pivot timestamps, entry zone, stop, targets and R:R, every one of them a number somebody is
+        asked to risk money on.
+        """
+        trigger = BY_NAME[self.TRIGGER]
+
+        def on_bar(eng: LiveEngine, bar: Bar):
+            closed = eng.on_bar_1m(bar)
+            if not any(b.tf is trigger for b in closed):
+                return eng, None
+            return eng, eng.decide(self.TRIGGER, bar.close)
+
+        return streaming(on_bar, lambda: LiveEngine(SYMBOL, ["1m", self.TRIGGER], 4096,
+                                                    self.TRIGGER))
+
+    def test_the_real_engine_replays_identically_and_reads_no_bar_it_was_not_given(self):
+        """Two full replays must agree, and every prefix must agree with the full run.
+
+        The determinism half is the live one for an engine of this shape: `decide()` walks dicts
+        and detector state, and the day anybody stamps the card with the wall clock, seeds anything
+        unseeded, or lets an iteration order leak in, two runs over the same history stop matching
+        and no expected-value test in the suite notices — the numbers all still look plausible.
+        The prefix half is the standing guard: today `on_bar_1m` can only reach bars it was handed,
+        and this is what keeps that true the day somebody speeds up the warm-up by computing over
+        the whole array and slicing it.
+
+        33 hours of 1m bars: 133 trigger closes, 108 of them carrying hypotheses, so the card being
+        compared is a populated one rather than an empty shell.
+        """
+        bars = make_bars(2000, tf=TF_1M, seed=3)
+        cards = [c for c in replay(self._engine_factory(), bars) if c]
+        assert sum(1 for c in cards if c["hypotheses"]) >= 50, (
+            f"only {sum(1 for c in cards if c['hypotheses'])} of {len(cards)} cards carried a "
+            "hypothesis: the fixture is comparing mostly empty cards and would not notice a "
+            "divergence in the numbers that matter"
+        )
+        assert_replay_deterministic(self._engine_factory(), bars)
 
 
 class TestDiffPath:

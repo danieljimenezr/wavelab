@@ -218,19 +218,37 @@ class Ring:
         )
 
     def provisional_window(self, n: int) -> ProvisionalWindow:
-        """Window that INCLUDES the in-flight bar. For tentative annotation only."""
+        """Window that INCLUDES the in-flight bar. For tentative annotation only.
+
+        ``n`` counts the in-flight bar itself, so ``n=1`` is that bar alone — a chart asking for
+        "just the current candle" is the boundary case, not an error. It used to be: `n=1` built
+        `window(0)`, whose index array is empty, and died on `int(ts[-1])` with a bare IndexError
+        naming an axis rather than the argument. Anything below 1 is a caller that has miscounted
+        and is told so.
+        """
+        if n < 1:
+            raise ValueError(
+                f"provisional_window(n) counts the in-flight bar, so n must be >= 1 (got {n})"
+            )
         if self._prov is None:
             raise ValueError("no in-flight bar: call set_provisional() first")
-        w = self.window(max(0, n - 1))
         p = self._prov
         cat = lambda a, v: np.concatenate([a, np.array([v], dtype=a.dtype)])
+        if n == 1:
+            f = np.zeros(0, dtype=np.float64)
+            ts, op, hi, lo, cl, vol = np.zeros(0, dtype=np.int64), f, f, f, f, f
+            nsrc, gap = np.zeros(0, dtype=np.int32), np.zeros(0, dtype=bool)
+        else:
+            w = self.window(n - 1)
+            ts, op, hi, lo, cl, vol = w.ts, w.open, w.high, w.low, w.close, w.volume
+            nsrc, gap = w.n_source_bars, w.is_gap
         return ProvisionalWindow(
             symbol=self.symbol, tf=self.tf,
-            ts=cat(w.ts, p.open_time_ms),
-            open=cat(w.open, p.open), high=cat(w.high, p.high),
-            low=cat(w.low, p.low), close=cat(w.close, p.close),
-            volume=cat(w.volume, p.volume),
-            n_source_bars=cat(w.n_source_bars, p.n_source_bars),
-            is_gap=cat(w.is_gap, p.is_gap),
+            ts=cat(ts, p.open_time_ms),
+            open=cat(op, p.open), high=cat(hi, p.high),
+            low=cat(lo, p.low), close=cat(cl, p.close),
+            volume=cat(vol, p.volume),
+            n_source_bars=cat(nsrc, p.n_source_bars),
+            is_gap=cat(gap, p.is_gap),
             last_ts_ms=p.open_time_ms,
         )

@@ -63,6 +63,16 @@ Fibonacci level chosen is an implicit trial fitted to that same history. That is
 `trials.sqlite` records every configuration hash ever evaluated, and the Deflated Sharpe is
 computed with that real effective N.
 
+### 6. The test suite is held to the same standard, and it is written down
+
+A tool that refuses to flatter its user should not flatter itself about its own tooling. **[What the
+test suite protects, and what it does not](docs/TEST_COVERAGE.md)** is the honest statement: the
+kill rate per module measured by mutation rather than by line coverage, every fault deliberately
+left open with the reason, and — the part that matters — the properties nothing verifies at all.
+Two of the largest surfaces in the repo are among them: the 100 hypotheses have no test that runs
+a single one of their `signals()` methods, and `/decide`, the route the product is served through,
+has no test either.
+
 ---
 
 ## Design principles
