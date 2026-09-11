@@ -13,8 +13,12 @@ THREE DECISIONS THAT MAKE IT VIABLE:
 3. **PARTIAL states included**. A matcher that only looks for complete fives would never find an
    entry, because the entries live in half-built impulses.
 
-Cost: ~13 starts × 4 states × 2 directions ≈ 100 checks per update, and it is only recomputed when a
-new pivot is CONFIRMED (once every 6-20 bars). Cheaper than the indicator battery.
+Cost: ``max_from_edge + 1`` starts × 4 states × 2 directions — 32 checks per update at the shipped
+``max_from_edge = 3`` — and it is only recomputed when a new pivot is CONFIRMED (once every 6-20
+bars). Cheaper than the indicator battery. This line used to say "~13 starts ≈ 100 checks", which
+was the arithmetic of a second knob, ``max_starts``, that never once bound: right-anchoring makes
+the number of starting points identical to the number of end points, so ``max_from_edge`` was
+always the tighter of the two and the estimate was 3× the real cost.
 """
 
 from __future__ import annotations
@@ -62,10 +66,15 @@ class Hypothesis:
 @dataclass(frozen=True, slots=True)
 class MatcherConfig:
     #: How many pivots from the edge the last vertex may sit. Beyond that the structure has already
-    #: finished and produces no decision.
+    #: finished and produces no decision. Because every candidate is right-anchored and has a fixed
+    #: length, this ALSO fixes how many starting points are tried: exactly one per end point, so
+    #: ``max_from_edge + 1`` of them. There was a second knob here, ``max_starts = 13``, that
+    #: claimed to control that count and could not: each candidate's start is `end - k`, so the
+    #: earliest start the loop ever reaches is `n - max_from_edge - k`, which is never below
+    #: `n - max_starts - k` for any `max_starts >= max_from_edge`. It was an operator-facing dial
+    #: wired to nothing — turn it and the matcher searched exactly the same pivots — so it is gone
+    #: rather than fixed: this field is the axis it was pretending to be a second opinion on.
     max_from_edge: int = 3
-    #: How many starting points are tried backwards.
-    max_starts: int = 13
     #: Guideline weights. These are HAND-PICKED CONSTANTS: changing one is an experiment and goes to
     #: trials.sqlite, because tuning by eye without recording it is what makes the effective N lie.
     w_fib2: float = 0.30
@@ -156,7 +165,7 @@ def match_impulses(
         # Right-anchored: the candidate's end has to be near the edge.
         for end in range(n, max(n - cfg.max_from_edge - 1, k - 1), -1):
             start = end - k
-            if start < 0 or start < n - cfg.max_starts - k:
+            if start < 0:      # a slice guard: a negative start would wrap silently, not raise
                 continue
             seq = pivots[start:end]
             pts = tuple(p.price for p in seq)

@@ -1,6 +1,6 @@
 # What the test suite protects, and what it does not
 
-**947 tests, ~5.6 s, `pytest -m "not net"`.** One test is deselected by that flag (`net`, it hits
+**962 tests, ~6.0 s, `pytest -m "not net"`.** One test is deselected by that flag (`net`, it hits
 the real Binance archive). The suite gates deploys and it is no longer under five seconds.
 
 Two traps in that sentence, both measured. The flag is not a default: `pyproject.toml` sets
@@ -76,20 +76,24 @@ tidies the unrelated thing.
 |---|---|---|---|
 | `core/` (causality, ring, types, timeframes, clock) | 18 | 0 | 4 |
 | `waves/pivots.py`, `waves/store.py` | 10 | 0 | 3 |
-| `waves/rules.py`, `matcher.py`, `projection.py` | 37 | 3 | 2 |
+| `waves/rules.py`, `matcher.py`, `projection.py` | 41 | 0 | 2 |
 | `validation/battery.py`, `evaluate.py` | 33 | 0 | 2 |
-| `validation/expr.py`, `reality_check.py`, `csv_import.py` | 31 | 2 | 1 |
-| `feeds/`, `store/bars.py`, `store/hydrate.py` | 27 | 1 | 1 |
-| `engine/live.py`, `labeling/barriers.py`, `backtest/run.py` | 29 | 1 | 13 |
+| `validation/expr.py`, `reality_check.py`, `csv_import.py` | 32 | 1 | 1 |
+| `feeds/`, `store/bars.py`, `store/hydrate.py` | 28 | 0 | 1 |
+| `engine/live.py`, `labeling/barriers.py`, `backtest/run.py` | 30 | 0 | 13 |
 | the served decision path (`/api/decide`, the PUBLIC gate, `LiveEngine.decide`'s wire keys) | 10 | 0 | — |
 | `web/app.js`, decision panel only (the keys it reads off the card) | 4 | — | — |
 | `hypotheses/` (100 hypotheses, ~5,400 lines) — six properties, not their arithmetic | 11 | 2 | — |
 | the catalogue's titles (`Hypothesis.title`, `/api/hypotheses`, `web/assay.js`, hyp.{es,ca}.json) | 8 | 0 | — |
-| **Total, where it was measured** | **218** | **9** | **26** |
+| **Total, where it was measured** | **225** | **3** | **26** |
 | `server/app.py`, the three validation routes | **not measured** | — | — |
 
-So the honest headline is **218 of 227 observable faults closed in the modules that were
-measured.** The hypothesis library is no longer a blank row, but read its eleven with the caveat
+So the honest headline is **225 of 228 observable faults closed in the modules that were
+measured.** Seven of those were closed in one pass, all of them boundary or reach faults this
+document had itself declared untestable; the reasons it gave are dissected under "Faults
+deliberately left open" below, because four of the five were wrong. The observable total went from
+227 to 228 in the same pass: wiring `RETRACEMENTS` into `build_plan` turned a mutant that used to be
+equivalent — moving a number nothing read — into one that changes the entry zone on the card. The hypothesis library is no longer a blank row, but read its eleven with the caveat
 below: they are eleven faults against six PROPERTIES held over all 100 hypotheses, not eleven
 faults sampled across 5,400 lines of arithmetic. Most of that arithmetic is still unmeasured.
 
@@ -179,49 +183,112 @@ NumPy on `int(ts[-1])`), and that change made the original fault — `window(max
 identical. It is counted once, as closed, on the strength of the two tests that pin the new
 boundary; it is not also counted as an equivalent.
 
+A third source change was made while closing the `--quick` cutoff, and it is a refactor rather than
+a fix: the cutoff expression moved out of the `--quick` branch into a module-level `_quick_cutoff()`
+in `store/hydrate.py`. The expression is unchanged character for character and the long comment moved
+with it into the docstring, so public behaviour is identical — verified by the end-to-end test, which
+drives the real `hydrate(quick=True)` and not the helper. It is recorded because it is REACHABILITY,
+not tidying: the cutoff sat three lines above the first `httpx` call, so the only way to reach it was
+to run a hydration. The extraction is what lets the rule be asserted at 0.00 s across four timezones;
+the end-to-end test is what stops the extracted helper from being silently bypassed, and both are
+present. A refactor that exists to make something testable is still a change to the file under test,
+and it belongs in this list.
+
 ---
 
 ## Faults deliberately left open, and why
 
-### `waves/` — three, all the same shape
+One entry stands here. Six more used to, closed in a single pass, and the reasons this document gave
+for leaving them open are reproduced against each one below — because every one of those reasons was
+wrong, and wrong in the same way each time: **it described the hardest test it could think of, found
+that test bad, and stopped.** Four reasons covered the six faults; all four fell to an easier test
+that nobody had looked for. That is the failure mode to watch for in this section. If an entry here
+says "a test for this would have to X", the first question is whether it would.
 
-**The cost ceiling, the noise floor and the empty-zone check are pinned only away from their exact
-boundary.** Loosening `cost_r > max_cost_r` to `>=`, `stop_atr < min_stop_atr` to `<=`, or
-`lo >= hi` to `lo > hi` survives. Each needs a derived float to land *exactly* on a config constant
-— an arithmetic result equal to `0.20` or `0.75` to the last bit. A test would have to solve for the
-input that produces exact float equality and would then be pinned to that solution rather than to
-the rule. This is not the same as the `in_zone` edge, which **is** tested: there the comparison is
-against a published Fibonacci level a limit order can literally rest on, so the boundary is
-reachable in practice.
+### `validation/` — one
 
-### `validation/` — two
+**Blocks are cut from the tail rather than the head.** `Mc[:, : nb * L]` keeps the first `nb` whole
+blocks, so the final `n % L` observations — the most recent ones — are dropped. Taking
+`Mc[:, n - nb * L:]` instead drops the oldest ones. Re-measured this pass: the suite is **green**
+under that edit, so this is still a live survivor. Which end is a defensible design choice rather
+than a defect, and it now carries a comment in the source saying so — including the bound that makes
+it arbitrary: the `nb >= 30` guard forces `L <= n/30`, so under 3.3% of the sample is dropped either
+way, and `Mc` was centred over all `n` observations so neither end carries the mean. The comment also
+names the condition under which it would stop being arbitrary: at `nb = 4` this would be a quarter of
+the series, and then the end you keep is a real decision about which regime the null is drawn from.
 
-**The stationary bootstrap never starts a block at the last observation.** `rng.integers(0, n-1)`
-excludes the final index, so it is slightly under-sampled. The bias is real and pinning it needs a
-distributional test over many seeds; a single 50-index resample covers only about 31 distinct
-positions even unmutated, so any coverage assertion would be flaky by construction. A flaky test in
-a deploy gate costs more than this bias does.
+Do not confuse this with `nb = n // L` itself, which is a different edit on the same line and **is**
+killed: `nb` also decides the `nb >= 30` switch between the two estimators, so
+`max(1, n // L - 1)` re-routes borderline series onto the other one and
+`test_which_of_the_two_bootstraps_runs_is_decided_at_thirty_blocks` goes red. That conflation was
+made twice while closing this section. The block COUNT is guarded; the choice of END is not.
 
-**Blocks are cut from the tail rather than the head.** `n % L` observations are dropped either way.
-Which end is a defensible design choice, not a defect. It wants a comment in the source saying the
-choice is deliberate, not a test.
+### Closed this pass, and what the reason for leaving them open got wrong
 
-### `feeds/` — one
+**The cost ceiling and the noise floor** (`cost_r > max_cost_r` loosened to `>=`,
+`stop_atr < min_stop_atr` to `<=`). *The reason given:* a test would have to solve for an input
+whose arithmetic lands exactly on `0.20` or `0.75` to the last bit, and would then be pinned to that
+solution rather than to the rule. *Why it was wrong:* both thresholds are CONFIGURATION, and
+`build_plan` takes the config as an argument. Run the plan once, read the `cost_r` or `stop_atr` the
+function computed, and hand the same scenario back under `replace(PlanConfig(), max_cost_r=that)`.
+Neither threshold feeds the computation of the number compared against it, so the second run
+reproduces the identical float and the comparison sits exactly on equality — no float is solved for,
+nothing is written down, and the boundary follows the fee arithmetic if it ever changes. Each test
+is a pincer: accepted at the threshold, refused one ULP past it via `math.nextafter`. Without the
+second half both would also pass against the gate deleted outright — verified, deleting either gate
+turns the matching test red. `TestTheGatesDecideAtTheirOwnBoundary`, `tests/test_wave_rules.py`.
 
-**`--quick` computes its month cutoff from the local civil date rather than UTC.** For a two-hour
-window in CEST that also crosses a month boundary, `--quick` fetches 25 months instead of 24. Ingest
-is idempotent and these are whole-month keys, so no stored byte differs. The month list is
-observably different, so it is not an equivalent mutant in the strict sense — but everything
-downstream of it is identical, and a test for it would pin the clock rather than a property.
+**The empty-zone check** (`lo >= hi` tightened to `lo > hi`). *The reason given:* the same. *Why it
+was wrong:* this one needs no float at all. `lo == hi` is unreachable from `match_impulses` — every
+route needs a zero-length leg, which breaks R1 — but `build_plan` is exported and takes any
+`Hypothesis`, so the flat count is built by hand, and the test asserts R1 *does* reject it so its
+own premise fails loudly if that ever changes. Under the mutant the single surviving price is priced
+as a range and the user is refused by the FEE gate instead, told the round trip costs 150% of R for
+a zone that does not exist.
 
-### `engine/` — one
+**The stationary bootstrap never starts a block at the last observation**
+(`rng.integers(0, n)` → `(0, n - 1)`, both draw sites). *The reason given:* pinning it needs a
+distributional test over many seeds, and a single 50-index resample covers only ~31 positions, so
+any coverage assertion is flaky by construction. *Why it was wrong:* the argument is about ONE
+resample. Draw 120 of them from a single `default_rng(0)` and the union of their block starts is a
+fixed set of integers — deterministic, not probabilistic. It either reaches index 49 every run
+forever or never. Re-measured: unmutated, this seed first covers all 50 positions after 23
+resamples, so 120 is a 5× margin, and the test's docstring says so to stop anyone trimming it.
+The assertion is on block STARTS, not on visited indices: `i = (i + 1) % n` means index `n-1` is
+visited in nearly every resample even under the mutant, which is why `idx.max() < n` passes mutated.
+A continuation is always exactly `(prev + 1) % n`, so any other index is certainly a fresh draw;
+a fresh draw landing on the continuation index is missed, which makes the observed set a strict
+subset of the true starts — it can under-report coverage, never invent it.
+`test_every_observation_can_START_a_block_including_the_very_last_one`, `tests/test_assay.py`.
 
-**The gap counter's window length is unobservable here.** `gaps_in_window` is measured over 50
-trigger bars; changing it to 500 produces no difference at all on any fixture in this repo, because
-`make_bars` produces unbroken series and there is no gap anywhere in the ring to count. It is only
-reachable on a feed with real gaps *older* than the last 50 trigger bars. Genuinely unguarded,
-genuinely not mutation-testable here; a synthetic test whose only content is the number 500 would
-assert the constant against itself.
+**`--quick` computes its month cutoff from the local civil date rather than UTC**
+(`datetime.now(UTC)` → `datetime.now()`). *The reason given:* a test for it would pin the clock
+rather than a property. *Why it was wrong:* the property is "two machines at the same instant ask
+for the same months", and that needs the clock frozen as a CONTROLLED variable, not asserted. One
+instant (23:30 UTC on the last day of a month), four boxes from UTC-12 to UTC+14, one cutoff. The
+anti-tautology half is separate and necessary — agreement across timezones is also satisfied by a
+constant — so `test_the_cutoff_still_follows_the_utc_month` asserts that one hour crossing into a
+new UTC month moves the cutoff by exactly the length of the month it left, which is the
+`.replace(day=1)` snap. Verified against two further mutants: a hard-coded `date(2022, 3, 2)` and
+`.replace(day=1)` dropped both turn it red while leaving the timezone test green. A third test runs
+two full `hydrate(quick=True)` passes over the stub archive at one instant in two zones — it is the
+only test in the suite that enters the `--quick` branch at all, and it also pins `timedelta(days=730)`,
+which nothing did before. `TestQuickAsksForTheSameTwoYearsOnEveryMachine`,
+`tests/test_archive_and_store.py`.
+
+**The gap counter's window length is unobservable here.** *The reason given:* `gaps_in_window` is
+measured over 50 trigger bars, changing it to 500 makes no difference on any fixture, and a
+synthetic test whose only content is the number 500 would assert the constant against itself.
+*Two things wrong with that.* First it had the source backwards: the shipped value is
+`min(500, len(ring))` and 50 is the mutant, so the paragraph described the fault as the code.
+Second, the fixture objection assumed `make_bars` cannot produce a hole, and it can — drop all
+fifteen source minutes of a 15m period and no trigger bar is built, leaving a real timestamp gap
+that `Ring.window` recomputes from `np.diff(ts)`. Two such outages, at ages 298 and 119 in a ring of
+531, are outside the last 50 bars and inside 400. The test is not about the number: it asserts
+`ring.window(50).n_gaps == 0` as a stated precondition and then that the badge reports 2, and those
+two numbers cannot be the same number by construction. Verified to be about reach and not about the
+literal — `500 → 400` leaves it green; the kill band is any window below 299.
+`TestTheDataHealthBadge`, `tests/test_live_engine.py`.
 
 ---
 
@@ -292,16 +359,41 @@ by one to seven bars after a re-warm for the much milder reason that an EMA's me
 (`candles.engulfing_trend`, `mean_reversion.stretch_ema200_atr14`, the `trend` EMA stack); that is
 rounding, and it is not pinned.
 
-### Dead configuration
+### Dead configuration — both entries resolved, and they went opposite ways
 
-- `RETRACEMENTS` in `rules.py` has exactly one reference in the whole repo: its own definition.
-  `projection.py` open-codes `0.500, 0.786` instead. The *live* ratios are pinned by
-  `test_a_wave_two_entry_is_measured_from_the_end_of_wave_two`; the orphan copy is not, and should
-  be deleted or wired up rather than tested.
-- `max_starts` in `matcher.py` guards a branch that is unreachable under any shipped config: with
-  `max_from_edge = 3`, `start >= n - 3 - k`, which never falls below `n - max_starts - k` for
-  `max_starts >= 3`. It is an operator-facing knob that does nothing. A test here would test the
-  knob's inertness.
+Recorded rather than deleted, because "wire it up" and "delete it" were the right answers to two
+things that looked identical in a diff.
+
+- **`RETRACEMENTS` in `rules.py` is now wired up.** It had exactly one reference in the repo — its
+  own definition — while `projection.py` open-coded `0.500, 0.786` and `0.382, 0.500`. That is two
+  definitions of one published level: the zone drawn on the card followed the literals and the table
+  could have gone on claiming something else with nothing to notice. `build_plan` reads both bounds
+  from the table now. The values were checked bit-for-bit before the change (`struct.pack(">d", …)`
+  on both sides) and are unchanged, so **no ratio moved and no card changed** — this is not a
+  product change. Measured both directions afterwards: moving `w2`'s upper bound to 0.886 now turns
+  three tests red where before it turned none, and re-typing the literals back into `projection.py`
+  — behaviour-identical, so invisible to every other test in the suite — is caught by
+  `TestTheZoneIsReadFromTheRetracementTable`. That class is the only guard on the wiring itself, and
+  it names no Fibonacci number: it sets the row to `(0.0, 1.0)` and requires the zone to be the whole
+  of wave 1, then to `(0.0, 0.5)` and requires it to be the top half. `_fib_zone` sorts its two
+  outputs, so reading the two bounds in the wrong ORDER is an equivalent mutant here, not a hole.
+  `(core_lo, core_hi)` is still descriptive and still computed from by nothing: it is deliberately
+  not wired into `matcher.score_guidelines`, whose `0.618`/`0.382` are hand-picked SCORING constants
+  that go to trials.sqlite when they move, and coupling them would mean redrawing the entry zone
+  silently retunes the scorer that ranks the counts. That reasoning is now a comment above the table.
+- **`max_starts` in `matcher.py` is deleted.** It guarded a branch unreachable under any shipped
+  config, and the claim was verified exhaustively before acting — over `n` in 0..399 and `k` in 3..6
+  at the shipped `max_from_edge = 3`, the branch is reached 0 times; it first binds at
+  `max_starts <= 2`, below `max_from_edge`. The cause is that every candidate is right-anchored with
+  a fixed length, so each `end` yields exactly one `start = end - k` and the number of starting
+  points is identically `max_from_edge + 1`. It was a second dial on an axis another dial already
+  owned, and the tighter one always won. Deleted rather than "made to do what its name says",
+  because what its name says is what `max_from_edge` already does. Nothing outside `matcher.py`
+  referenced it — no config file, no route, no test. The module docstring's cost line was corrected
+  with it: it read "~13 starts ≈ 100 checks per update", which was this dead knob's arithmetic and
+  overstated the real cost by 3× (it is 4 × 4 × 2 = 32). `if start < 0: continue` is also provably
+  unreachable and was KEPT and labelled — it is a slice guard, not a knob, and a negative start
+  would wrap `pivots[start:end]` silently instead of raising.
 
 ---
 
@@ -582,8 +674,8 @@ changing the code means changing a number in a test and noticing.
 
 ```sh
 export PATH="/opt/homebrew/bin:$PATH"
-uv run pytest -m "not net"      # 947 passed, 1 deselected, ~5.6 s
-uv run pytest                   # 948 passed, ~10 s — RUNS the net test, and needs the internet
+uv run pytest -m "not net"      # 962 passed, 1 deselected, ~6.0 s
+uv run pytest                   # 963 passed, ~10 s — RUNS the net test, and needs the internet
 uv run ruff check .             # clean
 ```
 
@@ -596,3 +688,29 @@ To check a single fault: edit the source, run the suite, confirm the named test 
 verify with `shasum -a 256` that the file is byte-identical. Purge `__pycache__` between runs, or set
 `PYTHONDONTWRITEBYTECODE=1` — several of these faults are same-byte-length edits and a stale `.pyc`
 will keep executing the mutant after the revert, which produces a confidently wrong verdict.
+
+### When this document was last audited against itself
+
+A coverage document that is wrong about its own residual list is worse than none, and this one has
+been wrong. The last pass re-applied all seven faults from the previous round independently — six
+killed by the tests that claim them, one (`nb = n // L`) killed by a test nobody had connected to it
+— and then spot-checked nine claims it was NOT changing, drawn from nine different modules, by
+applying the mutant and watching the named test go red:
+
+| Claim spot-checked | Mutant applied | Held? |
+|---|---|---|
+| a bar owns the last ms of its period (`core/timeframes.py`) | `+ tf.ms - 1` → `+ tf.ms` | yes |
+| the base rate grades the move AFTER the signal bar (`validation/battery.py`) | `fwd` shifted back one bar | yes |
+| ingest keeps the FIRST of a duplicated minute (`store/bars.py`) | `keep="first"` → `"last"` | yes |
+| `SAFE_FUNCS` is frozen (`validation/expr.py`) | added `"apply": lambda f, x: f(x)` | yes |
+| the warm-up mask is what enforces `min_warmup` (`hypotheses/base.py`) | mask deleted | yes |
+| the cooldown debounces on the bare archetype (`backtest/run.py`) | key → archetype + direction | yes |
+| `provisional_window` refuses `n < 1` (`core/ring.py`) | `n < 1` → `n < 0` | yes |
+| a pivot is priced at its bar's wick (`waves/pivots.py`) | high/low swapped | yes |
+| blocks are cut from the tail (`validation/reality_check.py`) | `[:, :nb*L]` → `[:, n-nb*L:]` | **no — still a survivor, as this document says** |
+
+Nine of nine behaved as written. The one thing the audit found stale was in the paragraph describing
+the gap counter, which had the shipped constant and the mutant the wrong way round (it said the
+window was 50 and the mutant 500; the source ships 500). When adding an entry here, re-run at least
+half a dozen of the claims you are NOT touching — the entry that goes stale is never the one you are
+looking at.

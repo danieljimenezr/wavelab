@@ -366,6 +366,70 @@ class TestCatchUpMode:
         )
 
 
+class TestTheDataHealthBadge:
+    #: 5½ days of minutes, and two of the 15m periods in them never arrive at all: every one of
+    #: their fifteen source minutes is missing, so no trigger bar is built for them and the ring
+    #: carries a real hole in its timestamps rather than a flag someone set. Ages, counted back
+    #: from the last trigger bar, land at 298 and 119 — both outside the last 50 bars and both
+    #: well inside 400, which is what makes the badge's reach observable at all.
+    N_MINUTES = 8_000
+    OUTAGE_PERIODS = (232, 412)
+
+    def _engine_with_two_old_outages(self) -> LiveEngine:
+        drop = {i for p in self.OUTAGE_PERIODS for i in range(15 * p, 15 * p + 15)}
+        # 1m + 15m only: the 1h ring plays no part here and resampling it is pure cost.
+        e = LiveEngine(SYMBOL, ["1m", "15m"], ring_capacity=8192, trigger_tf="15m")
+        e.warmup(make_bars(self.N_MINUTES, tf=TF_1M, start_ms=T0, seed=11, drop=drop))
+        return e
+
+    def test_an_outage_older_than_fifty_trigger_bars_is_still_counted_on_the_badge(
+        self, monkeypatch
+    ):
+        """The gap counter has to reach as far back as the ring the analysis actually reads.
+
+        `gaps_in_window` is the only number on the badge that describes the SHAPE of the history,
+        as opposed to how fresh its last bar is, and `web/app.js` paints it as "n gaps" next to a
+        green dot. The bars an outage left behind do not age out of the analysis: a hole four days
+        back is still inside the ring that feeds the ATR, the ZigZag threshold and therefore every
+        entry zone drawn today. If the counter's window is shorter than the hole is old, the badge
+        goes back to reporting zero gaps while the series behind the chart still has one in it —
+        and it is exactly the stale, half-forgotten outage that nobody is watching for any more.
+
+        Both outages here are older than 50 trigger bars and younger than 400, so the count is a
+        statement about how deep the health line looks, not about the number it looks with: at 400
+        or at 500 the badge reports both, at 50 it reports neither.
+        """
+        e = self._engine_with_two_old_outages()
+        ring = e.state.ring(TF_15M)
+        assert len(ring) > 500, (
+            f"the ring holds {len(ring)} trigger bars: with 500 or fewer, every window length "
+            "collapses onto len(ring) and this test cannot tell them apart"
+        )
+        assert ring.window(50).n_gaps == 0, (
+            "the last 50 trigger bars are supposed to be unbroken — that is the whole premise: "
+            "a badge that only looks 50 bars back would see a perfectly clean series here"
+        )
+
+        # The clock sits one minute past the last bar the engine has, so the lag is a fraction of a
+        # trigger bar and the badge under test is the one a LIVE user is looking at.
+        now_ms = (e.state.health.last_closed_ms or 0) + TF_1M.ms
+        monkeypatch.setattr(live_module.time, "time", lambda: now_ms / 1000.0)
+        h = e.update_health(connected=True, reconnects=2, healed=0, silent_seconds=0.0)
+
+        assert e.state.health.mode is Mode.LIVE, (
+            f"precondition: the badge should be LIVE, it reads {e.state.health.mode}"
+        )
+        assert h.gaps_in_window == len(self.OUTAGE_PERIODS), (
+            f"{len(self.OUTAGE_PERIODS)} trigger bars are missing from the ring the engine is "
+            f"analysing and the badge reports {h.gaps_in_window} gap(s): the health line is not "
+            "looking back as far as the data it vouches for, so an outage disappears from the "
+            "interface while its hole is still shaping every ATR and every entry zone"
+        )
+        assert h.as_dict()["gaps_in_window"] == len(self.OUTAGE_PERIODS), (
+            "the count reaches `Health.as_dict`, which is what the badge is painted from"
+        )
+
+
 class TestTheDecisionCard:
     def test_the_verdict_never_goes_above_watch_while_the_maturity_is_prior(self, bars_20d):
         """PRIOR means not one trade of ours has resolved yet.

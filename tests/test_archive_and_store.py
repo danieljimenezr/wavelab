@@ -12,6 +12,7 @@ fault in any of them is invisible everywhere else.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import io
 import json
@@ -949,6 +950,146 @@ class TestHydrationWritesWhatTheURLPromised:
         assert len(out) == 3 and not out["is_gap"].any(), (
             f"the incomplete newest month was not refreshed: {len(out)} bars, "
             f"{int(out['is_gap'].sum())} still missing")
+
+
+def _clock_stopped_at(instant: datetime) -> type[datetime]:
+    """A `datetime` stand-in stopped at one instant that still answers `now` exactly as the real
+    one does: `now(UTC)` is that instant in UTC, `now()` is the same instant rendered as the
+    machine's naive local civil time.
+
+    The instant is the CONTROLLED variable — it is the only way to put two timezones at the same
+    moment — never the thing asserted. No test below cares which instant it is.
+    """
+
+    class _Stopped(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return instant.astimezone().replace(tzinfo=None)
+            return instant.astimezone(tz)
+
+    return _Stopped
+
+
+@contextlib.contextmanager
+def _a_machine_in(tz_name: str, instant: datetime, monkeypatch):
+    """Runs the body as if on a box configured for `tz_name`, with the clock stopped at `instant`.
+
+    `time.tzset()` is the part that bites: setting `os.environ["TZ"]` changes nothing until the C
+    library is told to re-read it, on macOS and on Linux both — without it every zone here would
+    quietly report the developer's own. Restored on the way out, because a leaked TZ re-times every
+    test that runs after this one.
+    """
+    before = os.environ.get("TZ")
+    os.environ["TZ"] = tz_name
+    time.tzset()
+    try:
+        monkeypatch.setattr(hydrate_mod, "datetime", _clock_stopped_at(instant))
+        yield
+    finally:
+        if before is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = before
+        time.tzset()
+
+
+# 23:30 UTC on the last day of a month. In Spain that is 01:30 on the 1st (CEST = UTC+2) — the run
+# that produced the fault — and in Kiritimati (UTC+14) it is the afternoon of the 1st. The hour is
+# inside the window where the local civil date and the UTC date name different MONTHS, which is the
+# only window in which the two answers can differ at all.
+A_MONTH_EDGE = datetime(2024, 3, 31, 23, 30, tzinfo=UTC)
+
+
+class TestQuickAsksForTheSameTwoYearsOnEveryMachine:
+    """`--quick` picks its months off a clock, and a clock has a timezone. The archive's month keys
+    do not: they are UTC, always. These tests are the only thing standing between that line and the
+    next person who "simplifies" `datetime.now(UTC)` to `datetime.now()`."""
+
+    # UTC-12 through UTC+14: the full span of inhabited civil dates at any one instant.
+    ZONES = ("Etc/GMT+12", "UTC", "Europe/Madrid", "Pacific/Kiritimati")
+
+    def test_machines_in_different_timezones_agree_at_the_same_instant(self, monkeypatch):
+        """Two boxes running `--quick` at the same moment must ask the archive for the same months.
+
+        Computed from the local civil date they do not. At 23:30 UTC on the last day of a month the
+        box in Spain is already on the 1st, and the `.replace(day=1)` snap turns that one hour into
+        a whole month: the same command fetches 25 months there and 24 here. Nothing downstream
+        corrupts — whole-month keys, idempotent ingest — which is exactly why it needs a test of its
+        own. The only symptom is that two machines disagree about what the history IS, on a run that
+        reported success and that nobody repeats.
+
+        The instant is frozen so that "the same moment" means something. The assertion is across
+        timezones, not across the calendar, so it says nothing about what today is.
+        """
+        seen = {}
+        for tz in self.ZONES:
+            with _a_machine_in(tz, A_MONTH_EDGE, monkeypatch):
+                seen[tz] = hydrate_mod._quick_cutoff()
+
+        assert len(set(seen.values())) == 1, (
+            "the --quick cutoff depends on the machine's timezone: at one single instant "
+            f"({A_MONTH_EDGE:%Y-%m-%d %H:%M} UTC) these boxes disagree about how far back to go — "
+            + ", ".join(f"{tz}→{c}" for tz, c in seen.items()))
+
+    def test_the_cutoff_still_follows_the_utc_month(self, monkeypatch):
+        """The agreement above is also satisfied by a cutoff that ignores the clock altogether — a
+        constant, or a snap that never moves — so on its own it would be worth nothing.
+
+        This is the other half: one hour that carries the UTC clock into a new month must move the
+        cutoff by exactly the length of the month it left, because the cutoff is snapped to the 1st.
+        Together the two say the cutoff is a function of the UTC month and of nothing else, without
+        pinning any particular date.
+        """
+        one_hour_later = A_MONTH_EDGE + timedelta(hours=1)   # 2024-04-01T00:30Z, a new UTC month
+        with _a_machine_in("UTC", A_MONTH_EDGE, monkeypatch):
+            before = hydrate_mod._quick_cutoff()
+        with _a_machine_in("UTC", one_hour_later, monkeypatch):
+            after = hydrate_mod._quick_cutoff()
+
+        march = date(2024, 4, 1) - date(2024, 3, 1)
+        assert after - before == march, (
+            f"crossing into a new UTC month moved the --quick cutoff by {after - before} "
+            f"({before} → {after}), not by the {march.days} days of the month it left: the cutoff "
+            "is not tracking the UTC month it is supposed to be snapped to")
+
+    async def test_the_quick_branch_uses_that_cutoff_and_not_a_clock_of_its_own(
+            self, tmp_path, monkeypatch):
+        """The rule is worth nothing unless the `--quick` branch is what applies it, and nothing
+        else in this suite runs `hydrate(quick=True)` — a branch left computing its own local date
+        would pass both tests above and still download a different history on every box.
+
+        So: two complete hydrations over the same stub archive, at the same instant, one in UTC and
+        one in Spain. 2022-04 is the month at stake — inside the cutoff the UTC clock produces,
+        outside the one the Spanish civil date produces — and it has to reach the store either way.
+        """
+        months = [date(2022, 3, 1), date(2022, 4, 1), date(2022, 5, 1)]
+        at_stake = date(2022, 4, 1)
+        files = {monthly_url("BTCUSDT", TF_1M, at_stake): _month_zip(at_stake)}
+        # Captured before the loop: `hydrate_mod.httpx` IS the httpx module, so the first patch
+        # would otherwise make the second iteration wrap the stub in another stub.
+        real_client = httpx.AsyncClient
+        transport = _archive_transport(files)
+
+        stored = {}
+        for tz in ("UTC", "Europe/Madrid"):
+            root = tmp_path / tz.replace("/", "_")
+            with _a_machine_in(tz, A_MONTH_EDGE, monkeypatch):
+                monkeypatch.setattr(
+                    hydrate_mod, "list_available_months", lambda *a, **kw: list(months))
+                monkeypatch.setattr(
+                    hydrate_mod.httpx, "AsyncClient",
+                    lambda *a, **kw: real_client(transport=transport, follow_redirects=True))
+                assert await hydrate_mod.hydrate("BTCUSDT", root, quick=True) == 0
+            stored[tz] = BarStore(root / "bars").months("BTCUSDT")
+
+        assert stored["UTC"] == stored["Europe/Madrid"], (
+            "the same --quick hydration, at the same instant, stored different months depending on "
+            f"the box's timezone: UTC got {stored['UTC']}, Europe/Madrid got "
+            f"{stored['Europe/Madrid']}")
+        assert f"{at_stake:%Y-%m}" in stored["UTC"], (
+            f"{at_stake:%Y-%m} is inside the two years --quick asks for and never reached the "
+            f"store ({stored['UTC']}); the two runs agree only because both are short")
 
 
 class TestTheWeightGovernor:

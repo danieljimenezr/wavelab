@@ -17,6 +17,7 @@ from dataclasses import dataclass
 
 from wavelab.core.types import Direction, TradePlan
 from wavelab.waves.matcher import Hypothesis
+from wavelab.waves.rules import RETRACEMENTS
 
 __all__ = ["PlanConfig", "PlanResult", "build_plan", "required_hit_rate"]
 
@@ -87,7 +88,12 @@ def build_plan(h: Hypothesis, price: float, atr: float, cfg: PlanConfig | None =
     if h.archetype == "w2":
         # Wave 2 complete, wave 3 beginning: Elliott's highest-quality entry.
         # Zone = 0.5-0.786 retracement of wave 1. Core: golden pocket 0.618-0.65.
-        lo, hi = _fib_zone(P[0], P[1], 0.500, 0.786)
+        # The two ratios come from `rules.RETRACEMENTS`, which is the one place they are defined.
+        # They used to be open-coded here as well, which is two definitions of one published level:
+        # the zone drawn on the card would have followed this literal and the table would have gone
+        # on claiming something else, with nothing to notice the difference.
+        zone_lo, zone_hi = RETRACEMENTS["w2"][:2]
+        lo, hi = _fib_zone(P[0], P[1], zone_lo, zone_hi)
         base = P[2]
         w1 = P[1] - P[0]
         targets = (base + w1 * 1.000, base + w1 * 1.618, base + w1 * 2.618)
@@ -95,7 +101,8 @@ def build_plan(h: Hypothesis, price: float, atr: float, cfg: PlanConfig | None =
         # Wave 4 complete, wave 5 beginning: lower confidence, and the stop is TIGHTER (P1 rather
         # than P0), so the R:R is usually worse even though it intuitively feels like the safer
         # entry.
-        lo, hi = _fib_zone(P[2], P[3], 0.382, 0.500)
+        zone_lo, zone_hi = RETRACEMENTS["w4"][:2]
+        lo, hi = _fib_zone(P[2], P[3], zone_lo, zone_hi)
         # Truncate the zone so it can never invade wave 1's territory: an entry in there would be
         # an entry on the wrong side of its own invalidation.
         if h.direction is Direction.LONG:

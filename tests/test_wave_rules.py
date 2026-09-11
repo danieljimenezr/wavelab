@@ -28,6 +28,7 @@ from wavelab.waves.matcher import (
 from wavelab.waves.projection import PlanConfig, build_plan
 from wavelab.waves.rules import (
     ARCHETYPES,
+    RETRACEMENTS,
     ImpulseState,
     RuleSet,
     check_impulse,
@@ -642,6 +643,228 @@ class TestCostFilter:
         assert not r.viable and "noise floor" in r.reasons[0]
         assert r.cost_r > 0 and r.rr_t2 > 0 and r.p_required > 0, (
             "a rejection has to bring its numbers too"
+        )
+
+
+class TestTheGatesDecideAtTheirOwnBoundary:
+    """★ Three gates in `build_plan` were pinned everywhere except at the value they compare to.
+
+    `cost_r > max_cost_r`, `stop_atr < min_stop_atr` and `lo >= hi` each survive being loosened or
+    tightened by one character, because every scenario in the suite sits well clear of the
+    threshold. The audit left them open on the grounds that a test would have to solve for an input
+    whose arithmetic lands exactly on 0.20 or 0.75 and would then be pinned to that solution
+    instead of to the rule.
+
+    It does not have to. Two of the three thresholds are CONFIGURATION: run the plan once, read the
+    `cost_r` or `stop_atr` the function itself computed, and hand the same scenario back under a
+    config whose threshold IS that number, bit for bit. The boundary is derived from the code at
+    runtime, so it moves with the arithmetic instead of pinning today's value of it, and the only
+    thing left for the assertion to turn on is whether the comparison is strict — which is exactly
+    what the mutants flip. It is the idiom `test_the_edge_of_the_zone_is_inside_the_zone` already
+    uses on `in_zone`, applied to the two gates that reject.
+
+    What is asserted AT equality is a rule, not a measurement, and the source states the rule twice
+    over in each case. `max_cost_r` is documented as the maximum tolerable cost — "Above it the
+    trade is REJECTED" — and the refusal sentence quotes it back to the user as "maximum 20%", so a
+    cost landing exactly on 20% has to be tradable or the tool is refusing at the number it
+    publishes as allowed. `min_stop_atr` is refused with "it sits inside the noise floor (<0.75
+    ATR)", and a stop exactly at the floor is not inside it. The empty-zone gate is the one that
+    goes the other way: `lo == hi` is a zone with nowhere to enter, and it has to be refused.
+    """
+
+    PTS: ClassVar[tuple[float, ...]] = (70000.0, 80000.0, 74000.0)
+    PRICE: ClassVar[float] = 75000.0
+    #: Chosen so the plan comes back clean: stop ~2.6 ATR, inside `min_stop_atr` and
+    #: `max_stop_atr` both, so neither gate under test is standing behind the other one.
+    ATR: ClassVar[float] = 1500.0
+
+    def _accepted_baseline(self):
+        h = _hypothesis(self.PTS)
+        base = build_plan(h, self.PRICE, self.ATR, PlanConfig())
+        assert base.viable and base.size_factor == 1.0 and not base.reasons, (
+            f"the baseline has to be an unremarkable accepted plan before a threshold is moved "
+            f"onto one of its own numbers: viable={base.viable}, size={base.size_factor}, "
+            f"reasons {base.reasons}"
+        )
+        return h, base
+
+    def test_a_cost_landing_exactly_on_the_ceiling_is_still_tradable(self):
+        """`max_cost_r` is a MAXIMUM, and the refusal sentence tells the user so.
+
+        Loosen the gate to `cost_r >= cfg.max_cost_r` and the engine rejects a trade whose fees
+        take exactly 20% of R while printing "(maximum 20%)" as the reason — a refusal that
+        contradicts itself on its own line. The reverse error is worse in money: a gate that reads
+        `>=` on a tightened config rejects the whole tail of trades sitting on the ceiling, and
+        because the ceiling is the FEE gate, that tail is every trade a fee change has just pushed
+        onto the limit.
+        """
+        h, base = self._accepted_baseline()
+
+        at_ceiling = replace(PlanConfig(), max_cost_r=base.cost_r)
+        r = build_plan(h, self.PRICE, self.ATR, at_ceiling)
+        assert r.viable, (
+            f"a cost of exactly {base.cost_r!r} of R was refused under a max_cost_r of exactly "
+            f"that same float: the gate rejects AT its ceiling rather than above it, so the "
+            f"maximum the config documents and the refusal sentence quotes is not the maximum "
+            f"being applied. Reasons: {r.reasons}"
+        )
+
+        # The other half of the pincer. Without it the assertion above would also pass on a gate
+        # deleted outright, which is the failure mode this file has been caught by before.
+        # One ULP under the computed cost is the largest ceiling this trade genuinely exceeds.
+        just_under = replace(PlanConfig(), max_cost_r=math.nextafter(base.cost_r, 0.0))
+        r_under = build_plan(h, self.PRICE, self.ATR, just_under)
+        assert not r_under.viable and "fees" in r_under.reasons[0], (
+            f"cost {base.cost_r!r} of R was accepted under a ceiling of "
+            f"{just_under.max_cost_r!r} — one ULP lower, and genuinely exceeded. The acceptance "
+            f"one ULP higher is therefore not the gate deciding. Reasons: {r_under.reasons}"
+        )
+
+    def test_a_stop_landing_exactly_on_the_noise_floor_is_still_tradable(self):
+        """`min_stop_atr` is the floor of what is tradable, not the first value refused.
+
+        Loosen the gate to `stop_atr <= cfg.min_stop_atr` and a stop measuring exactly 0.75 ATR is
+        thrown out as sitting "inside the noise floor (<0.75 ATR)" — a sentence that says, in the
+        same breath, that it is not inside it. The stop here comes from the invalidation, so this
+        gate is the only thing standing between the user and a structurally correct stop being
+        discarded on a rounding of the volatility estimate.
+        """
+        h, base = self._accepted_baseline()
+
+        at_floor = replace(PlanConfig(), min_stop_atr=base.stop_atr)
+        r = build_plan(h, self.PRICE, self.ATR, at_floor)
+        assert r.viable, (
+            f"a stop of exactly {base.stop_atr!r} ATR was refused under a min_stop_atr of exactly "
+            f"that same float: the gate refuses AT the floor rather than below it, so the floor "
+            f"the refusal sentence prints as '<{base.stop_atr}' is not the floor being applied. "
+            f"Reasons: {r.reasons}"
+        )
+
+        just_over = replace(PlanConfig(), min_stop_atr=math.nextafter(base.stop_atr, math.inf))
+        r_over = build_plan(h, self.PRICE, self.ATR, just_over)
+        assert not r_over.viable and "noise floor" in r_over.reasons[0], (
+            f"a stop of {base.stop_atr!r} ATR was accepted under a floor of "
+            f"{just_over.min_stop_atr!r} — one ULP higher, so it is genuinely below it. The "
+            f"acceptance one ULP lower is therefore not the gate deciding. "
+            f"Reasons: {r_over.reasons}"
+        )
+
+    def test_an_entry_zone_of_zero_width_is_refused_as_an_empty_zone(self):
+        """`lo >= hi` is the only one of the three that has to refuse at equality: a zone whose two
+        edges are the same price is not a narrow zone, it is no zone at all.
+
+        Zero width is NOT reachable from `match_impulses`, and that is worth saying rather than
+        implying: the matcher only emits counts `check_impulse` calls valid, and every route to
+        `lo == hi` needs a leg of zero length — R1 on the w2 path, and on the w4 path a wave 2
+        finishing ABOVE wave 1's top, since otherwise the truncation against `P1 * 1.0005` pushes
+        `lo` past `hi` and the gate fires on the strict `>` either way. So the hypothesis is built
+        here by hand. `build_plan` is exported and takes any `Hypothesis`; a flat top, a double
+        bottom or a series priced to the tick is exactly the input
+        `test_two_pivots_at_the_same_price_do_not_take_the_engine_down` already treats as ordinary,
+        and this is the gate that decides what happens when one reaches the planner.
+
+        Tighten it to `lo > hi` and the single surviving price is priced as if it were a zone: the
+        entry lands on the invalidation, the risk collapses to the cushion, and the user is refused
+        by the FEE gate instead — told the round trip costs 150% of R, for a zone that does not
+        exist. A rejection in this tool is meant to be an argument the user can push back on, and
+        that one is an argument about the wrong thing.
+        """
+        flat = (79000.0, 79000.0, 79000.0)
+        v = check_impulse(list(flat), Direction.LONG)
+        assert not v.valid and "R1" in v.broken, (
+            f"a wave 1 of zero length is expected to break R1 and be filtered out of the matcher; "
+            f"it now reports valid={v.valid}, broken={list(v.broken)}. If this count has become "
+            "legal, the zero-width zone is reachable from real pivots and this test is no longer "
+            "the hand-built case its docstring describes"
+        )
+        h = Hypothesis(ImpulseState.AT_2, Direction.LONG, _pivots(flat), flat, 0.8, {},
+                       v.invalidation_price, v.invalidation_rule, ARCHETYPES[ImpulseState.AT_2])
+
+        r = build_plan(h, 79000.0, 100.0, PlanConfig())
+        assert r.plan is None, (
+            f"a plan was returned for an entry zone of zero width: "
+            f"{r.plan.entry_lo}-{r.plan.entry_hi}. There is one price in it, `in_zone` is true at "
+            f"that float and nowhere else, and the card offers it as a range"
+        )
+        assert "entry zone is empty" in r.reasons[0], (
+            f"the zone has zero width and the refusal reads {r.reasons[0]!r}: it fell through the "
+            "empty-zone gate and was caught by a later one, so the user is given a reason about "
+            "fees or volatility for a zone that has nowhere to enter at all"
+        )
+
+
+class TestTheZoneIsReadFromTheRetracementTable:
+    """★ `RETRACEMENTS` was dead configuration and is now the single definition of the published
+    entry zone — `build_plan` reads both bounds out of it instead of open-coding 0.500/0.786 and
+    0.382/0.500. That change is only worth something while it stays true, and nothing held it down:
+    re-typing the four literals back into `projection.py` changes no behaviour, so every other test
+    in this file stays green while the table quietly becomes an orphan again. Measured, not
+    assumed — the open-coded version passes the whole suite.
+
+    So this is the test of the WIRING, and it is the only one. Move the table and the zone the card
+    draws has to move with it.
+
+    Neither case names a Fibonacci number. Both state what a retracement ratio MEANS on the leg it
+    is measured against — 0.0 is the end of the leg, 1.0 is its start, 0.5 is halfway back — so the
+    expected zone is written in terms of the vertices and never as a float solved for in advance.
+    If `_fib_zone`'s arithmetic is ever rewritten, these follow it.
+
+    What they cannot see: `_fib_zone` sorts its two outputs, so reading the table's two bounds in
+    the wrong order produces the identical zone. That swap is an equivalent mutant here, not a hole.
+    """
+
+    #: Wave 1 runs 100 → 200 and wave 3 runs 150 → 300, so every zone below is a round fraction of
+    #: a leg whose ends are in the fixture rather than in the assertion.
+    W2_PTS: ClassVar[tuple[float, ...]] = (100.0, 200.0, 150.0)
+    W4_PTS: ClassVar[tuple[float, ...]] = (100.0, 200.0, 150.0, 300.0, 250.0)
+
+    def test_the_wave_two_zone_follows_the_w2_row(self, monkeypatch):
+        """Both bounds, not one. The first case moves them together and the second moves only the
+        far one, so a `build_plan` that read slot 0 twice — or read the table for one edge and kept
+        a literal for the other — fails the second case while passing the first."""
+        h = _hypothesis(self.W2_PTS)
+        start, end = self.W2_PTS[0], self.W2_PTS[1]        # wave 1: 100 → 200
+
+        monkeypatch.setitem(RETRACEMENTS, "w2", (0.0, 1.0, 0.618, 0.650))
+        r = build_plan(h, 135.0, 5.0, PlanConfig())
+        assert r.viable, r.reasons
+        assert (r.plan.entry_lo, r.plan.entry_hi) == pytest.approx((start, end)), (
+            f"with the w2 row set to retrace between 0.0 and 1.0 of wave 1, the zone is the whole "
+            f"of wave 1 — {start} to {end} — and the plan drew {r.plan.entry_lo}-{r.plan.entry_hi}. "
+            "The zone is not being measured from this table, so `RETRACEMENTS` is describing a "
+            "level the product does not use"
+        )
+
+        monkeypatch.setitem(RETRACEMENTS, "w2", (0.0, 0.5, 0.618, 0.650))
+        r = build_plan(h, 135.0, 5.0, PlanConfig())
+        assert r.viable, r.reasons
+        assert (r.plan.entry_lo, r.plan.entry_hi) == pytest.approx(((start + end) / 2, end)), (
+            f"only the far bound of the w2 row moved (1.0 → 0.5) and the zone should have pulled "
+            f"back to halfway down wave 1, {(start + end) / 2} to {end}; it drew "
+            f"{r.plan.entry_lo}-{r.plan.entry_hi}. One of the two bounds is not coming from the row"
+        )
+
+    def test_the_wave_four_zone_follows_the_w4_row(self, monkeypatch):
+        """The second reading site. `build_plan` looks the table up twice, and a wiring that
+        covered only the w2 branch would leave the shallower, lower-confidence archetype still
+        open-coded — the half nobody looks at."""
+        h = _hypothesis(self.W4_PTS)
+        assert h.archetype == "w4"
+        start, end = self.W4_PTS[2], self.W4_PTS[3]        # wave 3: 150 → 300
+
+        monkeypatch.setitem(RETRACEMENTS, "w4", (0.0, 0.5, 0.382, 0.450))
+        r = build_plan(h, 235.0, 3.0, PlanConfig())
+        assert r.viable, r.reasons
+        assert (r.plan.entry_lo, r.plan.entry_hi) == pytest.approx(((start + end) / 2, end)), (
+            f"the w4 row was set to give back between 0.0 and 0.5 of wave 3, so the zone is the "
+            f"top half of wave 3, {(start + end) / 2} to {end}; the plan drew "
+            f"{r.plan.entry_lo}-{r.plan.entry_hi}. The w4 branch is not reading the table"
+        )
+        # Deliberately clear of the P1 * 1.0005 truncation (200.1 here): this test is about where
+        # the zone is read from, and letting the guard bite would hide that behind a clamp.
+        assert r.plan.entry_lo > self.W4_PTS[1] * 1.0005, (
+            "the fixture is meant to keep the zone above wave 1's top so the truncation never "
+            "fires; if it now binds, this test is measuring the clamp and not the table"
         )
 
 

@@ -143,6 +143,17 @@ def reality_check(
     L = max(2, round(block))
     nb = n // L
     if nb >= 30:
+        # `n % L` observations do not fit a whole block and are dropped. Taking them off the TAIL
+        # rather than the head is deliberate and, inside this branch, close to arbitrary: the
+        # `nb >= 30` guard forces L <= n/30, so what is dropped is under 3.3% of the sample either
+        # way, and `Mc` was centred using all n observations, so neither end carries the mean.
+        #
+        # It is written down because it is invisible: a mutation audit flipped this slice to drop
+        # the oldest instead of the newest and the whole suite stayed green, which is correct — the
+        # two are not distinguishable at this size — but "no test caught it" reads like a hole until
+        # someone works out why it is not one. If the guard ever drops below 30 blocks this stops
+        # being arbitrary: at nb = 4 it would be a quarter of the series, and then the end you keep
+        # is a real decision about which regime the null is drawn from.
         B = Mc[:, : nb * L].reshape(K, nb, L).mean(axis=2)     # (K, n_blocks)
         for b in range(n_boot):
             idx = rng.integers(0, nb, size=nb)

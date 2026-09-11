@@ -1753,6 +1753,47 @@ class TestTheBootstrapItself:
             f"with a mean block of 10 most steps should continue the previous run; only "
             f"{consecutive} of 199 did, which is a shuffle, not a block bootstrap")
 
+    def test_every_observation_can_START_a_block_including_the_very_last_one(self):
+        """Draw the block starts from `integers(0, n-1)` and the final observation never begins a
+        block, so the resample is systematically short of the END of the series — which for a
+        returns series is the most recent data, the part a user is actually betting on. The null
+        distribution then gets built out of a sample that leans on the older regime, and the
+        correction answers a question about last year.
+
+        WHY ONE RESAMPLE CANNOT SHOW THIS, and why this test is not flaky. A single 50-index
+        resample draws only ~11 starts and so covers about a fifth of the positions; asserting
+        coverage from one draw would fail at random. This draws MANY resamples from one fixed
+        seed, which makes the union of their starts a fixed set of integers, not a random one: it
+        either reaches index 49 on every run forever, or it never does.
+
+        THE COUNT IS LOAD-BEARING. The unmutated bootstrap first covers all 50 positions after 23
+        resamples with this seed; 120 is a 5x margin. Do not trim it to speed the suite up — at
+        6,000 loop iterations it is already invisible in the runtime, and the margin is what
+        stops a legitimate change to the draw order from turning this into a flaky gate.
+        """
+        n, draws = 50, 120
+        rng = np.random.default_rng(0)
+        started_at: set[int] = set()
+
+        for _ in range(draws):
+            idx = stationary_bootstrap_indices(n, 5.0, rng)
+            # STARTS, not visits. A continuation is always exactly (previous + 1) % n, so the wrap
+            # makes index n-1 appear in almost every resample even when nothing ever starts there
+            # — assert on `idx` itself and the whole bias is invisible. Any index that is NOT the
+            # continuation is certainly a fresh draw; a fresh draw that happens to land on the
+            # continuation index is missed, which only shrinks this set. It is a subset of the
+            # true starts, so it can under-report coverage but never invent it.
+            started_at.add(int(idx[0]))
+            started_at.update(
+                int(idx[t]) for t in range(1, n) if idx[t] != (idx[t - 1] + 1) % n)
+
+        missing = sorted(set(range(n)) - started_at)
+        assert not missing, (
+            f"over {draws} resamples of {n} observations, no block ever started at "
+            f"{missing} — those observations can only ever be reached by wrapping into them from "
+            f"their predecessor, so they are under-sampled"
+            + (f", and index {n - 1} is the newest bar in the series" if n - 1 in missing else ""))
+
     def test_the_block_length_tracks_the_dependence_it_has_to_preserve(self):
         """The block length is the one knob the bootstrap's honesty rests on, and nothing pinned it.
 

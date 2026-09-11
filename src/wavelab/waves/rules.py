@@ -28,6 +28,7 @@ from wavelab.core.types import Direction, RuleVerdict
 
 __all__ = [
     "ARCHETYPES",
+    "RETRACEMENTS",
     "ImpulseState",
     "RuleSet",
     "check_impulse",
@@ -177,7 +178,19 @@ def invalidation_for(state: ImpulseState, points: list[float],
 
 # ---------------------------------------------------------------------------- Fibonacci
 
-#: Typical retracements per wave. The "golden pocket" 0.618-0.65 is the core of the w2 zone.
+#: Typical retracements per wave, as ``(min, max, core_lo, core_hi)``. The "golden pocket"
+#: 0.618-0.65 is the core of the w2 zone.
+#:
+#: ``(min, max)`` is the PUBLISHED ENTRY ZONE and this table is where it is defined:
+#: ``projection.build_plan`` reads it from here. Both bounds used to be open-coded there as well,
+#: so a published Fibonacci level had two definitions and nothing would have gone red if they
+#: drifted apart — this table would have gone on saying 0.786 while the zone actually drawn on the
+#: card followed whatever literal sat in projection.py.
+#:
+#: ``(core_lo, core_hi)`` is descriptive: it names the pocket, and nothing computes from it. It is
+#: deliberately NOT wired into `matcher.score_guidelines`, whose 0.618 and 0.382 are hand-picked
+#: SCORING constants that go to trials.sqlite when they move. Coupling them would mean that
+#: redrawing the entry zone silently retunes the scorer that ranks the counts.
 RETRACEMENTS = {
     "w2": (0.500, 0.786, 0.618, 0.650),   # (min, max, core_lo, core_hi)
     "w4": (0.382, 0.500, 0.382, 0.450),
