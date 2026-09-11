@@ -212,7 +212,13 @@ class LiveEngine:
                     "entry_lo": round(r.plan.entry_lo, 2), "entry_hi": round(r.plan.entry_hi, 2),
                     "stop": round(r.plan.stop, 2),
                     "targets": [round(t, 2) for t in r.plan.targets],
-                    "rr_t2": round(r.rr_t2, 2), "cost_r": round(r.cost_r, 4),
+                    # Both ratios travel, and the card shows which is which. `rr_t2` is quoted at
+                    # `price` — the close the backtest books at, and a fill you can always get.
+                    # `rr_in_zone` is the better case that needs a resting limit to actually fill,
+                    # so it can never be the headline: it is the number the card used to quote
+                    # alone while the results measured the other one.
+                    "rr_t2": round(r.rr_t2, 2), "rr_in_zone": round(r.rr_in_zone, 2),
+                    "cost_r": round(r.cost_r, 4),
                     "p_required": round(r.p_required, 4), "stop_atr": round(r.stop_atr, 2),
                     "size_factor": round(r.size_factor, 3),
                 }
@@ -221,8 +227,15 @@ class LiveEngine:
 
         # PRIOR level: the expectancy table is hand-written and not a single trade has resolved.
         # We can WATCH, never mark as actionable.
-        verdict = Verdict.WATCH if (out and best_in_zone) else (
-            Verdict.WATCH if out else Verdict.NO_TRADE)
+        #
+        # So `best_in_zone` does NOT move the verdict, and this used to be written as a ternary
+        # whose two branches were both WATCH — code shaped like a decision that decided nothing,
+        # and measured dead: 311 of 446 WATCHes on the 20-day fixture had nothing in any zone and
+        # were indistinguishable from the 135 that did. What being in a zone changes today is the
+        # REASON below, which is the thing the reader acts on. When maturity rises past PRIOR this
+        # is the line that has to learn the difference, and it should be rewritten then rather
+        # than left looking as though it already had.
+        verdict = Verdict.WATCH if out else Verdict.NO_TRADE
         reasons = []
         if not out:
             reasons.append("no structure satisfies the hard rules right now")

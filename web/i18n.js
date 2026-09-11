@@ -93,9 +93,15 @@ const EN = {
   'hyp.entry_zone': 'entry zone',
   'hyp.stop': 'stop',
   'hyp.targets': 'targets',
-  'hyp.arith': 'R:R to T2 <b>{rr}</b> · stop at <b>{atr} ATR</b><br>'
+  // {rr} arrives already marked up, because what goes in that slot depends on whether the price
+  // is inside the entry zone: see `hypothesisRow` in app.js. The bold belongs to the headline
+  // ratio wherever it lands, never to the in-zone one.
+  'hyp.arith': 'R:R to T2 {rr} · stop at <b>{atr} ATR</b><br>'
     + 'cost <b>{cost}%</b> of R · size <b>{size}%</b><br>'
     + 'this R:R needs you to be right <b>{p}%</b> of the time',
+  // The headline is what buying at market gets you; {zone} is the better case and is conditional
+  // on a fill nobody is promised, so it is worded as a condition and left unbolded.
+  'hyp.rr_now_zone': '<b>{now}</b> now — {zone} if your limit fills in the zone',
   'panel.maturity': 'level {n} · prior',
   'panel.ranked': 'ranked hypotheses',
   'panel.footer': 'A <b>visual</b> tool. It places no orders.<br>'
@@ -252,9 +258,11 @@ const ES = {
   'hyp.entry_zone': 'zona de entrada',
   'hyp.stop': 'stop',
   'hyp.targets': 'objetivos',
-  'hyp.arith': 'R:R a T2 <b>{rr}</b> · stop a <b>{atr} ATR</b><br>'
+  'hyp.arith': 'R:R a T2 {rr} · stop a <b>{atr} ATR</b><br>'
     + 'coste <b>{cost}%</b> de R · tamaño <b>{size}%</b><br>'
     + 'este R:R exige acertar el <b>{p}%</b> de las veces',
+  'hyp.rr_now_zone': '<b>{now}</b> comprando ahora — {zone} si tu orden límite llega a '
+    + 'ejecutarse en la zona',
   'panel.maturity': 'nivel {n} · prior',
   'panel.ranked': 'hipótesis ordenadas',
   'panel.footer': 'Herramienta <b>visual</b>. No ejecuta órdenes.<br>'
@@ -412,9 +420,11 @@ const CA = {
   'hyp.entry_zone': 'zona d\'entrada',
   'hyp.stop': 'stop',
   'hyp.targets': 'objectius',
-  'hyp.arith': 'R:R a T2 <b>{rr}</b> · stop a <b>{atr} ATR</b><br>'
+  'hyp.arith': 'R:R a T2 {rr} · stop a <b>{atr} ATR</b><br>'
     + 'cost <b>{cost}%</b> de R · mida <b>{size}%</b><br>'
     + 'aquest R:R exigeix encertar el <b>{p}%</b> de les vegades',
+  'hyp.rr_now_zone': '<b>{now}</b> comprant ara — {zone} si la teva ordre límit arriba a '
+    + 'executar-se a la zona',
   'panel.maturity': 'nivell {n} · prior',
   'panel.ranked': 'hipòtesis ordenades',
   'panel.footer': 'Eina <b>visual</b>. No executa ordres.<br>'
@@ -1085,6 +1095,16 @@ const PATTERNS = [
   }],
   // The dollar signs live INSIDE the captured groups: `$` followed by a digit is the replacement
   // syntax, and a template written as `$$1` is a bug waiting for the first user with a price.
+  // The refusal that only became reachable once the card started quoting the fill price: a long
+  // whose market is already BELOW its own stop. It has to read as a dead count, not as a worse
+  // entry, because a reader who takes it for the latter will still try to buy it.
+  [new RegExp('^price (\\$.+?) is already past the stop (\\$.+?): this count is over, and buying '
+    + 'here is a loss on the first tick\\.$'), {
+    es: 'el precio $1 ya ha rebasado el stop $2: este recuento ha terminado, y comprar aquí es '
+      + 'una pérdida en el primer tick.',
+    ca: 'el preu $1 ja ha depassat el stop $2: aquest recompte s\'ha acabat, i comprar aquí és '
+      + 'una pèrdua al primer tick.',
+  }],
   [/^price (\$.+?) outside the zone (\$.+?)-(\$.+?)$/, {
     es: 'precio $1 fuera de la zona $2-$3',
     ca: 'preu $1 fora de la zona $2-$3',

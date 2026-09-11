@@ -311,6 +311,35 @@ function hypothesisRow(h, top) {
       <div class="why">${h.reasons.map((r) => `<div>· ${tx(r)}</div>`).join('')}</div></div>`;
   }
 
+  // TWO ratios, and only one of them is the headline. `rr_t2` is quoted at the close the backtest
+  // books at, which is a fill you can always get by buying at market; `rr_in_zone` needs a limit
+  // order resting in the zone to actually fill, and a limit order may never fill. Quoting the
+  // in-zone figure on its own — which this card used to do — flattered the reader by a median
+  // 1.65R against what the results measured.
+  //
+  // So the better case is named as a CONDITION ("… if your limit fills in the zone") rather than
+  // set beside the headline as a second bare figure, and it stays unbolded: the bold belongs to
+  // the number you size on, wherever it lands, and bolding the other one is how a reader ends up
+  // sizing on a limit order nobody promised them.
+  //
+  // THE SECOND FIGURE IS DROPPED ONLY WHEN THERE IS NOTHING TO SAY, and being in the zone is not
+  // that condition. This card used to test `h.in_zone`, on the argument that inside the zone the
+  // two describe the same trade and agree to within rounding. They do not. The two are the same
+  // ratio read at two entry prices and the gap grows with the distance from the zone's midpoint;
+  // the zone is 28.6% of wave 1 wide, which against these risks is a long way. Measured over six
+  // months of 4h bars, of 273 viable in-zone plans 99.6% differed by more than the two decimals
+  // this card prints, by a median 0.78R — 19.9% of the zone figure — and by up to 2.95R. Dropping
+  // the second number there hid the largest disagreements from the reader at the one moment the
+  // card is telling them the price is where they wanted it.
+  //
+  // Both numbers arrive already rounded to 2dp from `decide()`, so equality here is equality at
+  // the card's own precision: the one figure stands alone exactly when a second would print the
+  // same digits. A payload with no `rr_in_zone` at all — an older server against a newer page —
+  // falls into the same branch rather than rendering the string "undefined".
+  const rr = (h.rr_in_zone == null || h.rr_in_zone === h.rr_t2)
+    ? `<b>${h.rr_t2}</b>`
+    : t('hyp.rr_now_zone', { now: h.rr_t2, zone: h.rr_in_zone });
+
   // The arithmetic of a REJECTION is shown exactly like the arithmetic of an acceptance. A "no"
   // without numbers is an opinion; with numbers it is an argument you can argue back against.
   return `<div class="hyp${top ? ' top' : ''}">${head}
@@ -322,7 +351,7 @@ function hypothesisRow(h, top) {
     <div class="row"><span class="lbl">${t('hyp.targets')}</span>
       <b>${h.targets.map(money).join(' · ')}</b></div>
     <div class="arith">${t('hyp.arith', {
-      rr: h.rr_t2,
+      rr,
       atr: h.stop_atr,
       cost: (h.cost_r * 100).toFixed(1),
       size: (h.size_factor * 100).toFixed(0),

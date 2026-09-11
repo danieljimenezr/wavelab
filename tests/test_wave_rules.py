@@ -597,25 +597,28 @@ class TestCostFilter:
         audit went on saying it was covered. So it gets a test where the behaviour lives.
 
         The scenario is reachable, not contrived: `stop = invalidation - cushion`, and a rule whose
-        invalidation lands exactly one cushion above the middle of the entry zone puts the stop on
-        the entry. There is no risk to divide by, no R to quote, and the honest answer is a refusal
-        carrying the reason — never a `ZeroDivisionError` out of a function whose whole contract is
-        that it explains itself instead of raising.
+        invalidation lands exactly one cushion above the fill puts the stop on the entry. There is
+        no risk to divide by, no R to quote, and the honest answer is a refusal carrying the reason
+        — never a `ZeroDivisionError` out of a function whose whole contract is that it explains
+        itself instead of raising.
+
+        The entry is now `price`, the close of the bar that produced the plan, so the invalidation
+        is solved against that rather than against the middle of the zone. The gate itself did not
+        move; what it is measuring did.
         """
         from wavelab.waves.projection import PlanConfig, build_plan
         cfg = PlanConfig()
         points = (100.0, 110.0, 105.0)
-        lo, hi = 110.0 - 10.0 * 0.786, 110.0 - 10.0 * 0.500
-        entry = (lo + hi) / 2.0
-        cushion = max(cfg.stop_buffer_atr * 1.0, 2 * cfg.tick_size, cfg.stop_buffer_pct * 106.0)
+        price = 106.0
+        cushion = max(cfg.stop_buffer_atr * 1.0, 2 * cfg.tick_size, cfg.stop_buffer_pct * price)
 
         h = self._hyp(list(points))
-        # The invalidation the rule engine would have to publish for the stop to land on the entry.
-        h = replace(h, invalidation_price=entry + cushion)
-        r = build_plan(h, 106.0, 1.0, cfg)
+        # The invalidation the rule engine would have to publish for the stop to land on the fill.
+        h = replace(h, invalidation_price=price + cushion)
+        r = build_plan(h, price, 1.0, cfg)
 
         assert not r.viable, (
-            f"a plan was returned with its stop on its own entry: risk {abs(entry - entry)}, "
+            f"a plan was returned with its stop on its own entry: risk {abs(price - price)}, "
             f"reasons {r.reasons}"
         )
         assert "far side of the stop" in r.reasons[0], (
@@ -623,15 +626,21 @@ class TestCostFilter:
             "so the arithmetic downstream ran on a risk of zero"
         )
 
-        # The gate is exactly `risk <= 0`, and `risk` is an ABSOLUTE distance, so this is the only
-        # input it ever refuses. A stop the same distance on the WRONG side of the entry — a long
-        # stopped out above where it buys — measures as the same positive risk and is planned
-        # normally. That is a real gap and it is recorded in docs/TEST_COVERAGE.md rather than
-        # asserted away here; this line pins the boundary as it actually stands, so that closing
-        # the gap has to come past a test that says what changed.
-        wrong_side = build_plan(replace(h, invalidation_price=entry + cushion + 5.0), 106.0, 1.0, cfg)
-        assert wrong_side.stop_atr == pytest.approx(5.0), (
-            "the stop is 5.0 above the entry and the risk is measured as its absolute distance"
+        # `risk` is an ABSOLUTE distance, so this gate fires only where the two sides coincide. A
+        # stop the same distance on the WRONG side of the entry — a long stopped out above where it
+        # buys — measures as the same positive risk and used to be planned normally; it is now
+        # refused by a gate of its own, on the sign rather than on the magnitude. Both directions,
+        # and why the case only became reachable here, are in
+        # `TestAnEntryPastItsOwnStopIsRefusedRatherThanSized`. This line pins that the two gates do
+        # not overlap: five dollars on the wrong side is a live, positive risk, and it is still a no.
+        wrong_side = build_plan(replace(h, invalidation_price=price + cushion + 5.0), price, 1.0, cfg)
+        assert wrong_side.stop_atr == 0.0 and not wrong_side.viable, (
+            f"a stop 5.0 ABOVE a long's entry came back with stop_atr={wrong_side.stop_atr} and "
+            f"viable={wrong_side.viable}: the absolute distance was taken for ordinary risk and "
+            f"the trade was sized. Reasons: {wrong_side.reasons}"
+        )
+        assert "past the stop" in wrong_side.reasons[0], (
+            f"the refusal reads {wrong_side.reasons[0]!r}: it is not the wrong-side gate speaking"
         )
 
     def test_the_cost_is_shown_even_when_it_is_rejected(self):
@@ -674,9 +683,12 @@ class TestTheGatesDecideAtTheirOwnBoundary:
 
     PTS: ClassVar[tuple[float, ...]] = (70000.0, 80000.0, 74000.0)
     PRICE: ClassVar[float] = 75000.0
-    #: Chosen so the plan comes back clean: stop ~2.6 ATR, inside `min_stop_atr` and
-    #: `max_stop_atr` both, so neither gate under test is standing behind the other one.
-    ATR: ClassVar[float] = 1500.0
+    #: Chosen so the plan comes back clean: the risk is measured from the FILL at 75,000 down to a
+    #: stop a 0.25-ATR cushion under the invalidation at 70,000, which is 2.75 ATR — inside
+    #: `min_stop_atr` and `max_stop_atr` both, so neither gate under test is standing behind the
+    #: other one, and the size is not cut. Measured from the zone midpoint instead this same
+    #: scenario is 2.04 ATR, which is why the number here moved when the entry did.
+    ATR: ClassVar[float] = 2000.0
 
     def _accepted_baseline(self):
         h = _hypothesis(self.PTS)
@@ -1116,6 +1128,19 @@ class TestThePlanNumbersDescribeThePlan:
     whatever entry, stop and targets came back, the ratios have to be the ratios OF THOSE. A card
     that advertises 7R on a target sitting at 4.4R, and a hit rate of 16% where the arithmetic says
     23%, is not a rounding problem — it is the user sizing a different trade from the one on screen.
+
+    WHICH entry is the whole question, and this class used to answer it with the middle of the
+    published zone. That is the price a limit order gets IF it fills, and a limit order may never
+    fill; the backtest, meanwhile, books at the close of the bar that produced the plan. So the
+    headline the card quoted and the R:R the results measured described two different trades, and
+    the card's was the flattering one — over six months of 4h bars, 649 of 925 plans quoted a
+    better ratio than was reachable, median +1.65R.
+
+    So the oracle moved to `price`, the close of the bar, which is the price you can always get
+    because you can always buy at market. The zone figure did not disappear: it travels beside the
+    headline as `rr_in_zone`, the better case, and it is asserted here too. The failure message
+    below — "the number the user sizes on is not the trade the card is offering" — is the defect
+    this class was written for; it is now pointed at the side that can actually be filled.
     """
 
     @pytest.mark.parametrize("name,pts,direction,price,atr", _PLANS, ids=_PLAN_IDS)
@@ -1125,13 +1150,15 @@ class TestThePlanNumbersDescribeThePlan:
         r = build_plan(_hypothesis(pts, direction), price, atr, cfg)
         assert r.viable, f"{name}: expected a plan, got {r.reasons}"
 
-        entry = r.plan.entry_mid
+        # The headline is quoted at the FILL: the price passed in, which is the bar close the
+        # backtest books at. Not `r.plan.entry_mid` — that is the limit-order case below.
+        entry = price
         risk = abs(entry - r.plan.stop)
         assert risk > 0
 
         assert r.rr_t2 == pytest.approx(abs(r.plan.targets[1] - entry) / risk), (
             f"{name}: the card advertises R:R {r.rr_t2:.3f} while T2 ({r.plan.targets[1]}) sits "
-            f"{abs(r.plan.targets[1] - entry) / risk:.3f}R from the entry ({entry}). The number "
+            f"{abs(r.plan.targets[1] - entry) / risk:.3f}R from the fill ({entry}). The number "
             "the user sizes on is not the trade the card is offering"
         )
         assert r.cost_r == pytest.approx((2 * cfg.fee_bps_taker / 10_000) * entry / risk), (
@@ -1139,11 +1166,31 @@ class TestThePlanNumbersDescribeThePlan:
             f"on a notional of {entry} against a risk of {risk}. This is the gate that rejects a "
             "trade before anything is modelled, so a factor of two here moves the gate itself"
         )
+        assert r.stop_atr == pytest.approx(risk / atr), (
+            f"{name}: stop_atr={r.stop_atr:.3f} is not the distance from the fill ({entry}) to the "
+            f"stop ({r.plan.stop}) in ATRs of {atr}. This is what the size is cut on, and the two "
+            "volatility gates decide on it"
+        )
+
+        # The upside case, travelling beside the headline: the ratio a limit order resting in the
+        # zone gets IF it fills. It is measured at the zone midpoint, and it is the number the card
+        # used to lead with.
+        mid = r.plan.entry_mid
+        risk_mid = abs(mid - r.plan.stop)
+        assert risk_mid > 0
+        assert r.rr_in_zone == pytest.approx(abs(r.plan.targets[1] - mid) / risk_mid), (
+            f"{name}: rr_in_zone={r.rr_in_zone:.3f} while T2 ({r.plan.targets[1]}) sits "
+            f"{abs(r.plan.targets[1] - mid) / risk_mid:.3f}R from the middle of the published zone "
+            f"({r.plan.entry_lo}-{r.plan.entry_hi}). The better case has to be the better case OF "
+            "THIS PLAN, or it is a second unexplained number on the card"
+        )
+
         assert r.p_required == pytest.approx(
             (cfg.expected_loss_r + r.cost_r + cfg.ev_min_r) / (r.rr_t2 + cfg.expected_loss_r)), (
             f"{name}: p_required={r.p_required:.4f} is not (L + cost + EV_min) / (RR + L) for the "
             f"cost and R:R on this very card. It is the one number the user reads as a plain-"
-            "English claim about how often they have to be right"
+            "English claim about how often they have to be right, so it is computed off the "
+            "reachable R:R and never off the limit-order one"
         )
 
     @pytest.mark.parametrize("name,pts,direction,price,atr", _PLANS, ids=_PLAN_IDS)
@@ -1199,6 +1246,379 @@ class TestThePlanNumbersDescribeThePlan:
             )
 
 
+class TestTheHeadlineCanNeverBeTheFlatteringNumber:
+    """★ The property the whole change exists to hold: the card may not quote an R:R better than
+    the one the reader can actually reach.
+
+    `rr_t2` is measured at the fill and `rr_in_zone` at the middle of the published zone. The zone
+    is a retracement you are WAITING for, so when the market has not come back to it the fill is
+    the worse price — further from the target and further from the stop, both of which push the
+    ratio down. The headline therefore has to sit strictly below the zone figure whenever the price
+    is on the far side of the zone; equal means the card is quoting the zone twice over, which is
+    the arrangement this replaced, and larger means it is advertising a number that depends on a
+    limit order filling — the optimistic bias the product exists to catch.
+
+    This is stated as a property over the whole interval between the zone and the target rather
+    than as a pair of examples, because the direction of the inequality is what matters and a
+    handful of prices cannot show that it never turns over. The interval is the honest domain, and
+    it is the FAR side only — the name of the test says so, because "outside the zone" would be a
+    claim about two sides and only one of them holds:
+
+    - inside the zone the two fall either way, depending on which side of the midpoint the price
+      is on, and the second test measures how far apart they get (a median 0.78R over six months
+      of 4h bars, up to 2.95R — which is why the card prints both in the zone as well);
+    - on the NEAR side — a long below the zone it wanted to buy in — the fill is the cheaper entry
+      and rr_t2 is legitimately the LARGER number. 179 of 1,532 viable plans measured over the
+      same window sit there. That is not the card flattering anyone: it is the market offering a
+      better price than the one the zone figure is quoted at, and it is reachable at market. The
+      third test below leans on exactly such a case;
+    - past T2 you are buying above the target you are aiming at, which is not a trade the card
+      offers.
+
+    So the invariant this class is named for is "the headline is the ratio at a price the reader
+    can actually get", and the strict inequality below is what that becomes on the one side where
+    the old arithmetic flattered.
+
+    Both signs are here for one reason — the arithmetic is written once with `abs()`, so a short
+    is the only place a dropped sign can hide.
+
+    The third test carries the same claim into the gates, which is where it costs money rather than
+    credibility: a gate reading the flattering number ACCEPTS trades the honest arithmetic refuses,
+    and each one reaches the user wearing the tool's approval.
+    """
+
+    @pytest.mark.parametrize("name,pts,direction,price,atr", _PLANS, ids=_PLAN_IDS)
+    @given(f=st.floats(0.0, 1.0, allow_nan=False, allow_infinity=False))
+    @settings(max_examples=60, deadline=None)
+    def test_the_headline_never_beats_the_zone_figure_from_the_far_side_of_the_zone(
+        self, name, pts, direction, price, atr, f
+    ):
+        cfg = PlanConfig()
+        h = _hypothesis(pts, direction)
+        base = build_plan(h, price, atr, cfg)
+        assert base.viable, f"{name}: the fixture must plan before it can be swept: {base.reasons}"
+
+        # The far side of the zone, up to the target being quoted: a long buying ABOVE the zone it
+        # wanted to buy in, a short selling BELOW it. `f` walks that interval.
+        edge = base.plan.entry_hi if direction is Direction.LONG else base.plan.entry_lo
+        target = base.plan.targets[1]
+        swept = edge + (target - edge) * f
+
+        r = build_plan(h, swept, atr, cfg)
+        assert r.rr_in_zone > 0, (
+            f"{name}: no zone figure came back at price {swept} ({r.reasons}), so there is nothing "
+            "for the headline to be compared against"
+        )
+        # STRICTLY worse, not merely no better. The whole interval starts at the far EDGE of the
+        # zone, which is already past the midpoint the zone figure is quoted at, so there is no
+        # price in it where the two may legitimately coincide. `<=` would also be satisfied by the
+        # two numbers being the same number, which is exactly what quoting the zone twice looks
+        # like — the arrangement this change replaced.
+        side = "above" if direction is Direction.LONG else "below"
+        assert r.rr_t2 < r.rr_in_zone, (
+            f"{name} {direction.name}: at {swept} — {side} the zone "
+            f"{base.plan.entry_lo}-{base.plan.entry_hi} — the card quotes {r.rr_t2:.4f}R at the "
+            f"fill against {r.rr_in_zone:.4f}R in the zone. The market has not come back to the "
+            "zone, so the fill is the worse price and the headline has to say so; if the two are "
+            "equal the headline is the zone figure again, and if it is larger the card is "
+            "advertising a limit order that may never fill as the trade on offer"
+        )
+
+    @pytest.mark.parametrize("name,pts,direction,price,atr", _PLANS, ids=_PLAN_IDS)
+    def test_inside_the_zone_the_two_numbers_agree_to_the_width_of_the_zone(
+        self, name, pts, direction, price, atr
+    ):
+        """HOW close, and WHY — stated as the law rather than as a reassuring adjective.
+
+        WHY: the two ratios are the same function of the entry price, read at two points. For a
+        stop S and a target T,
+
+            |rr(e1) - rr(e2)| = |T - S| * |e1 - e2| / (|e1 - S| * |e2 - S|)
+
+        which rearranges into the form the reader can actually use:
+
+            gap = (rr_in_zone + 1) * |price - midpoint| / risk
+
+        HOW CLOSE: exactly zero when the price sits on the middle of the zone — there the fill IS
+        the zone entry and there is only one number — and growing monotonically with the distance
+        from that midpoint, fastest on the side that faces the stop, where the risk in the
+        denominator is smallest.
+
+        And then the part worth writing down instead of rounding off: inside the zone that gap is
+        bounded by NOTHING except the zone's own half-width. The shipped wave-2 zone is the
+        0.500-0.786 retracement, 28.6% of wave 1, and against these fixtures' risk that buys a
+        disagreement of up to 76% of the zone figure at the edges (3.6R on `w2_long`, 15.2R on
+        `w4_long_tight_zone`, whose near edge sits less than one R from the stop). So "the two
+        nearly agree in the zone" is true at the middle and false at the rim, and the honest
+        summary is that they agree in proportion to how narrow the zone is against the risk.
+
+        That is the remaining daylight between the headline and the upside figure, and it is why
+        both travel on the card rather than one standing in for the other. Outside the zone the gap
+        is not bounded at all: at T2 the headline is 0R against a zone figure of several R, and
+        that is the case the class docstring above is about.
+        """
+        cfg = PlanConfig()
+        h = _hypothesis(pts, direction)
+        base = build_plan(h, price, atr, cfg)
+        assert base.viable, base.reasons
+        lo, hi, mid = base.plan.entry_lo, base.plan.entry_hi, base.plan.entry_mid
+
+        sweep, samples = [], 0
+        for i in range(9):
+            swept = lo + (hi - lo) * i / 8
+            r = build_plan(h, swept, atr, cfg)
+            if r.plan is None:
+                # The edge of the zone that FACES the stop can collapse the risk far enough for a
+                # volatility gate to refuse before any plan exists. The two ratios still come back
+                # — a refusal always brings its numbers — but the stop they were measured against
+                # does not, and that is what the closed form needs. Skipped, not asserted away:
+                # the sample count below keeps the sweep from quietly emptying out.
+                continue
+            samples += 1
+            assert r.in_zone, f"{name}: {swept} was swept out of the zone {lo}-{hi}"
+            assert r.rr_in_zone > 0, f"{name}: no zone figure at {swept}: {r.reasons}"
+
+            risk, risk_mid = abs(swept - r.plan.stop), abs(mid - r.plan.stop)
+            closed_form = (abs(r.plan.targets[1] - r.plan.stop) * abs(swept - mid)
+                           / (risk * risk_mid))
+            gap = abs(r.rr_t2 - r.rr_in_zone)
+            assert gap == pytest.approx(closed_form, rel=1e-9, abs=1e-9), (
+                f"{name}: at {swept} the two ratios differ by {gap:.6f} where the geometry says "
+                f"{closed_form:.6f}. They are no longer the same ratio read at two entry prices, "
+                "so one of them is measured against a different stop or a different target"
+            )
+            # The same law in the form the reader can check off the card: the disagreement is the
+            # distance from the zone's middle, expressed in R, scaled by the zone figure plus one.
+            assert gap == pytest.approx((r.rr_in_zone + 1) * abs(swept - mid) / risk,
+                                        rel=1e-9, abs=1e-9), (
+                f"{name}: at {swept} the gap of {gap:.6f} is not (rr_in_zone + 1) x "
+                f"{abs(swept - mid)} / {risk}. The two ratios have stopped sharing a stop"
+            )
+            sweep.append((swept - mid, gap))
+
+        assert samples >= 5, (
+            f"{name}: only {samples} of 9 prices across the zone {lo}-{hi} produced a plan, so "
+            "this sweep is no longer looking at the zone it claims to"
+        )
+
+        at_mid = build_plan(h, mid, atr, cfg)
+        assert at_mid.rr_t2 == pytest.approx(at_mid.rr_in_zone, rel=1e-9), (
+            f"{name}: with the price sitting exactly on the middle of the zone the fill IS the "
+            f"zone entry, and the card still shows two different numbers: {at_mid.rr_t2} against "
+            f"{at_mid.rr_in_zone}"
+        )
+
+        # Monotone in the distance from the midpoint, on each side separately: that is what makes
+        # the zone's half-width the ceiling on the disagreement, and it is the only sense in which
+        # being in the zone bounds anything. Sorting by distance and checking the gaps come out
+        # sorted too is the claim; a gap that peaked in the middle of a side would mean the two
+        # ratios are not the same curve read at two points.
+        for side in (+1, -1):
+            same_side = sorted((abs(d), g) for d, g in sweep
+                               if d != 0 and (d > 0) is (side > 0))
+            gaps = [g for _, g in same_side]
+            assert gaps == sorted(gaps), (
+                f"{name}: walking away from the middle of the zone the gap went "
+                f"{[f'{g:.4f}' for g in gaps]} — it has to widen the whole way, because the price "
+                "is moving steadily further from the entry the zone figure is quoted at"
+            )
+
+    def test_the_gates_decide_on_the_number_the_user_can_actually_get(self):
+        """The same claim in the accept/reject channel, where it is worth more than on the card.
+
+        A number that only misleads is bad; a GATE reading the optimistic number admits trades the
+        conservative arithmetic would have thrown out, and every one of them arrives at the user
+        wearing the tool's approval. `max_cost_r`, `min_stop_atr` and `max_stop_atr` therefore
+        decide on `cost_r` and `stop_atr` as measured at the fill.
+
+        Both cases below are chosen so the two sides of the arithmetic give OPPOSITE verdicts, which
+        is the only kind of case that can tell them apart:
+
+        - the fee gate: a long at 70,100, below its zone and close above its stop. The risk from
+          there is 170 points, so the round trip eats 62% of R and the trade is refused. Measured
+          from the middle of the zone the risk is 3,640 points, the fees are 3% of R, and the same
+          input is a perfectly ordinary accepted plan.
+        - the size gate: a long at 76,500, above its zone. The stop is 3.5 ATR away and the size is
+          cut; from the zone midpoint it is 2.0 ATR and nothing is cut at all.
+        """
+        cfg = PlanConfig()
+        h = _hypothesis((70000.0, 80000.0, 74000.0))
+
+        refused = build_plan(h, 70100.0, 100.0, cfg)
+        assert not refused.viable, (
+            f"a long bought at 70,100 — a hundred points above the stop, with the entry zone "
+            f"still 2,000 above it — was accepted with {refused.cost_r:.0%} of R going to fees. "
+            f"The fee gate is reading the cost at an entry the market has not reached: "
+            f"{refused.plan}"
+        )
+        assert "fees" in refused.reasons[0], refused.reasons
+        assert refused.cost_r > cfg.max_cost_r, (
+            f"cost_r={refused.cost_r:.4f} is not above the {cfg.max_cost_r} ceiling, so this "
+            "fixture is no longer the case its docstring describes"
+        )
+        # The other half of the disagreement, computed here rather than taken on trust: from the
+        # middle of the zone this same trade costs 3% of R and sails through the gate it was just
+        # refused by. `plan` is None on a refusal, so the stop is rebuilt the way the source does.
+        cushion = max(cfg.stop_buffer_atr * 100.0, 2 * cfg.tick_size,
+                      cfg.stop_buffer_pct * 70100.0)
+        stop = h.invalidation_price - cushion
+        mid = (72140.0 + 75000.0) / 2.0
+        cost_from_zone = (2 * cfg.fee_bps_taker / 10_000) * mid / abs(mid - stop)
+        assert cost_from_zone < cfg.max_cost_r < refused.cost_r, (
+            f"the fixture no longer splits the two sides: from the zone the fees are "
+            f"{cost_from_zone:.1%} of R and from the fill {refused.cost_r:.1%}, against a ceiling "
+            f"of {cfg.max_cost_r:.0%}. Both sides now agree, so this case cannot tell which one "
+            "the gate is reading"
+        )
+
+        # Worth naming, because it is the reason the R:R property test stays on the FAR side of the
+        # zone: below the zone the fill flatters the ratio rather than punishing it — the stop is a
+        # hundred points away, so the trade measures 118R — and the only thing telling the truth
+        # about it is the cost. A gate reading the zone would wave it through on both counts.
+        assert refused.rr_t2 > refused.rr_in_zone, (
+            f"sanity: a long bought a hundred points above its stop should measure a huge R:R at "
+            f"the fill; it reports {refused.rr_t2:.2f} against {refused.rr_in_zone:.2f} in zone"
+        )
+
+        cut = build_plan(h, 76500.0, 2000.0, cfg)
+        assert cut.viable, cut.reasons
+        assert cut.stop_atr > cfg.max_stop_atr and cut.size_factor < 1.0, (
+            f"a long bought at 76,500 has its stop {cut.stop_atr:.2f} ATR away, past the "
+            f"{cfg.max_stop_atr} limit, and came back at full size ({cut.size_factor:.0%}). "
+            "Measured from the zone the same stop is 2.0 ATR and nothing is cut, so the size is "
+            "being set on a distance the user is not taking"
+        )
+        assert cut.size_factor == pytest.approx(cfg.max_stop_atr / cut.stop_atr)
+        assert any("size cut" in x for x in cut.reasons), cut.reasons
+
+
+class TestTheZoneFigureIsGuardedLikeTheHeadline:
+    """★ The same `abs()` trap as the entry gate, one line down, and it survived the pass that
+    fixed the other one.
+
+    `rr_in_zone` divides by the distance from the zone midpoint to the stop. Written with `abs()`
+    it reports a midpoint on the DEAD side of the stop as ordinary positive risk and hands back a
+    perfectly plausible ratio — "and 4.1R if your limit fills in the zone" — for a limit order that
+    would be underwater the moment it filled. The number the reader is invited to wait for is then
+    the most attractive thing on the card and the most impossible.
+
+    Not reachable through `match_impulses`: 1,532 real plans, zero crossings, nearest approach
+    0.058R. But `build_plan` is exported and takes the invalidation it is handed, and the entry
+    gate's own history is that "unreachable today" is exactly how it got here — it was unreachable
+    too, right up until the arithmetic moved to the fill price and it became 71 plans in 925.
+
+    The geometry is solved for rather than written down, so the fixture cannot quietly stop being
+    the case it describes if a cushion or a retracement ever changes.
+    """
+
+    @pytest.mark.parametrize("name,pts,direction,atr", [
+        ("long", (70000.0, 80000.0, 74000.0), Direction.LONG, 900.0),
+        ("short", (80000.0, 70000.0, 76000.0), Direction.SHORT, 900.0),
+    ], ids=["long", "short"])
+    def test_a_zone_midpoint_on_the_dead_side_of_the_stop_quotes_no_reward(
+            self, name, pts, direction, atr):
+        cfg = PlanConfig()
+        s = 1 if direction is Direction.LONG else -1
+        h = _hypothesis(pts, direction)
+
+        # Where the zone actually is, asked of the code rather than recomputed here.
+        base = build_plan(h, h.points[2], atr, cfg)
+        assert base.plan is not None, base.reasons
+        zone_mid = base.plan.entry_mid
+
+        # Move the invalidation until the stop sits just past the zone midpoint, on the side that
+        # kills it. `stop = invalidation - s * cushion`, and the cushion's percentage floor moves
+        # with the invalidation, so solve, then step clear of the wobble.
+        cushion = max(cfg.stop_buffer_atr * atr, 2 * cfg.tick_size,
+                      cfg.stop_buffer_pct * zone_mid)
+        broken = replace(h, invalidation_price=zone_mid + s * (cushion + 400.0))
+        r = build_plan(broken, zone_mid + s * 4000.0, atr, cfg)
+
+        # The fill is far on the live side, so the entry gate cannot be what refuses this: whatever
+        # happens here is the zone figure's own doing.
+        assert r.rr_t2 > 0, (
+            f"{name}: the fill was rejected too, so this no longer isolates the zone figure — "
+            f"the plan came back with {r.reasons}"
+        )
+        assert r.rr_in_zone == 0.0, (
+            f"{name}: the card offers {r.rr_in_zone:.2f}R for a limit filling at {zone_mid:,.0f}, "
+            f"which is on the dead side of its own stop. There is no reward to quote on an entry "
+            f"that is already a loss, and quoting one puts the most attractive number on the card "
+            f"next to the least reachable trade"
+        )
+
+
+class TestAnEntryPastItsOwnStopIsRefusedRatherThanSized:
+    """★ The refusal that only became reachable when the arithmetic moved to the fill price.
+
+    A long whose market sits BELOW the stop, or a short whose market sits above it, is not a poor
+    trade — it is a purchase that is a loss on the first tick. The count is already over.
+
+    `risk = abs(entry - stop)` reports that as ordinary positive risk, so before this gate existed
+    the plan came back looking entirely normal: a size, a cost, a required hit rate, all computed
+    off a distance whose sign had been thrown away. It was unreachable while the card quoted the
+    zone, because the zone midpoint is on the correct side of the stop by construction — the w4
+    zone is truncated against P1 and the w2 zone is a retracement of a leg that ends above P0. The
+    fill has no such guarantee: it is wherever the market is. Over six months of 4h bars, 71 of 925
+    plans land here.
+
+    Both directions are built deliberately, by solving for a price on the dead side of the stop
+    rather than by hunting for one, so the fixture cannot quietly stop being the case it describes.
+    """
+
+    #: (name, vertices, direction, ATR). The invalidation is P0 in both — R1, the wave-2 stop.
+    CASES: ClassVar[list[tuple]] = [
+        ("long", (70000.0, 80000.0, 74000.0), Direction.LONG, 900.0),
+        ("short", (80000.0, 70000.0, 76000.0), Direction.SHORT, 900.0),
+    ]
+
+    @pytest.mark.parametrize("name,pts,direction,atr", CASES, ids=[c[0] for c in CASES])
+    def test_a_price_on_the_dead_side_of_the_stop_is_refused(self, name, pts, direction, atr):
+        cfg = PlanConfig()
+        h = _hypothesis(pts, direction)
+        s = 1 if direction is Direction.LONG else -1
+
+        # Solve for the stop the way the source does, then step a clear 500 past it — onto the side
+        # where the count is finished. The cushion's percentage floor moves with the price, so the
+        # step has to be wider than the cushion can shift, and 500 is far wider.
+        cushion = max(cfg.stop_buffer_atr * atr, 2 * cfg.tick_size,
+                      cfg.stop_buffer_pct * h.invalidation_price)
+        stop = h.invalidation_price - s * cushion
+        dead = stop - s * 500.0
+
+        r = build_plan(h, dead, atr, cfg)
+        assert not r.viable, (
+            f"{name}: a {direction.name} was planned at {dead} with its stop at about {stop} — on "
+            f"the far side of it. The plan came back sized at {r.size_factor:.0%} with "
+            f"{r.rr_t2:.2f}R quoted: {r.plan}"
+        )
+        assert "past the stop" in r.reasons[0], (
+            f"{name}: the refusal reads {r.reasons[0]!r}. The entry is past its own stop and it "
+            "was turned down for some other reason, so the user is being given an argument about "
+            "fees or volatility for a count that is simply over"
+        )
+        assert r.rr_t2 == 0 and r.size_factor == 1.0, (
+            f"{name}: the refusal carries {r.rr_t2:.2f}R and a size of {r.size_factor:.0%}. There "
+            "is no R to quote on a trade that loses on the first tick, and quoting one invites the "
+            "reader to take it anyway"
+        )
+
+    @pytest.mark.parametrize("name,pts,direction,atr", CASES, ids=[c[0] for c in CASES])
+    def test_the_zone_midpoint_could_never_have_reached_this_gate(self, name, pts, direction, atr):
+        """The other half of the story, and the reason the refusal is NEW rather than newly
+        noticed: the zone midpoint is on the live side of the stop by construction, so no price
+        the market could print would have tripped this gate while the card quoted the zone."""
+        cfg = PlanConfig()
+        h = _hypothesis(pts, direction)
+        s = 1 if direction is Direction.LONG else -1
+        base = build_plan(h, h.points[2], atr, cfg)
+        assert base.plan is not None, base.reasons
+        assert s * (base.plan.entry_mid - base.plan.stop) > 0, (
+            f"{name}: the middle of the published zone ({base.plan.entry_mid}) is on the dead side "
+            f"of the stop ({base.plan.stop}). If that is now possible, the zone is being drawn "
+            "across its own invalidation and the truncation has stopped working"
+        )
+
 
 class TestTheSizeIsCutAndTheStopIsNot:
     """★ The rule the module names as the one that "looks minor and is not".
@@ -1217,13 +1637,21 @@ class TestTheSizeIsCutAndTheStopIsNot:
     PTS: ClassVar[tuple[float, ...]] = (70000.0, 80000.0, 74000.0)
     PRICE: ClassVar[float] = 75000.0
 
-    @pytest.mark.parametrize("atr,expect_cut", [(100.0, True), (900.0, True), (1400.0, False)])
+    #: 2000 rather than 1400 for the uncut case: the risk is now measured from the FILL at 75,000
+    #: down to the stop, not from the middle of the zone, so the same scenario measures further in
+    #: ATRs and 1400 lands at 3.82 — over the limit, and no longer the "inside the band" fixture
+    #: this case is here to be.
+    @pytest.mark.parametrize("atr,expect_cut", [(100.0, True), (900.0, True), (2000.0, False)])
     def test_a_far_stop_costs_size_and_only_size(self, atr, expect_cut):
         cfg = PlanConfig()
         h = _hypothesis(self.PTS)
         r = build_plan(h, self.PRICE, atr, cfg)
         assert r.viable, r.reasons
-        assert r.stop_atr == pytest.approx(abs(r.plan.entry_mid - r.plan.stop) / atr)
+        assert r.stop_atr == pytest.approx(abs(self.PRICE - r.plan.stop) / atr), (
+            f"stop_atr={r.stop_atr:.3f} is not the distance from the fill ({self.PRICE}) to the "
+            f"stop ({r.plan.stop}) in ATRs. The size is cut on this number, so measuring it from "
+            "the zone the market has not reached sizes the trade the user is not taking"
+        )
         assert 0.0 < r.size_factor <= 1.0, (
             f"size_factor={r.size_factor} at {r.stop_atr:.2f} ATR. A factor above 1 is an "
             "instruction to size UP on the trades whose stop is furthest away"

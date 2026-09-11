@@ -761,3 +761,77 @@ def test_no_pattern_shadows_a_later_one():
                     f"also matches {sample!r}. #{j} is unreachable: its messages come out in "
                     f"#{i}'s words. Move the narrower pattern above the broader one.")
     assert not problems, "\n".join(problems)
+
+
+def test_the_bold_is_on_the_ratio_the_reader_sizes_on_in_every_language():
+    """★ Which of the two R:R figures is bold, in all three dictionaries.
+
+    A viable card out of the entry zone prints two ratios: `{now}`, quoted at a fill you can always
+    get by buying at market, and `{zone}`, which needs a resting limit order to fill and may never
+    happen. The whole point of showing both is that the reader sizes on the first one, and on a
+    card of eleven numbers the thing that decides which one they read is the weight of the type.
+
+    Nothing guarded this. The template can be edited to bold `{zone}` instead — the change is two
+    pairs of tags in one string, it reads perfectly well in review, it renders without an error,
+    the key check above still passes because the key is still there, and the reader is then sizing
+    on a number that depends on an order nobody promised them. Applied to `hyp.rr_now_zone` in EN,
+    the whole suite stayed green.
+
+    `{zone}` is the larger figure most of the time but not always — below the entry zone a long is
+    buying cheaper than the midpoint the zone figure is quoted at, and the headline is then the
+    bigger number. So this cannot be written as "the smaller one is bold". It is positional: the
+    bold belongs to `{now}`, wherever it lands.
+    """
+    src = I18N_JS.read_text(encoding="utf-8")
+    dicts = {}
+    for name in ("EN", "ES", "CA"):
+        decl = f"const {name} = "
+        assert decl in src, f"the {name} interface dictionary has gone from i18n.js"
+        dicts[name], _ = _read_object(src, _skip(src, src.index(decl) + len(decl)))
+
+    problems = []
+    for name, d in dicts.items():
+        tpl = d.get("hyp.rr_now_zone")
+        if tpl is None:
+            problems.append(f"{name} has no 'hyp.rr_now_zone': the second ratio is gone from "
+                            f"{name} cards and the reader is back to one number")
+            continue
+        for slot in ("{now}", "{zone}"):
+            if slot not in tpl:
+                problems.append(f"{name} 'hyp.rr_now_zone' has no {slot} slot: {tpl!r}")
+        if "{now}" not in tpl or "{zone}" not in tpl:
+            continue
+        if "<b>{now}</b>" not in tpl:
+            problems.append(
+                f"{name}: the headline ratio is not bold in {tpl!r}. `{{now}}` is the number the "
+                "reader sizes on — it is the one they can get by buying at market — and on this "
+                "card the type weight is what tells them which of the two that is")
+        if "<b>{zone}</b>" in tpl:
+            problems.append(
+                f"{name}: the IN-ZONE ratio is bold in {tpl!r}. That figure needs a limit order to "
+                "fill and may never be reached; bolding it points the reader at the trade they "
+                "may not get, which is the exact bias this card was rebuilt to remove")
+    assert not problems, "\n".join(problems)
+
+
+def test_the_arithmetic_line_leaves_the_ratio_markup_to_the_branch_that_fills_it():
+    """The other half of the same guarantee, one level up.
+
+    `hyp.arith` used to wrap its first slot in `<b>…</b>` itself. It cannot any more: `app.js`
+    fills that slot with EITHER a single bold figure OR the whole two-ratio sentence, and a `<b>`
+    on the outside would bold both ratios together and undo the test above without touching the
+    string it checks.
+    """
+    src = I18N_JS.read_text(encoding="utf-8")
+    problems = []
+    for name in ("EN", "ES", "CA"):
+        decl = f"const {name} = "
+        d, _ = _read_object(src, _skip(src, src.index(decl) + len(decl)))
+        tpl = d.get("hyp.arith", "")
+        assert "{rr}" in tpl, f"{name} 'hyp.arith' no longer has the {{rr}} slot: {tpl!r}"
+        if "<b>{rr}</b>" in tpl:
+            problems.append(
+                f"{name}: 'hyp.arith' bolds {{rr}} itself ({tpl!r}). That slot receives the whole "
+                "'X now — Y if your limit fills in the zone' sentence, so this bolds the in-zone "
+                "figure along with the headline and the reader can no longer tell them apart")
+    assert not problems, "\n".join(problems)

@@ -1,12 +1,12 @@
 # What the test suite protects, and what it does not
 
-**962 tests, ~6.0 s, `pytest -m "not net"`.** One test is deselected by that flag (`net`, it hits
+**979 tests, ~6.0 s, `pytest -m "not net"`.** One test is deselected by that flag (`net`, it hits
 the real Binance archive). The suite gates deploys and it is no longer under five seconds.
 
 Two traps in that sentence, both measured. The flag is not a default: `pyproject.toml` sets
 `addopts = "-q --strict-markers"` and nothing else, so a bare `uv run pytest` — which is what
 `make test` runs — SELECTS the `net` test, goes to the internet, and takes ten seconds instead of
-five. Only CI (`ci-cd.yml`) passes `-m "not net"`. And the second: every figure in this file is
+six. Only CI (`ci-cd.yml`) passes `-m "not net"`. And the second: every figure in this file is
 `-m "not net"`, so a bare run reports one test more than any count written down here.
 
 `test_hypothesis_library.py` is 1.5 s of it — measured as a delta, running the suite with and
@@ -47,8 +47,12 @@ verifying the file is byte-identical by sha256.
    is not.
 3. **Five modules have no tests at all**: `core/bus.py`, `feeds/binance_derivs.py`,
    `store/trials.py`, `collect.py`, `registry.py`.
-4. **One known internal inconsistency is pinned, not fixed** — the R:R quoted on a signal is
-   computed at a different entry price from the one the trade is booked at.
+4. **The R:R quoted on a signal is no longer computed at a different entry price from the one the
+   trade is booked at.** That was this document's headline inconsistency for two rounds; it has
+   been resolved at the fill and the record of what was wrong is under "Inconsistencies that have
+   been resolved". What is left of it is narrower and still open: the SECOND ratio the card
+   publishes, `rr_in_zone`, still divides by an absolute distance, so a published entry zone
+   sitting on the dead side of its own stop is quoted a flattering ratio rather than refused.
 
 ---
 
@@ -294,31 +298,67 @@ literal — `500 → 400` leaves it green; the kill band is any window below 299
 
 ## Known inconsistencies the suite pins rather than fixes
 
-### The R:R on a signal describes a different entry from the one it is booked at
+### A stop on the wrong side of the entry — half refused, and the other half moved one variable left
 
-`build_plan` computes `rr_t2` and `cost_r` from `entry = (zone_lo + zone_hi) / 2` — the middle of the
-published entry zone. `run_backtest` fills at `htf.close`. Measured on the 20-day fixture:
-**131 of 132 signals carry an R:R describing a different entry price from the one their outcome is
-resolved at**, the worst by 2.29R (recorded 4.03 against a geometric 6.32).
+This entry used to read "a stop on the wrong side of the entry is planned normally". It was
+re-measured by applying the case rather than reasoning about it, because the entry price moved
+underneath it (see "Inconsistencies that have been resolved" below) and an entry that assumes it
+knows what a change did to it is how this document goes stale.
 
-So `expectancy_r` is measured off the fill and `rr` is quoted off the zone, and the two travel side
-by side in the same report. `test_a_signal_books_the_trade_the_card_actually_offered` proves the
-signal faithfully *copies* the card's numbers; it cannot say those numbers are consistent with each
-other, and they are not.
+**The case it described is now refused.** `build_plan` still computes `risk = abs(entry - stop)`,
+but a sign test now stands immediately under it: a long whose market is below its stop, or a short
+whose market is above it, is turned down with "price $X is already past the stop $Y" instead of
+being sized off a distance whose sign was thrown away. Applied: the old entry's own scenario — a
+stop five dollars above a long's entry, built by hand-setting the invalidation — comes back
+`viable=False`, `stop_atr=0`, `rr_t2=0`, refused by name. Both directions are pinned by
+`TestAnEntryPastItsOwnStopIsRefusedRatherThanSized`, and the sibling assertion in
+`test_a_stop_that_lands_on_the_entry_is_refused_and_does_not_take_the_engine_down` holds that the
+two gates do not overlap: five dollars on the wrong side is a live, positive risk and still a no.
 
-Resolving this is a product decision — book at the zone midpoint, or recompute the plan's arithmetic
-at the fill — and not one a test should make quietly.
-`test_the_booked_R_R_is_the_zone_s_and_not_the_fill_s_and_that_is_recorded_here` asserts the
-discrepancy so that whoever fixes it sees a red test and has to say which way they went.
+**The same defect survives at the published ZONE, and that is what is still pinned.** The sign test
+guards `risk`, the divisor of the headline. It does not guard `risk_zone = abs(entry_zone - stop)`,
+the divisor of `rr_in_zone` — the second ratio the card prints, the one the reader gets if a resting
+limit order fills. So a plan whose FILL is on the live side of the stop while its published entry
+ZONE is not comes back entirely normal. Measured, hand-built, a long on (100, 110, 105) with ATR 1:
 
-### A stop on the wrong side of the entry is planned normally
+| price | stop | published zone | verdict | headline `rr_t2` | `rr_in_zone` |
+|---|---|---|---|---|---|
+| 108.00 | 105.50 | 102.14 – 105.00 | viable, size 100% | 5.27 | **9.12** |
+| 112.00 | 105.50 | 102.14 – 105.00 | viable, size 46% | 1.41 | **9.12** |
+| 108.00 | 103.00 | 102.14 – 105.00 | viable, size 60% | 2.64 | **30.90** |
 
-`build_plan` computes `risk = abs(entry - stop)` and refuses only when that is zero. A stop the same
-distance on the *wrong* side — a long whose stop sits above where it buys — measures as the same
-positive risk and produces a plan with a size, a cost and a required hit rate. Only the exactly-zero
-case is refused, and that case is now tested
-(`test_a_stop_that_lands_on_the_entry_is_refused_and_does_not_take_the_engine_down`), which also
-pins the wrong-side behaviour as it stands so it cannot change silently.
+The first two publish "buy between $102 and $105" under a stop at $105.50: every price in that zone
+is already past it, so the limit order the 9.12R is quoted for can only fill into an instant loss.
+The third is worse in kind rather than in degree — the zone STRADDLES its own stop, so the card is
+half offering a trade and half offering a trade that is already over, and the flattering ratio is
+the one it quotes for it.
+
+**How reachable it is, measured rather than assumed.** Not through `match_impulses`. Over six months
+of 4h bars, 1,532 viable plans: the edge of the zone nearest the stop is never closer than 0.058R
+above it (1st percentile 0.096R, median 0.314R) and not one plan reaches or crosses. That is
+structural — the w2 zone is a retracement of a leg that ends above P0, and the w4 zone is truncated
+against P1 — which is the same argument that makes the fill-side gate above a NEW refusal rather
+than a newly noticed one. `build_plan` is exported and takes any `Hypothesis`, so the reachability
+is the same one the original entry rested on: a hand-set invalidation, which is also how
+`test_a_stop_that_lands_on_the_entry_is_refused_and_does_not_take_the_engine_down` reaches its own
+case. Nothing in the suite reaches it. The two tests that look as if they would —
+`test_the_entry_is_never_on_the_wrong_side_of_its_own_invalidation` and
+`test_the_zone_midpoint_could_never_have_reached_this_gate` — both build their hypotheses through
+`_hypothesis()`, which takes the rule engine's own invalidation, so both are asserting the
+structural guarantee and neither is a guard on the arithmetic.
+
+Closing it means the zone figure taking the same sign test the headline now takes, and then deciding
+what the card does with a zone on the dead side of its own stop: drop the second ratio, or refuse
+the plan outright. That is the same kind of product decision as the one that moved the arithmetic to
+the fill, so it is recorded here rather than settled by a test.
+
+One thing this section's title promises and this entry does not deliver: it is pinned by nothing.
+The old entry was — `test_a_stop_that_lands_on_the_entry_is_refused_and_does_not_take_the_engine_down`
+carried a line holding the wrong-side behaviour as it stood — and that line now holds the REFUSAL
+instead, which is the right thing for it to hold and leaves the residual with no tripwire at all.
+Anyone closing it would close it silently. A characterisation test here would cost three lines and
+can be pointed straight at the number, because `rr_in_zone` is on the wire and on the card; the
+reason there is not one yet is that nobody has written it, not that it would be hard.
 
 ### Four hypotheses read a market with zero movement as maximally oversold
 
@@ -358,6 +398,134 @@ than a defect, so it is pinned rather than fixed. Three other hypotheses disagre
 by one to seven bars after a re-warm for the much milder reason that an EMA's memory is infinite
 (`candles.engulfing_trend`, `mean_reversion.stretch_ema200_atr14`, the `trend` EMA stack); that is
 rounding, and it is not pinned.
+
+---
+
+## Inconsistencies that have been resolved, and which way they went
+
+Nothing is deleted from this document when it gets fixed. An entry that quietly becomes "fixed",
+or disappears, teaches nothing and leaves the next reader with no way to tell a hole that was
+closed from a hole nobody ever found. So a resolved entry keeps the measurement of what was wrong,
+gains the decision that was taken, and moves here.
+
+### The R:R on a signal described a different entry from the one it was booked at — resolved at the fill
+
+**What was wrong, kept as the record.** `build_plan` computed `rr_t2`, `cost_r`, `p_required`,
+`stop_atr` and `size_factor` from `entry = (zone_lo + zone_hi) / 2` — the middle of the published
+entry zone — while `run_backtest` fills at `htf.close`. Measured on the 20-day fixture: **131 of 132
+signals carried an R:R describing a different entry price from the one their outcome was resolved
+at**, the worst by 2.29R (recorded 4.03 against a geometric 6.32).
+
+Measured again over six months of 4h bars — BTCUSDT 2026-04-01 to 2026-09-11 out of `data/bars`,
+replayed through `LiveEngine.on_bar_1m` and re-planned with `match_impulses` + `build_plan` on each
+4h close, which is the only harness in this document that has been reproduced twice:
+
+| counting | plans | overstated by the zone figure | median | p90 | worst |
+|---|---|---|---|---|---|
+| every w2/w4 hypothesis per trigger bar | 3,253 (1,532 viable) | **1,357** | +2.54R | +3.61R | +9.61R |
+| top-ranked hypothesis only | 930 | **513** | +2.40R | +3.33R | +4.09R |
+
+**The often-quoted "649 of 925 plans, median +1.65R" is not one of them, and nobody has reproduced
+it.** It is the figure carried by `projection.py`'s comment, `app.js`'s comment and several test
+docstrings, so it is left standing there rather than replaced by a third set; but the denominator
+closest to it is 930, its overstated count is 513 rather than 649, and every attempt to re-measure
+it lands nearer +2.4R than +1.65R. The shape of the finding is not in doubt — four-fifths of plans
+flattered, by more than 2R at the median. The exact triple is unsourced and should be treated that
+way until someone produces the harness that made it.
+
+The error had a direction, and that is the part that made it a product defect rather than an
+accounting one. The zone is a retracement you are *waiting* for, so the zone price is the better
+price; quoting it as the headline meant the card was systematically flattering its reader, in a
+tool whose entire argument is that it does not. `expectancy_r` was measured off the fill and `rr`
+was quoted off the zone, and the two travelled side by side in the same report.
+
+**Which way it went: to the fill.** `rr_t2`, `cost_r`, `p_required`, `stop_atr` and `size_factor`
+are now computed at `price`, the close of the bar that produced the plan and the same price the
+backtest books at. The reason that side won is reachability, not conservatism for its own sake: a
+limit order resting in the zone MAY NEVER FILL, so quoting it assumes a price you might not get,
+while the close assumes only that you can buy at market, which is always true. The three gates
+(`max_cost_r`, `min_stop_atr`, `max_stop_atr`) decide on that conservative number too — a gate that
+accepted on the optimistic figure and reported the conservative one would be the same defect with
+an extra step.
+
+**The zone figure was not thrown away.** `rr_in_zone` is new on `PlanResult` and travels beside the
+headline as the better case, on the wire out of `decide()` and on the card as a condition rather
+than as a second bare figure ("5.27 now — 9.12 if your limit fills in the zone").
+`TestTheHeadlineCanNeverBeTheFlatteringNumber` is the property that holds the whole change down:
+from the FAR side of the zone the headline may never reach the zone figure. Far side, not
+"outside" — see the two corrections below, both of which this entry originally got wrong.
+
+**Correction 1: the two numbers do NOT agree inside the zone, and the card no longer pretends they
+do.** This entry, `projection.py`'s comment and `app.js` all said that inside the zone the two
+describe the same trade and agree to within rounding, and `app.js` dropped the second figure there
+on the strength of it. Measured over six months of 4h bars: of 273 viable in-zone plans, **99.6%
+disagree by more than the two decimals the card prints**, by a median **0.78R** — 19.9% of the zone
+figure — p90 1.58R and up to **2.95R**. They are the same ratio read at two entry prices, so the gap
+is `(rr_in_zone + 1) * |price − mid| / risk`: zero only at the midpoint and widening the whole way
+to either rim, which is exactly what
+`test_inside_the_zone_the_two_numbers_agree_to_the_width_of_the_zone` asserts as a closed form —
+this document was contradicting the test it cites. The card now drops the second figure only when
+the two round to the same printed number.
+
+**Correction 2: the headline is not always the smaller of the two.** Below its entry zone a long is
+buying CHEAPER than the midpoint `rr_in_zone` is quoted at, so the fill is the better trade and the
+headline is legitimately the larger figure — **179 of 1,532 viable plans** over the same window, and
+50 of those with the price fully outside the zone rather than merely below its middle. That is not
+the card flattering anyone; it is reachable at market, which is the whole test. The invariant is
+"the headline is the ratio at a price the reader can actually get", not "the headline is the lower
+number", and the property test is named for the far side only because that is the side where the
+claim is an inequality.
+
+**What it cost, measured.** The two ratios diverge in proportion to how far the price is from the
+middle of the zone, inside it as well as outside — see Correction 1 above; on the far side, where
+the old arithmetic flattered, the divergence is exactly the honest answer "buying this now is a
+worse trade than the card is describing", so there it is the point rather than the price. What it
+did cost is signals. On the 20-day fixture the same seed now produces **61 signals
+where it produced 132**: the gates decide on the conservative number, and 106 of that fixture's 964
+plans are refused outright by the new gate below.
+
+**One justification in the source does not survive being checked, and it is recorded rather than
+repeated.** `projection.py`'s comment argues the change is cheap because "the verdict only reaches
+its ceiling when the price is already INSIDE the zone". It does not. `decide()` computes
+`WATCH if (out and best_in_zone) else (WATCH if out else NO_TRADE)`, and both branches of that
+ternary are WATCH, so `best_in_zone` changes the reasons line and nothing else. Measured over the
+20-day fixture: 446 WATCH verdicts, **311 of them with no hypothesis in its entry zone at all**, and
+34 NO_TRADE, every one of those for having no hypothesis rather than for being out of the zone. The
+change is still cheap for the reason above — the numbers agree where the price is in the zone — but
+it is cheap on the CARD, not on the verdict, and the dead branch is a separate thing somebody should
+look at. `test_catching_up_changes_nothing_on_the_card` pins the PRIOR ceiling at WATCH; nothing
+pins what `best_in_zone` is supposed to do underneath it.
+
+**A refusal that came with it, and could not have existed before.** An entry already PAST its own
+stop — a long whose market is below where it would give up — was reported by `abs()` as ordinary
+positive risk, so the plan came out looking normal while describing a purchase that loses on the
+first tick. **71 of 925 plans land there.** It was unreachable while the card quoted the zone,
+because the zone midpoint is on the correct side of the stop by construction; the fill has no such
+guarantee, because it is wherever the market is. What is left of that same `abs()` — at the zone,
+in the divisor of `rr_in_zone` — is still open and is the first entry under "Known inconsistencies"
+above.
+
+**Verified afterwards, on the fixture the original measurement was taken on.** 0 of 61 resolved
+signals now disagree; the largest residual anywhere is 0.0049R, which is the two-decimal rounding
+the card applies to the numbers the signal copies off it.
+
+**The characterisation test did exactly what it was written to do.**
+`test_the_booked_R_R_is_the_zone_s_and_not_the_fill_s_and_that_is_recorded_here` asserted the
+discrepancy so that whoever resolved it would see a red test and have to say which way they went.
+It went red on this change, and its own failure message said what to do next: delete it and move
+the entry here. Both halves happened. It is succeeded by
+`test_the_booked_R_R_is_the_R_R_the_card_quoted`, which is the same claim with the sign turned
+round and on the same yardstick — the characterisation called a drift above 0.01R a disagreement
+and demanded that most signals show one; the successor demands that none do. That is the only
+evidence in this repo that the "pin it rather than fix it" idiom pays for itself, so it is written
+down: a pinned inconsistency is not a resigned one, it is a tripwire with a note attached.
+
+**Not re-measured: the kill-rate table.** The `waves/rules.py, matcher.py, projection.py` row above
+has not been re-run against the two new gates, so the observable total in that table is a count
+from before this change. The named tests exist and pass; what has NOT been done is the mutation
+pass — applying each new refusal's deletion to the source and watching a named test go red — that
+every other number in that table stands on. Until that is done, do not read the total as covering
+them.
 
 ### Dead configuration — both entries resolved, and they went opposite ways
 
@@ -674,8 +842,8 @@ changing the code means changing a number in a test and noticing.
 
 ```sh
 export PATH="/opt/homebrew/bin:$PATH"
-uv run pytest -m "not net"      # 962 passed, 1 deselected, ~6.0 s
-uv run pytest                   # 963 passed, ~10 s — RUNS the net test, and needs the internet
+uv run pytest -m "not net"      # 979 passed, 1 deselected, ~6.0 s
+uv run pytest                   # 980 passed, ~10 s — RUNS the net test, and needs the internet
 uv run ruff check .             # clean
 ```
 
@@ -714,3 +882,13 @@ the gap counter, which had the shipped constant and the mutant the wrong way rou
 window was 50 and the mutant 500; the source ships 500). When adding an entry here, re-run at least
 half a dozen of the claims you are NOT touching — the entry that goes stale is never the one you are
 looking at.
+
+**The pass that moved the R:R to the fill did NOT run that audit, and this is the note that says
+so.** What it did run is the behaviour: every figure in the two entries it touched was produced by
+executing the shipped code — six months of 4h bars for the corpus numbers, the 20-day fixture for
+the before-and-after on the signals, and hand-built plans through the exported `build_plan` for the
+wrong-side table. What it did not do is re-apply the faults behind the kill-rate table, or the nine
+spot-checks above, so neither the table's totals nor those nine rows carry a measurement newer than
+the previous round. Two of them sit in the changed module (`waves/projection.py`) and should be the
+first re-run: the entry the arithmetic is computed at, and the two gates that now decide on it.
+Treat this paragraph as a debt, not as a pass.

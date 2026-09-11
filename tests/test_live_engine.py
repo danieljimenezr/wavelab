@@ -976,43 +976,52 @@ class TestTheBacktest:
                 "that was shown"
             )
 
-    def test_the_booked_R_R_is_the_zone_s_and_not_the_fill_s_and_that_is_recorded_here(
-        self, backtest_20d
-    ):
-        """CHARACTERISATION, not approval. This pins a known inconsistency so it cannot move
-        without someone deciding that it should.
+    def test_the_booked_R_R_is_the_R_R_the_card_quoted(self, backtest_20d):
+        """★ The successor to a characterisation test, and the reason that one existed.
 
-        The test above proves the signal faithfully COPIES the card's numbers. It does not — and
-        by construction cannot — say those numbers are consistent with each other, and they are
-        not. `build_plan` computes `rr_t2` and `cost_r` from `entry = (zone_lo + zone_hi) / 2`, the
-        middle of the published entry zone; `run_backtest` fills at `htf.close`. Measured on this
-        fixture: 131 of 132 signals carry an R:R describing a different entry price from the one
-        their outcome is booked at, the worst by 2.29R.
+        Until recently this assertion ran the other way. `build_plan` computed `rr_t2` from
+        `entry = (zone_lo + zone_hi) / 2`, the middle of the published entry zone, while
+        `run_backtest` fills at `htf.close` — so the R:R on the card and the R:R the outcome was
+        booked against described two different trades. On this fixture 131 of 132 signals carried
+        the discrepancy, the worst by 2.29R; over six months of 4h bars it was 649 of 925, median
+        +1.65R, and it ran in the card's favour every time, because the zone is a retracement you
+        are WAITING for and waiting gets you the better price. `expectancy_r` was measured off the
+        fill and `rr` was quoted off the zone, side by side in the same report.
 
-        So `expectancy_r` is measured off the fill and `rr` is quoted off the zone, and the two
-        travel side by side in the same report. That is a source decision to make — book at the
-        zone midpoint, or recompute the plan's arithmetic at the fill — and not one a test should
-        make quietly. Until it is made, the discrepancy is asserted rather than left as folklore:
-        anyone who resolves it will see this test go red and have to say which way they went.
+        That was a source decision, not a test decision, so the discrepancy was pinned rather than
+        left as folklore — asserted to EXIST, so that whoever resolved it would see red and have to
+        say which way they went. It has been resolved: the plan's arithmetic is now computed at
+        `price`, the close of the bar the plan came from, which is the price the backtest books at
+        and the one price you can always get. The better case did not disappear — it travels beside
+        the headline as `rr_in_zone` — but it is no longer what the card leads with.
 
-        See docs/TEST_COVERAGE.md, "Known inconsistencies the suite pins rather than fixes".
+        So this is the same claim with the sign turned round, measured on the same yardstick the
+        characterisation used: it called a drift above 0.01R a disagreement and demanded that most
+        signals show one. This demands that NONE do. The tolerance is not slack — the card
+        publishes `rr_t2` to two decimals and its prices to the cent, so a hundredth of an R is the
+        finest question that can honestly be asked of a number the user reads off a screen. What
+        the old test measured was 2.29R at the worst, two orders of magnitude clear of it.
+
+        The neighbouring test proves the signal COPIES the card's `rr_t2`; this proves that figure
+        is the geometry of the trade actually booked.
         """
         resolved = [s for s in backtest_20d.signals if s.outcome]
-        assert len(resolved) >= 20, "too few signals for this to characterise anything"
+        assert len(resolved) >= 20, "too few signals for this to be worth measuring"
 
-        geometric = [abs(s.target - s.entry) / abs(s.entry - s.stop) for s in resolved]
-        drift = [abs(g - s.rr) for g, s in zip(geometric, resolved, strict=True)]
-        disagreeing = sum(1 for d in drift if d > 0.01)
-
-        assert disagreeing > len(resolved) // 2, (
-            f"only {disagreeing} of {len(resolved)} signals show the zone/fill R:R discrepancy. "
-            "If it has been fixed, that is good news and this test has to go: delete it and move "
-            "the entry in docs/TEST_COVERAGE.md from «known inconsistencies» to «verified». If it "
-            "has merely moved, find out where"
+        worst = max(
+            ((abs(abs(s.target - s.entry) / abs(s.entry - s.stop) - s.rr), s) for s in resolved),
+            key=lambda x: x[0],
         )
-        # Every signal still records the R:R its own card published, whatever entry that was
-        # computed at. That half IS a real invariant and it is what the test above rests on.
-        assert all(s.rr > 0 for s in resolved), "an R:R must at least be positive"
+        for s in resolved:
+            geometric = abs(s.target - s.entry) / abs(s.entry - s.stop)
+            assert s.rr == pytest.approx(geometric, abs=0.01), (
+                f"the signal at {s.ts_ms} quotes {s.rr:.4f}R while its own entry {s.entry}, stop "
+                f"{s.stop} and target {s.target} — the three prices the outcome was resolved "
+                f"against — measure {geometric:.4f}R. The card is advertising one trade and the "
+                f"statistics are measuring another, which is the bias this whole product exists "
+                f"to catch. Worst across the fixture: {worst[0]:.4f}R at {worst[1].ts_ms}"
+            )
+            assert s.rr > 0, f"the signal at {s.ts_ms} quotes an R:R of {s.rr}"
 
     def test_the_fees_are_subtracted_and_paying_more_can_only_make_it_worse(self, backtest_20d):
         """A backtest that reports gross R is a brochure. The user pays the taker fee twice.
