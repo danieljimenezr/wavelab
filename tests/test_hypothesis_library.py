@@ -35,16 +35,28 @@ registry, and that are therefore not copied from any one of them:
   6. **Degeneracy.** An empty series, a two-candle series and a market that never moves must not
      raise and must not produce a RuntimeWarning (`filterwarnings` in pyproject makes one a
      failure, because that warning is how a NaN becomes a position).
+  7. **The shared helpers.** The six properties above are blind to arithmetic. That is the right
+     trade for a hundred hand-written hypothesis functions and the wrong one for the two dozen
+     UTILITIES underneath them: `_pivots`, `_clv`, `_rolling_rank`, `_prior_extreme`, the three
+     `_hold` variants and the calendar helpers are each shared by between two and eight
+     hypotheses, so one fault there is not one hypothesis wrong, it is a family. And each of them
+     computes something whose definition exists outside this repository — a Williams fractal, a
+     percentile, a weekday — so a test for one is an oracle and not a restatement of its own code.
+     Measured example: inverting the sign of `_clv` leaves every `flow` hypothesis causal, finite,
+     scale-free, pure and two-sided, and silently reads selling pressure as buying pressure.
 
 Everything runs over synthetic series with known structure AND over real BTC candles out of the
 store, resampled through the same `resample_from_1m` the server uses. The real arm is not
 decoration: a planted one-bar lookahead was caught there before the synthetic probe existed.
 
-WHAT IS NOT HERE. No property in this file looks at what any hypothesis actually computes. A
+WHAT IS NOT HERE. No property in this file looks at what any INDIVIDUAL hypothesis computes. A
 Bollinger band built at one sigma instead of two, an RSI threshold of 40 instead of 30, a sign
 flipped end to end — all of those are causal, finite, scale-free and pure, and all of them pass.
 Two such faults were planted to confirm it and both survived. That boundary is deliberate: the
-alternative is a hundred restatements of a hundred formulas.
+alternative is a hundred restatements of a hundred formulas. The line is drawn UNDER the shared
+helpers rather than under the whole library, because a helper's answer is defined outside this
+repository and is reached by a whole family, while one hypothesis's arithmetic is defined by that
+hypothesis and reached by nothing else.
 
 The harness's teeth are not claimed, they are demonstrated. `TestTheHarnessHasTeeth` fabricates
 hypotheses that read one candle ahead, that threshold against a statistic of the whole array, that
@@ -60,14 +72,17 @@ rarely that nine years of BTC hold 102 events of it and the fixture window holds
 
 from __future__ import annotations
 
+import calendar
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
 import pytest
+import talib
 
 from wavelab.core.timeframes import BY_NAME
-from wavelab.hypotheses import load_all
+from wavelab.hypotheses import candles, flow, load_all, momentum, seasonality, structure, volatility
 from wavelab.hypotheses.base import Hypothesis, Series, register
 
 REGISTRY = load_all()
@@ -77,6 +92,10 @@ NAMES = sorted(REGISTRY)
 N_SYNTH = 1500
 #: Where the synthetic series is cut in two. The regime change lives immediately after it.
 CUT_SYNTH = 1000
+
+#: Length of the quiet market whose only event is its last candle. Above the deepest declared
+#: warm-up (600) by enough that `acausal_probe` has a hundred traded bars to spend its probes on.
+N_QUIET = 750
 
 #: Real candles per timeframe. 1,600 covers the deepest warm-up (600) with a thousand left to
 #: probe, and keeps the fixture inside a fraction of a second on all four timeframes.
@@ -159,6 +178,28 @@ def flat(n: int, tf: str, price: float = 30_000.0, volume: float = 100.0) -> Ser
     t0 = 1_600_000_000_000 - (1_600_000_000_000 % step)
     return Series(tf, (t0 + np.arange(n, dtype=np.int64) * step).astype(np.int64),
                   a.copy(), a.copy(), a.copy(), a.copy(), np.full(n, volume))
+
+
+def quiet_then_break(n: int, tf: str, *, price: float = 30_000.0, up: bool = True) -> Series:
+    """A dead market whose ONLY event is the very last candle in the series.
+
+    Every other fixture in this file hands the event-driven hypotheses their first breakout well
+    inside their own warm-up, so `signals()`'s mask zeroes exactly the bars on which "what do I
+    hold before anything has happened to me?" is answered. Here nothing happens at all for `n-1`
+    candles — no new high, no new low, no engulfing, no gap, no event of any kind — and the single
+    break is the last candle, several hundred bars past the deepest declared warm-up. That makes
+    the pre-event region a TRADED region instead of a masked one, and it is the only region in
+    which a fill that reads the last element of an array instead of the first is observable at all.
+    """
+    step = BY_NAME[tf].ms
+    t0 = 1_600_000_000_000 - (1_600_000_000_000 % step)
+    a = np.full(n, price)
+    o, h, l, c = a.copy(), a.copy(), a.copy(), a.copy()
+    broken = price * (1.02 if up else 0.98)
+    c[-1] = broken
+    (h if up else l)[-1] = broken
+    return Series(tf, (t0 + np.arange(n, dtype=np.int64) * step).astype(np.int64),
+                  o, h, l, c, np.full(n, 100.0))
 
 
 def head(s: Series, k: int) -> Series:
@@ -380,6 +421,18 @@ def synth_series() -> dict[str, Series]:
 
 
 @pytest.fixture(scope="session")
+def quiet_series() -> dict[tuple[str, bool], Series]:
+    """The quiet market, in both directions, for every timeframe the registry declares.
+
+    Session-scoped for the same reason `synth_series` is: `SIGNALS` and `CUTS` key on `id(series)`,
+    so a `Series` built inside a test function and then collected could hand its cached answers to
+    whatever object lands on its address next.
+    """
+    return {(tf, up): quiet_then_break(N_QUIET, tf, up=up)
+            for tf in ("15m", "1h", "4h", "1d") for up in (True, False)}
+
+
+@pytest.fixture(scope="session")
 def real_series() -> dict[str, Series]:
     """Real BTC candles out of the store, resampled the way the server resamples them.
 
@@ -472,6 +525,34 @@ class TestTheRegistryItself:
             "a hypothesis with a blank title was admitted to the registry before the check ran; "
             "the guard has to refuse it, not record it and complain")
 
+    def test_a_hypothesis_cannot_be_registered_without_a_rationale_and_a_prior(self):
+        """The older sibling of the title guard, three lines above it in `register()` and, until
+        now, the only one of the two with no test at all.
+
+        This is the guard the whole pre-registration argument rests on. A hypothesis admitted with
+        a blank `prior` is one nobody committed to a direction for before looking, and it still
+        counts towards the multiple-comparisons correction — so it makes every other result look
+        worse while contributing nothing that can be falsified. `or` softened to `and` admits it
+        whenever EITHER field is filled in, which is the shape the mistake actually takes: the
+        rationale gets written, the prior gets left for later, and later never comes.
+
+        Both fields are tested on their own, and with whitespace rather than "", because the
+        dataclass cannot tell a space from a sentence.
+        """
+        kwargs = {"name": "teeth.unpriced", "family": "teeth", "title": "a title it does have",
+                  "rationale": "declared up front", "prior": "declared up front",
+                  "fn": lambda s: np.zeros(len(s), dtype=np.int8),
+                  "timeframes": ("1h",), "min_warmup": 200}
+
+        for field in ("rationale", "prior"):
+            for blank in ("", "   "):
+                with pytest.raises(ValueError, match="rationale and a prior"):
+                    register(Hypothesis(**{**kwargs, field: blank}))
+                assert "teeth.unpriced" not in REGISTRY, (
+                    f"a hypothesis with a blank {field} reached the registry. Pre-registration is "
+                    "the only thing separating this catalogue from a search over a hundred draws, "
+                    "and it is enforced here or nowhere.")
+
 
 # ------------------------------------------------------------------------------------------
 class TestEverySignalIsCausal:
@@ -513,6 +594,38 @@ class TestEverySignalIsCausal:
                 f"{name} on real {tf} candles: the signal at bar {bad} changes once the candles "
                 f"after it are removed (declared warm-up {h.min_warmup})."
             )
+
+    @pytest.mark.parametrize("up", [True, False])
+    def test_it_holds_before_the_first_event_too(self, up, quiet_series):
+        """The bars a hypothesis trades BEFORE anything has happened to it.
+
+        `structure._hold` decides what is held before the first event with `out[idx == 0] = ev[0]`.
+        One index away, `ev[-1]`, is the last candle of the entire series — and every other fixture
+        in this file is blind to the difference, because on the shocked walk and on real BTC every
+        event-driven hypothesis gets its first breakout inside its own warm-up, where `signals()`
+        masks the answer to zero regardless. Measured on the fixture below: with `ev[-1]` in place
+        of `ev[0]`, `structure.donchian_break_20` holds a position on 199 of the 200 traded bars of
+        a market in which, so far, nothing whatsoever has happened.
+
+        What that looks like to a user: a flat, silent stretch of chart carrying a confident
+        long — sized, stopped and shown as actionable — whose direction was decided by a candle
+        that has not printed yet. Both break directions are run because a fault that leaks only
+        one sign is still a lookahead.
+        """
+        for tf in ("15m", "1h", "4h", "1d"):
+            s = quiet_series[(tf, up)]
+            for name in NAMES:
+                h = REGISTRY[name]
+                if tf not in h.timeframes:
+                    continue
+                bad = acausal_probe(h, s)
+                assert bad is None, (
+                    f"{name} on {tf}: in a market where the only event is the LAST candle, the "
+                    f"signal at bar {bad} is {int(SIGNALS.of(h, s)[bad])} with the whole series "
+                    f"available and something else when the series stops at that bar. Nothing has "
+                    f"happened yet at bar {bad}; whatever this is holding, it read it from the "
+                    f"far end of the array."
+                )
 
     @pytest.mark.parametrize("cut", [199, 1001, N_SYNTH - 1])
     def test_the_future_can_be_rewritten_from_anywhere(self, cut, synth_series):
@@ -713,6 +826,41 @@ class TestTheAlphabet:
 
         offenders = sweep(check, synth_series)
         assert not offenders, "\n".join(offenders)
+
+    def test_signals_is_the_layer_that_refuses_a_malformed_answer(self, synth_series):
+        """`signals()` carries two guards that no registered hypothesis reaches today, which is
+        exactly why both can be deleted without a single test going red — and why hypothesis 101
+        is the one that will find out.
+
+        The cast is not decoration. `np.asarray(x, dtype=np.int8)` on a float array silently
+        truncates, so a function that returns 0.5 — a half-size, a probability, an unrounded
+        z-score — becomes flat everywhere and reports nothing; on a NaN the same cast produces an
+        arbitrary int8, and -128 is a position 128 times the size of any this library can express.
+        The length check is the difference between a `ValueError` naming the hypothesis and a
+        signal array that is silently misaligned with its own candles for every bar after the
+        first missing one.
+
+        Fabricated rather than registered: the property belongs to `signals()`, and no registered
+        hypothesis can demonstrate it precisely because all hundred are well behaved.
+        """
+        s = synth_series["1h"]
+
+        def fabricate(name, fn):
+            return Hypothesis(name=f"teeth.{name}", family="teeth", title="a malformed answer",
+                              rationale="fabricated", prior="refused", fn=fn,
+                              timeframes=("1h",), min_warmup=200)
+
+        for name, n_out in (("too_short", len(s) - 1), ("too_long", len(s) + 1)):
+            h = fabricate(name, lambda s, n=n_out: np.zeros(n, dtype=np.int8))
+            with pytest.raises(ValueError, match="signals for"):
+                h.signals(s)
+
+        half = fabricate("halves", lambda s: np.full(len(s), 0.5, dtype=np.float64))
+        out = half.signals(s)
+        assert out.dtype == np.int8, (
+            f"`signals()` handed back a {out.dtype} array. Everything downstream multiplies this "
+            "by a return; a float position is a size, and nothing in the product is sized here.")
+        assert not out.any(), "a half position has to land on 0, not on an invented direction"
 
 
 # ------------------------------------------------------------------------------------------
@@ -948,6 +1096,369 @@ class TestDegenerateSeries:
 
 
 # ------------------------------------------------------------------------------------------
+class TestTheSharedHelpers:
+    """Property 7: the utilities the hundred are built out of, where one fault is a family wrong.
+
+    The six properties above are deliberately blind to arithmetic, and that blindness is paid for
+    per hypothesis: a sign flipped inside `flow._clv` is causal, finite, scale-free, pure and
+    two-sided, so it passes all six — while every hypothesis in the family reads selling pressure
+    as buying pressure. What makes these helpers testable where the hundred are not is that each
+    computes something DEFINED OUTSIDE this repository: a Williams fractal, a percentile, the
+    weekday of an instant, "hold this for ten candles". The assertions below are written against
+    those definitions, so they are oracles rather than restatements of the code they cover, and
+    each one covers between two and eight hypotheses at once.
+    """
+
+    def test_a_pivot_is_reported_on_the_candle_that_confirms_it(self):
+        """A fractal high at candle j is not KNOWN until j+k, once the k candles after it have
+        closed. Reporting it at j is the single mistake that makes structure strategies look
+        profitable on paper, and `_pivots` is the only place in the library that decides where it
+        goes — eight `structure` hypotheses take their levels from it.
+
+        The witness is a strict tent peaking at j, so there is exactly one fractal high in the
+        whole series and its confirmation bar can be named: j+k and no other. Its mirror is that
+        the centre of a tent is never the minimum of a window, so there is no fractal LOW at all —
+        a fractal window that is not centred on its candidate (one candle left, two right) would
+        invent one, and a candidate placed off-centre would report the high on the wrong bar.
+        """
+        n, j, k = 40, 20, structure._K
+        ramp = 1_000.0 - (np.arange(n, dtype=float) - j) ** 2 * 0.1
+        s = Series("1h", np.arange(n, dtype=np.int64) * BY_NAME["1h"].ms,
+                   ramp, ramp + 1.0, ramp - 1.0, ramp, np.full(n, 100.0))
+
+        ph, pl = structure._pivots(s, k)
+        confirmed = np.flatnonzero(~np.isnan(ph))
+        assert confirmed.tolist() == [j + k], (
+            f"the only fractal high in a tent peaking at candle {j} is confirmed at candles "
+            f"{confirmed.tolist()}; it is knowable at {j + k} — k={k} candles after the extreme — "
+            "and nowhere else. Earlier is a lookahead, later is a level nobody can trade."
+        )
+        assert ph[j + k] == s.high[j], (
+            f"the pivot confirmed at {j + k} carries the price {ph[j + k]}, not the high "
+            f"{s.high[j]} of the candle it marks"
+        )
+        assert not (~np.isnan(pl)).any(), (
+            "the centre of a tent is the maximum of every window it is centred in and the minimum "
+            f"of none, yet a fractal LOW was confirmed at {np.flatnonzero(~np.isnan(pl)).tolist()}"
+        )
+
+    def test_every_pivot_is_the_extreme_of_the_window_centred_on_it(self, synth_series):
+        """The definition, over a real price path rather than one shape: candle j is a fractal
+        high iff its high is the maximum of [j-k, j+k], and it is reported at j+k. Stated as a
+        loop over the definition, which is not how `_pivots` computes it (talib's rolling MAX,
+        shifted), so agreement is evidence and not an echo.
+
+        A window that is off-centre still produces plausible-looking pivots — they are still
+        causal, still price-shaped, still sparse — and every level, break, retest and sweep in the
+        `structure` family is then measured against a line drawn at the wrong candle.
+        """
+        for tf in ("15m", "1h"):
+            s = synth_series[tf]
+            k = structure._K
+            want_h = np.full(len(s), np.nan)
+            want_l = np.full(len(s), np.nan)
+            for j in range(k, len(s) - k):
+                window = slice(j - k, j + k + 1)
+                if s.high[j] == s.high[window].max():
+                    want_h[j + k] = s.high[j]
+                if s.low[j] == s.low[window].min():
+                    want_l[j + k] = s.low[j]
+
+            got_h, got_l = structure._pivots(s, k)
+            assert (~np.isnan(want_h)).sum() > 20, "the fixture holds almost no pivots to compare"
+            for got, want, side in ((got_h, want_h, "high"), (got_l, want_l, "low")):
+                bad = np.flatnonzero(~((np.isnan(got) & np.isnan(want)) | (got == want)))
+                assert not bad.size, (
+                    f"on {tf}, `_pivots` disagrees with the fractal definition at candles "
+                    f"{bad[:5].tolist()} on the {side} side: it reports {got[bad[:5]]} where a "
+                    f"{k}-each-side window centred on candle i-{k} gives {want[bad[:5]]}"
+                )
+
+    def test_the_close_location_value_is_plus_one_at_the_high_and_minus_one_at_the_low(self):
+        """`_clv` is the `flow` family's proxy for WHO took the candle: +1 means the buyer closed
+        it on its high, -1 means the seller closed it on its low. Its sign is the only directional
+        content in `flow.volume_thrust` and `flow.absorption_narrow_range`; transposed, both take
+        the opposite side of every trade they signal and nothing anywhere raises, because a
+        backwards aggression reading is still a number in [-1, +1].
+
+        The three candles below are the definition itself, and the fourth pins the documented
+        answer for a candle with no range at all — 0, not a NaN and not an infinity, because a
+        NaN here becomes an arbitrary int8 position.
+        """
+        prices = [(10.0, 12.0, 8.0, 12.0),    # closes on its high: the buyer took it
+                  (10.0, 12.0, 8.0, 8.0),     # closes on its low: the seller took it
+                  (10.0, 12.0, 8.0, 10.0),    # closes dead centre: nobody took it
+                  (10.0, 10.0, 10.0, 10.0)]   # no range at all
+        cols = np.array(prices, dtype=float)
+        s = Series("1h", np.arange(4, dtype=np.int64) * BY_NAME["1h"].ms,
+                   cols[:, 0], cols[:, 1], cols[:, 2], cols[:, 3], np.full(4, 100.0))
+        assert flow._clv(s).tolist() == [1.0, -1.0, 0.0, 0.0], (
+            f"_clv reads {flow._clv(s).tolist()} for candles that close at their high, at their "
+            "low, at their midpoint and with no range; the contract is [+1, -1, 0, 0] and the "
+            "first two are the ones that carry the direction"
+        )
+
+    def test_a_percentile_is_measured_against_the_window_that_ends_at_the_bar(self):
+        """`_rolling_rank` answers "how extreme is today, against the last n days?" and seven
+        `volatility` hypotheses gate on it. Two faults leave it perfectly causal and quietly wrong:
+        ranking the OLDEST bar of the window instead of the current one — which describes a bar up
+        to n-1 candles stale, so the regime filter lags by a window — and dividing by n instead of
+        the n-1 other observations, which shaves every percentile just under its true value and
+        drags each gated hypothesis across its own threshold.
+
+        On a strictly increasing series the current bar is the largest thing in any window that
+        ends on it, so its percentile is exactly 1, and 0 on the mirror. The third case is the
+        interior: 2.5 beats three of the four observations in [0, 1, 2, 3, 2.5], which is 0.75.
+        """
+        rising = np.arange(500.0)
+        assert np.unique(volatility._rolling_rank(rising, 100)[99:]).tolist() == [1.0], (
+            "on a strictly increasing series every bar is the highest of the 100 that end on it, "
+            "so its percentile is 1.0 — this is what a rank of the wrong bar of the window, or a "
+            "divisor of n rather than the n-1 observations it is compared against, cannot produce"
+        )
+        assert np.unique(volatility._rolling_rank(rising[::-1].copy(), 100)[99:]).tolist() == [0.0]
+        interior = volatility._rolling_rank(np.array([0.0, 1.0, 2.0, 3.0, 2.5]), 5)
+        assert interior[4] == pytest.approx(0.75), (
+            f"2.5 is above three of the other four observations in [0, 1, 2, 3], so its percentile "
+            f"is 0.75; `_rolling_rank` says {interior[4]}"
+        )
+        assert np.isnan(interior[:4]).all(), "a percentile was reported before a full window exists"
+
+    def test_the_prior_extreme_is_the_extreme_of_the_window_it_names(self):
+        """`_prior_extreme` finds the swing the current bar is diverging FROM, and the two
+        `momentum` divergence hypotheses compare today's high against it. Transposing max and min
+        leaves it causal and in range while comparing today's high to the lowest low of the last
+        hundred candles, so "divergence" becomes an unrelated inequality that is true most of the
+        time — and a hypothesis that fires almost always is worse than one that never fires,
+        because it looks like an edge.
+
+        Asserted against the window the docstring names, over a random walk with no ties.
+        """
+        win, sep = momentum._DIV_WINDOW, momentum._DIV_SEPARATION
+        x = np.random.default_rng(7).standard_normal(400).cumsum()
+        for find_max, pick, word in ((True, np.max, "highest"), (False, np.min, "lowest")):
+            j = momentum._prior_extreme(x, find_max)
+            assert (j[:win] == -1).all(), "an extreme was claimed before a full window exists"
+            for i in range(win, x.size):
+                lo, hi = i - win, i - sep
+                assert lo <= j[i] <= hi, (
+                    f"bar {i} was handed the extreme at {j[i]}, outside the window "
+                    f"[{lo}, {hi}] it is documented to search — {i - j[i]} candles back"
+                )
+                assert x[j[i]] == pick(x[lo:hi + 1]), (
+                    f"bar {i} was handed {x[j[i]]} as the {word} value of x[{lo}:{hi + 1}], "
+                    f"whose {word} is {pick(x[lo:hi + 1])}"
+                )
+
+    def test_an_isolated_event_is_held_for_exactly_the_candles_the_family_declared(self):
+        """The event hypotheses bet that an effect is TRANSIENT, and the horizon is the bet.
+        `structure`, `flow` and `candles` each carry their own copy of "hold this for n candles",
+        and each is one character from holding for n+1 — which quietly lengthens the horizon of
+        eleven hypotheses past the `params` they were pre-registered with. A pre-registered
+        parameter that the code does not obey is not a hypothesis any more, it is a search.
+
+        One pulse, far from either end, so the answer is a run length and not an edge effect.
+        The three are asserted against the same expected indices as well as against each other:
+        they implement one convention, and a convention that three modules disagree about is not
+        one.
+        """
+        n, at, bars = 30, 5, structure._HOLD
+        pulse = np.zeros(n, dtype=np.int8)
+        pulse[at] = 1
+        expected = list(range(at, at + bars))
+
+        held = {
+            "structure._hold_n": structure._hold_n(pulse == 1, pulse == -1, bars),
+            "flow._hold": flow._hold(pulse, bars),
+            "candles._hold": candles._hold(pulse, bars),
+        }
+        for who, out in held.items():
+            assert np.flatnonzero(out).tolist() == expected, (
+                f"{who} holds a single event fired at candle {at} over "
+                f"{np.flatnonzero(out).tolist()} — {int((out != 0).sum())} candles. The declared "
+                f"horizon is {bars}, counting the signal candle itself, so it is candles "
+                f"{at}..{at + bars - 1}. One candle either way is a different hypothesis."
+            )
+            assert (out[expected] == 1).all(), f"{who} held the event with the wrong sign"
+
+    def test_the_clock_helpers_agree_with_the_calendar(self):
+        """The eleven `seasonality` hypotheses are claims about WHEN and nothing else, so the
+        calendar helpers are their entire content. An epoch offset one day out moves every one of
+        them to the wrong day of the week; an expiry that is not a Friday is not an expiry; a
+        day-of-month that starts at 0 shifts the turn-of-month window at both ends. None of that
+        raises, none of it is visible in a signal series, and all of it is checkable against a
+        calendar this project did not write.
+
+        Six years of daily instants, a leap year included, plus a stretch of hours.
+        """
+        step = BY_NAME["1d"].ms
+        days = (1_500_000_000_000 - 1_500_000_000_000 % step) + np.arange(2200, dtype=np.int64) * step
+        hours = 1_500_000_000_000 + np.arange(500, dtype=np.int64) * BY_NAME["1h"].ms
+        ts = np.concatenate([days.astype(np.int64), hours])
+        truth = [datetime.fromtimestamp(int(t) / 1000, tz=UTC) for t in ts]
+
+        assert seasonality._weekday(ts).tolist() == [d.weekday() for d in truth], (
+            "the weekday of an instant does not agree with the calendar; 1970-01-01 was a "
+            "Thursday and every seasonality window is placed relative to that"
+        )
+        assert seasonality._hour_utc(ts).tolist() == [d.hour for d in truth]
+
+        dom, length = seasonality._day_of_month(seasonality._date(ts))
+        assert dom.tolist() == [d.day for d in truth], (
+            "the day of the month does not agree with the calendar — the turn-of-month window is "
+            "counted from both ends of this number"
+        )
+        assert length.tolist() == [calendar.monthrange(d.year, d.month)[1] for d in truth]
+
+        expiry = seasonality._last_friday(seasonality._date(ts).astype("datetime64[M]"))
+        as_dates = [datetime.fromisoformat(str(v)) for v in expiry.astype("datetime64[D]")]
+        assert {d.weekday() for d in as_dates} == {4}, (
+            "the monthly expiry fell on "
+            f"{sorted({calendar.day_name[d.weekday()] for d in as_dates})}; it is the LAST FRIDAY "
+            "of the month, and a Deribit or CME expiry on any other day is not an expiry"
+        )
+        assert all((d + timedelta(days=7)).month != d.month for d in as_dates), (
+            "the expiry date is a Friday, but another Friday follows it in the same month, so it "
+            "is not the LAST one"
+        )
+
+
+# ------------------------------------------------------------------------------------------
+class TestAmbiguityIsNotATieBreak:
+    """The two places in the library where a candle can satisfy the long rule and the short rule
+    at once, and the convention both of them declare: on such a candle there is NO information, so
+    nothing new is entered and whatever was held is held.
+
+    This is not a style rule, it is the difference between a measurement and a bias. `_events`
+    states it in a docstring; `_chandelier_trail` states it in a twenty-line comment written after
+    an audit found the opposite in the code — the two assignments trampled each other, the short
+    was written second and therefore always won, and the ambiguous zone appears precisely in wide
+    ranges, which is the regime that hypothesis's own `prior` predicts losses in. A tie-break that
+    systematically goes short exactly where the answer is being measured does not add noise, it
+    adds sign, and the result stops being interpretable.
+
+    Reintroducing that fault today leaves all six properties above green. So it is pinned here.
+    """
+
+    def test_an_event_that_is_both_directions_at_once_is_no_event(self):
+        """`structure._events` is the encoder every event hypothesis in the family goes through.
+        On a candle that breaks up and breaks down there is no direction to be had, and picking
+        one — whichever of the two assignments happens to be written second — silently gives the
+        whole family a house bias on exactly the candles that are hardest to read."""
+        up = np.array([True, False, True, False])
+        dn = np.array([True, True, False, False])
+        assert structure._events(up, dn).tolist() == [0, -1, 1, 0], (
+            f"_events reads {structure._events(up, dn).tolist()} for candles that fire both ways, "
+            "down only, up only, and neither. The first must be 0: an arbitrary tie-break there "
+            "is a direction nobody chose, taken on the most ambiguous candles in the sample."
+        )
+
+    @pytest.mark.parametrize("name", ["volatility.chandelier_atr_trail",
+                                      "volatility.chandelier_fixed_pct"])
+    def test_the_chandelier_holds_its_position_through_the_zone_where_both_stops_apply(
+            self, name, synth_series):
+        """The audited fault, made red. When the 22-candle range is wider than twice the buffer the
+        long stop sits ABOVE the short stop, and a close between them is above one and below the
+        other. The Chandelier rule — and the hypothesis's own rationale — is that the trail is only
+        ever left by crossing it, so such a candle carries the previous position forward.
+
+        Both arms are run, and that is the point rather than thoroughness: `chandelier_fixed_pct`
+        is the CONTROL that makes this family's claim testable, and a control that tie-breaks
+        differently from the hypothesis it controls is measuring the tie-break as well as the
+        scaling. The two must share the rule or the comparison between them means nothing.
+
+        The stops are rebuilt from the PRE-REGISTERED `params` — the record each hypothesis was
+        declared with — rather than from the function under test. The zone being non-empty and
+        being entered at least once while LONG are asserted too: a rule that always went short on
+        an ambiguous candle agrees with a carried short, so without those two lines this would
+        pass on a fixture that happened never to enter the zone long.
+        """
+        h = REGISTRY[name]
+        window = h.params["window"]
+
+        for tf in h.timeframes:
+            s = synth_series[tf]
+            hi = np.ascontiguousarray(s.high, dtype=np.float64)
+            lo = np.ascontiguousarray(s.low, dtype=np.float64)
+            close = np.ascontiguousarray(s.close, dtype=np.float64)
+            if "mult" in h.params:
+                buffer_ = h.params["mult"] * talib.ATR(hi, lo, close, h.params["atr_period"])
+                long_stop = talib.MAX(hi, window) - buffer_
+                short_stop = talib.MIN(lo, window) + buffer_
+                width = f"{h.params['mult']}·ATR-{h.params['atr_period']}"
+            else:
+                pct = h.params["buffer_pct"]
+                long_stop = talib.MAX(hi, window) * (1.0 - pct)
+                short_stop = talib.MIN(lo, window) * (1.0 + pct)
+                width = f"{pct:.0%} of the level"
+            both = (close > short_stop) & (close < long_stop)     # NaN compares False either way
+
+            sig = h.signals(s)
+            zone = np.flatnonzero(both)
+            zone = zone[zone > h.min_warmup]
+            assert zone.size, (
+                f"{name} on {tf}: the fixture never puts the close between the two stops, so this "
+                f"test asserts nothing. It needs a {window}-candle range wider than twice "
+                f"{width} to exist at all.")
+            assert (sig[zone - 1] == 1).any(), (
+                f"{name} on {tf}: every ambiguous candle is entered from a short, so a rule that "
+                "always went short on them would pass this unchanged. The fixture has to enter "
+                "the zone long at least once for the assertion below to mean anything.")
+            moved = zone[sig[zone] != sig[zone - 1]]
+            assert not moved.size, (
+                f"{name} on {tf}: the position changed on candles {moved[:5].tolist()}, where the "
+                f"close is both above the {window}-candle low plus {width} and below the "
+                f"{window}-candle high minus it. Neither stop was crossed, so there is nothing "
+                f"there to act on: {int(moved.size)} candles were handed a direction by whichever "
+                "of the two assignments happens to run second."
+            )
+
+
+# ------------------------------------------------------------------------------------------
+class TestARetestIsAReturnToTheLevel:
+    def test_the_level_has_to_be_touched_again_before_the_retest_fires(self):
+        """`structure.retest_hold` is named after the thing it waits for: price breaks a level,
+        comes BACK to it, and holds. The coming back is read off the candle's low, which is where
+        a pullback lives; read off its high instead, the condition becomes "the whole candle fell
+        back below the level", which is a different and much rarer configuration — so the
+        hypothesis keeps firing, keeps clearing every property in this file, and is no longer
+        measuring a retest. A hypothesis mis-named in the catalogue is worse than one that does
+        not fire, because the reader validates it believing it is something else.
+
+        Two hand-built markets, identical except for one candle's low: in the first, price wicks
+        back to the broken level and closes above it; in the second it never comes back at all.
+        The second is the control — without it, a rule that fired on every breakout would pass.
+        """
+        def channel(*, comes_back: bool) -> Series:
+            n, brk = 320, 240
+            step = BY_NAME["1h"].ms
+            t0 = 1_600_000_000_000 - 1_600_000_000_000 % step
+            ts = t0 + np.arange(n, dtype=np.int64) * step
+            o, h, l, c = (np.full(n, 105.0), np.full(n, 110.0),
+                          np.full(n, 100.0), np.full(n, 105.0))
+            o[brk], h[brk], l[brk], c[brk] = 110.0, 116.0, 104.0, 115.0   # the break, closing above
+            for i in range(brk + 1, n):                                   # and then it drifts
+                o[i], h[i], l[i], c[i] = 113.0, 114.0, 112.0, 113.0
+            if comes_back:
+                l[brk + 2] = 109.0                      # a wick down to the broken level, and only
+            return Series("1h", ts.astype(np.int64), o, h, l, c, np.full(n, 100.0))  # the wick
+
+        h = REGISTRY["structure.retest_hold"]
+        fired = np.flatnonzero(h.signals(channel(comes_back=True)))
+        assert fired.tolist() == list(range(242, 242 + structure._HOLD)), (
+            f"price broke the 20-candle high at candle 240 and wicked back to it at 242, closing "
+            f"above it again. The retest is at 242 and is held for {structure._HOLD} candles; the "
+            f"hypothesis fired on {fired.tolist()}. Nothing fires if the return is read off the "
+            "candle's high, because the high never came back below the level."
+        )
+        never = np.flatnonzero(h.signals(channel(comes_back=False)))
+        assert not never.size, (
+            f"price broke the level at candle 240 and never traded back to it, yet the retest "
+            f"fired on {never.tolist()}. Then it is not waiting for a retest, it is a breakout."
+        )
+
+
+# ------------------------------------------------------------------------------------------
 class TestEveryDeclaredTimeframeRuns:
     def test_it_runs_on_every_timeframe_it_declared(self, real_series):
         """`timeframes` is what the picker offers the user, and `/api/validate` runs whatever they
@@ -979,6 +1490,25 @@ class TestEveryDeclaredTimeframeRuns:
         )
 
 
+#: The hypotheses that take one side and say so in their own name: a hammer is a bullish reversal,
+#: a shooting star a bearish one, "weekend short" is a short. For these, holding one direction over
+#: nine years of BTC is the claim itself, not a symptom of a lost direction.
+ONE_SIDED_BY_CONSTRUCTION = {
+    "candles.hammer_oversold",
+    "candles.range_gap",
+    "candles.shooting_star_overbought",
+    "candles.three_directional_bars",
+    "flow.nvi_fosback",
+    "seasonality.asia_hours_short",
+    "seasonality.friday_derisk_short",
+    "seasonality.post_monthly_expiry_long",
+    "seasonality.pre_quarterly_expiry_short",
+    "seasonality.turn_of_month_long",
+    "seasonality.us_cash_hours_long",
+    "seasonality.weekend_short",
+}
+
+
 # ------------------------------------------------------------------------------------------
 class TestTheyActuallyFire:
     def test_every_hypothesis_takes_a_position_at_some_point_on_real_btc(self, real_series):
@@ -1002,4 +1532,37 @@ class TestTheyActuallyFire:
             f"{unexpected}. A hypothesis that cannot fire is dead code that still consumes a slot "
             "in the multiple-comparisons correction, making every other result look worse for "
             "nothing. Either its condition is unsatisfiable or its warm-up never clears."
+        )
+
+    def test_a_hypothesis_that_is_not_one_sided_by_name_takes_both_sides(self, real_series):
+        """`.any()` is satisfied by a rule that can only ever go one way, so the test above cannot
+        tell a working two-sided hypothesis from one that has quietly lost a direction.
+
+        That is not hypothetical arithmetic. `trend._supertrend` releases its band on the PREVIOUS
+        close; move that read to the current close and the release condition becomes unsatisfiable
+        — the hypothesis is short on 100% of the candles of every timeframe it declares, over nine
+        years of BTC, and every property in this file stays green. A trend follower that cannot go
+        long in a market that spent most of the sample rising does not fail loudly; it reports a
+        plausible negative edge, which is exactly the kind of result a catalogue like this one is
+        supposed to be able to believe.
+
+        Asserted as a subset so that a rare hypothesis finally showing its second side is an
+        improvement rather than a red gate — the same lesson the exact-set assertion above was
+        rewritten for. The window is the fixed one, so the measurement does not move with the
+        market.
+        """
+        one_sided = {
+            name for name in NAMES
+            if not (any((SIGNALS.of(REGISTRY[name], real_series[tf]) == 1).any()
+                        for tf in REGISTRY[name].timeframes)
+                    and any((SIGNALS.of(REGISTRY[name], real_series[tf]) == -1).any()
+                            for tf in REGISTRY[name].timeframes))
+        }
+        lost_a_side = sorted(one_sided - ONE_SIDED_BY_CONSTRUCTION)
+        assert not lost_a_side, (
+            f"these hypotheses take only one side over {N_REAL} real candles of every timeframe "
+            f"they declare, and their names do not say they should: {lost_a_side}. Either the "
+            "condition for the other direction has become unsatisfiable, or the hypothesis is "
+            "directional by construction and belongs in ONE_SIDED_BY_CONSTRUCTION with a line "
+            "saying why."
         )

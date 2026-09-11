@@ -1,15 +1,21 @@
 # What the test suite protects, and what it does not
 
-**996 tests, ~6.5 s, `pytest -m "not net"`.** One test is deselected by that flag (`net`, it hits
-the real Binance archive). The suite gates deploys and it is no longer under five seconds.
-Measured 2026-09-11 against commit `01ab1fd`, on the machine, with `PYTHONDONTWRITEBYTECODE=1`.
+**1,087 tests, 6.5 s, `pytest -m "not net"`.** One test is deselected by that flag (`net`, it
+hits the real Binance archive). The suite gates deploys and it is no longer under five seconds.
+Measured 2026-09-11 against `fa41ba3` plus this round's uncommitted test additions, on the
+machine, with `PYTHONDONTWRITEBYTECODE=1`.
+
+**The previous headline said 996 and the real number at the commit it named was 983.** It was
+counted, not measured: 983 executed there, 1,001 at `fa41ba3`, 1,087 now. A headline count is the
+cheapest claim in this file to check and it was the first one wrong, which is the argument for
+every date below it.
 
 **The trap this paragraph used to describe is gone, and saying so is the point of the date above.**
 It read: the flag is not a default, `pyproject.toml` sets `addopts = "-q --strict-markers"` and
 nothing else, so a bare `uv run pytest` — which is what `make test` runs — selects the `net` test
 and goes to the internet. It no longer does. `addopts` is now `-q --strict-markers -m 'not net'`,
 with a comment in `pyproject.toml` giving the same reasoning this document gave, so a bare run,
-`make test` and CI all execute the same 996 tests and none of them opens a socket. `-m net` (or
+`make test` and CI all execute the same 1,087 tests and none of them opens a socket. `-m net` (or
 `make test-net`) runs that one test on its own, in about 5 s, and needs the internet. Verified by
 running all three. The stale version of this paragraph had survived at least one commit.
 
@@ -49,8 +55,15 @@ verifying the file is byte-identical by sha256.
    `web/assay.js` actually reads. `/api/validate`, `/api/validate_csv` and `/api/validate_rule`
    are still not exercised end to end; what they call is heavily tested, what they put on the wire
    is not.
-3. **Five modules have no tests at all**: `core/bus.py`, `feeds/binance_derivs.py`,
-   `store/trials.py`, `collect.py`, `registry.py`.
+3. **Two modules have no tests at all**: `feeds/binance_derivs.py` and `store/trials.py`.
+   It was five. `collect.py` now has its own file — it is the entry point systemd runs on the VPS
+   and what it records cannot be backfilled from anywhere, so it was the worst of the five to leave
+   uncovered. `core/bus.py` and `registry.py` are gone rather than tested: nothing in the repository
+   imported either, and between them they implemented an extensibility story the README described
+   and the code did not have — one of five declared seams exists as a Protocol, no feed declares it,
+   and the registry that would have made any of them pluggable was never called. 167 lines a reader
+   would reasonably have believed were load-bearing. Deleting them is the anti-astronaut rule the
+   README states, applied to the paragraph stating it.
 4. **The R:R quoted on a signal is no longer computed at a different entry price from the one the
    trade is booked at.** That was this document's headline inconsistency for two rounds; it has
    been resolved at the fill and the record of what was wrong is under "Inconsistencies that have
@@ -84,94 +97,114 @@ tidies the unrelated thing.
 
 ## Kill rate by module
 
-**Every row carries the date it was last measured on, and two of them are from today.** The table
-has now been stale once — it read "Left open: 0" for two rows that between them held twenty-two
-live survivors — and the fix for that is a date, not a promise. A row with no date is a row whose
-number has not been reproduced since it was written, and it should be read as history rather than
-as a claim about the code as it stands. **Do not add the columns together.** A mixed total that
-looks uniform is exactly how this document went wrong before; the two halves are totalled
-separately below.
+**One table, one date, one tree — and now the columns CAN be added together, because every row
+in it was produced by the same pass against the same source.** The date is the mechanism, not a
+promise: this table has been stale twice, both times reading "Left open: 0" for rows that held
+live survivors — twenty-two the first time, thirty-one the second. The fix that failed was adding
+a date to some rows and leaving the rest undated below a horizontal rule, because an undated row
+is still read as a claim. So there is no second half any more. **A module that cannot be measured
+gets a row saying so, never an omission**: an omitted module reads as zero, and zero is the one
+number this document has never been entitled to.
 
-### Re-measured 2026-09-11 against commit `01ab1fd`
+### Measured 2026-09-11 against `fa41ba3` + this round's test additions
 
-Two independent campaigns, one per module group, each running the full suite against one fault at
-a time and verifying the source byte-identical by sha256 after every revert.
+**One block, one date, one tree. No carried-forward rows and no split**, because every module in
+the repository now has a measurement from this round. The split that used to sit here — two fresh
+rows above nine undated ones — is what let five rows reading "Left open: 0" hold **twenty-nine**
+live survivors between them, and a sixth reading "Left open: 2" hold **twenty**.
+
+Nine campaigns injected 433 faults across the modules that had not been re-measured, and this pass
+re-applied every one of the 100 they reported as surviving, plus 36 fresh faults against the four
+files the campaigns did not cover (`waves/projection.py`, `waves/rules.py`, `engine/live.py`,
+`backtest/run.py`), whose last measurement was two commits back. Every fault was applied one at a
+time by script, run against the complete suite, reverted, and the file confirmed byte-identical by
+sha256 before the next one started.
 
 | Module | Faults injected | Closed | Left open | Equivalent — no test possible |
 |---|---|---|---|---|
-| `waves/projection.py`, `waves/rules.py` | 78 | 73 | 0 | 4 (+1, see below) |
-| `engine/live.py`, `backtest/run.py` | 52 | 49 | 0 | 3 |
-| **Total, re-measured** | **130** | **122** | **0** | **7 (+1)** |
+| `core/` (causality, ring, types, timeframes, clock, **bus**) | 52 | 45 | 4 | 3 |
+| `waves/pivots.py`, `waves/store.py` | 51 | 48 | 0 | 3 |
+| `waves/matcher.py` | 20 | 20 | 0 | 0 |
+| `labeling/barriers.py` | 20 | 17 | 1 | 2 |
+| `validation/battery.py` | 49 | 47 | 2 | 0 |
+| `validation/evaluate.py` | 24 | 22 | 0 | 2 |
+| `validation/expr.py`, `reality_check.py`, `csv_import.py` | 40 | 39 | 1 | 0 |
+| `feeds/`, `store/bars.py`, `store/hydrate.py` | 40 | 39 | 0 | 1 |
+| `server/app.py`, `server/limits.py`, `store/trials.py` | 40 | 28 | 11 | 1 |
+| `hypotheses/` (100 hypotheses, ~5,400 lines) | 57 | 44 | 0 | 13 |
+| `config.py`, `registry.py`, `collect.py`, `store/schema/*.sql` | 40 | 23 | 17 | 0 |
+| `waves/projection.py` | 9 | 9 | 0 | 0 |
+| `waves/rules.py` | 12 | 12 | 0 | 0 |
+| `engine/live.py` | 8 | 7 | 0 | 1 |
+| `backtest/run.py` | 7 | 7 | 0 | 0 |
+| **Total** | **469** | **407** | **36** | **26** |
 
-Both rows read "Left open: 0" only because twenty-two holes were closed in this pass. As the
-campaigns found them the numbers were **67 of 78** and **33 of 52** — six genuine holes in
-`projection.py` and sixteen in `decide()` and `run_backtest`. Each of the twenty-two is listed
-under "Closed 2026-09-11" below with the fault, the test that now kills it, and what it changed
-while nothing noticed. Every one was re-applied after its test was written, watched go red on that
-named test, reverted, and the file confirmed byte-identical.
+**407 of 443 observable faults closed — 91.9%.** Do not read that number without the thirty-six
+beside it, and do not read either without the residual list below, which says what each of the
+thirty-six is and what would close it. The kill rate is the cheap half of this table.
 
-The `(+1)` is one mutant that is neither closed nor equivalent and is deliberately not chased: the
-noise-floor refusal hardcodes `1.0` as its size factor, and replacing that with `size` is
-observable only when `cfg.max_stop_atr < stop_atr < cfg.min_stop_atr`, which needs a `PlanConfig`
-whose floor is above its own ceiling. A test for it would be a test of a self-contradictory
-configuration. The real finding is a missing invariant — `PlanConfig` does not validate the two
-against each other — and it is recorded as a config-validation gap, not as a test hole.
+Five rows have changed shape rather than value and the reason is worth keeping:
 
-`waves/rules.py` came through the re-measurement untouched: 24 of 24 realistic faults died,
-including every hard-rule boundary (`>` loosened to `>=` on R1, R2b and R3 each dies to a named,
-direction-parametrised test), the truncation boundary, the invalidation vertex in both directions,
-the evaluable/non-evaluable filter, and both Fibonacci helpers. Every hole was in `projection.py`
-and in what `decide()` publishes.
+- **`core/` now names `bus.py`**, which the old row's parenthetical silently omitted. All four of
+  its faults survive, and they survive because **nothing in the repository imports `core/bus.py`** —
+  `grep -rn "core.bus" src tests scripts` returns nothing. Its four open faults are the four
+  cheapest in the table to close and the four least worth closing; the decision they are waiting on
+  is whether the file ships at all.
+- **`waves/matcher.py` and `labeling/barriers.py` have their own rows for the first time.** The
+  previous table bundled each into a group and lost the ability to re-measure either separately;
+  that debt is paid and neither file should be folded into a group again.
+- **`validation/battery.py` and `evaluate.py` are split.** They were one row of 33, and they are
+  not alike: 47 of 49 faults die in the battery and only 15 of 24 died in `evaluate.py` before this
+  round. Seven of those nine survivors had one cause — every `evaluate_all` fixture in the suite was
+  a long-only rule on an evenly-spaced series, which turns four separate guards into algebraic
+  identities. Two new fixtures, a short and a selective one, closed four of them at once.
+- **`server/app.py` is measured for the first time**, and it is the worst row in the table. The gate
+  on the three private routes is airtight (8 faults, 8 kills) and everything the gate does not
+  cover was uncovered to the floor.
+- **`config.py` and `registry.py` are measured for the first time ever.** Neither had a row of any
+  kind; `config.py` decides what the engine is, and the schema files had never been executed by
+  anything.
 
-### NOT re-measured this round — carried from the previous pass
+**The denominator, stated once.** Every figure above is against a suite in which **all tests
+execute and none skip**. That was verified rather than assumed, at three commits: `01ab1fd`
+executes 983 with 0 skipped, `fa41ba3` executes 1,001 with 0 skipped, and the tree measured here
+executes 1,087 with 0 skipped — each with `data/bars` present. The earlier caveat in this section
+was right about the mechanism and wrong about the campaigns: **without** `data/bars` a worktree
+runs 894 and skips 107 (the real-candle arm of `tests/test_hypothesis_library.py`), and all nine
+campaigns symlinked that store read-only rather than accepting the smaller net. The 983 that
+paragraph quoted in the present tense was already a commit out of date when it was written.
 
-These numbers were produced the same way, but the last time they were reproduced was a previous
-round whose date this document did not record. That omission is the reason for the column above.
+**Nothing in this round was a phantom, and that was measured rather than argued.** Every fault the
+current suite kills was re-applied against the tests as they stood at `fa41ba3`, in a tree built by
+`git archive` with `data/` symlinked in, and **all 72 survived it.** So each of the seventy-two is a
+hole that was genuinely open before this round and is genuinely closed by a test written in it —
+none was already dead in a test the campaign had not run.
 
-| Module | Faults closed | Left open | Equivalent | Last reproduced |
-|---|---|---|---|---|
-| `core/` (causality, ring, types, timeframes, clock) | 18 | 0 | 4 | previous round, undated |
-| `waves/pivots.py`, `waves/store.py` | 10 | 0 | 3 | previous round, undated |
-| `validation/battery.py`, `evaluate.py` | 33 | 0 | 2 | previous round, undated |
-| `validation/expr.py`, `reality_check.py`, `csv_import.py` | 32 | 1 | 1 | previous round, undated |
-| `feeds/`, `store/bars.py`, `store/hydrate.py` | 28 | 0 | 1 | previous round, undated |
-| the served decision path (`/api/decide`, the PUBLIC gate, `LiveEngine.decide`'s wire keys) | 10 | 0 | — | previous round, undated |
-| `web/app.js`, decision panel only (the keys it reads off the card) | 4 | — | — | previous round, undated |
-| `hypotheses/` (100 hypotheses, ~5,400 lines) — six properties, not their arithmetic | 11 | 2 | — | previous round, undated |
-| the catalogue's titles (`Hypothesis.title`, `/api/hypotheses`, `web/assay.js`, hyp.{es,ca}.json) | 8 | 0 | — | previous round, undated |
-| **Total, carried forward** | **154** | **3** | **11** | |
-| `waves/matcher.py` | **share not recorded** | ? | ? | previous round, undated |
-| `labeling/barriers.py` | **share not recorded** | ? | ? | previous round, undated |
-| `server/app.py`, the three validation routes | **never measured** | — | — | — |
+That check cost two attempts, and the first one is the more useful half. The venv carries an
+**editable install of the main checkout**, so a pytest run started inside the archived tree
+imported `/Users/danieljimenezroque/wavelab/src` — the source that was *not* being mutated. Every
+mutation was a no-op and the results were noise picked up from a campaign running concurrently in
+the other tree; it reported four phantoms that do not exist. It was caught by making the harness
+print `wavelab.core.types.__file__` and assert it sits under the tree about to be edited, and the
+rule generalises past this repo: **verifying the source file by sha256 proves you edited the right
+file, not that the tests imported it.** Pin it with `PYTHONPATH`, and assert the pin.
 
-The last two "share not recorded" rows are a debt this round created and cannot pay. The previous
-table bundled `waves/rules.py, matcher.py, projection.py` into one row of 41 and
-`engine/live.py, labeling/barriers.py, backtest/run.py` into one row of 30, with no per-file
-breakdown written down anywhere. This round re-measured four of those six files and produced fresh
-numbers for them; there is no way to say how many of the old 41 belonged to `matcher.py` or how
-many of the old 30 to `labeling/barriers.py`, so their counts are not carried forward as though
-they were current and are not silently folded into a total either. Whoever measures those two files
-next should give them their own rows. The lesson generalises: **bundle files into a row and you
-lose the ability to re-measure any of them separately.**
+The `.pyc` warning in "Reproducing any claim" bit this round too, in the one shape it can still
+bite through a mtime check. A mutant that is the *same length* as the line it replaces —
+`if n == 0:` → `if n <= 1:` — leaves the file the same size, and a revert inside the same second
+leaves the recorded mtime unchanged too. Python then accepts the cached bytecode as valid and the
+**mutant keeps running against pristine source**. It surfaced as a newly written test failing in
+the full suite while its own file's sha256 matched `HEAD` exactly. The scripted harness purges
+`__pycache__` on both sides of every mutation and was never exposed; an ad-hoc probe that skipped
+the purge was. Purge it, or set `PYTHONDONTWRITEBYTECODE=1`.
 
-So the honest headline is **122 of 122 observable faults closed in the two module groups measured
-today**, and **154 of 157 in the nine rows whose last measurement predates today**. Read the
-second number as history. The `hypotheses/` eleven in particular are eleven faults against six
-PROPERTIES held over all 100 hypotheses, not eleven faults sampled across 5,400 lines of
-arithmetic; most of that arithmetic is still unmeasured.
+The `hypotheses/` row is narrower than its name suggests, and it is narrower than 44 of 57 makes
+it sound. It is now two things and they should be read separately: the six PROPERTIES the library
+is held to, and — new this round — the twenty-odd SHARED HELPERS the hundred hypotheses are built
+out of. The hundred `fn` bodies themselves are still unmeasured, and the reason given for that is
+still the right one.
 
-One denominator caveat that applies to today's two rows and would apply to any future one. Both
-campaigns ran in worktrees where `data/bars` was empty, so **107 of their tests skipped** — the
-real-candle arm of `tests/test_hypothesis_library.py` — and their kill rates are against 876
-executing tests rather than 983. Every one of the twenty-two holes was then re-confirmed in the
-real repository, where that store is present and all 983 tests execute: each fault was re-applied
-here and survived the complete suite before its test was written. So the survivors are not an
-artefact of the skip. A skipped arm is still a smaller net, and a campaign run that way should say
-which denominator it is quoting.
-
-The `hypotheses/` row is narrower than its name suggests, and so are the two rows above it.
-
-What the hypothesis row covers is every property `tests/test_hypothesis_library.py` asserts, each
+What the property half covers is every property `tests/test_hypothesis_library.py` asserts, each
 one killed by an edit to a real hypothesis: a one-bar lookahead planted in
 `mean_reversion._streak3` and a five-bar one in `volatility._squeeze_release`; the classic
 `structure._pivots` fault of stamping a Williams fractal on the bar of the extreme instead of the
@@ -182,19 +215,39 @@ be true; one declaring a timeframe the store cannot build; and one whose declare
 dropped below the number of candles its own function refuses to compute below. Each was applied,
 watched go red on a NAMED test, reverted, and the file confirmed byte-identical by sha256.
 
-Two faults in the same file are left open, both inside `Hypothesis.signals`, and both are open for
-the same reason: the registry as it stands cannot tell the difference.
+**The two faults this section used to leave open are closed, and the reasoning that left them open
+was wrong in an instructive way.** Both are inside `Hypothesis.signals`: the `dtype=np.int8` cast,
+and the `raise ValueError` for a wrong-length return. The entry argued that no REGISTERED
+hypothesis reaches either line, so the registry cannot tell the difference — and that is true and
+beside the point. The distinguishing input was never going to be a registered hypothesis; it is a
+fabricated one, and `TestTheHarnessHasTeeth` in the same file already builds five of those. Six
+lines of fabrication reach both lines, and both faults now die.
 
-- **The `dtype=np.int8` in `np.asarray(self.fn(s), dtype=np.int8)` can be deleted and the suite
-  stays green.** Every one of the hundred already builds its own `int8` array, so the cast has
-  nothing to convert and `test_signals_returns_one_int8_per_candle`'s dtype branch is unreachable.
-  The cast is a defence against a hypothesis that returns floats, and the day one arrives the
-  alphabet property catches it on the RAW output anyway — so the cast being untested is a
-  statement about which layer holds the guarantee, not a missing test. Do not delete it: it is
-  what stops a float reaching an int8 position silently.
-- **The `raise ValueError` for a wrong-length return can be deleted too.** No hypothesis returns
-  the wrong number of signals, so nothing reaches the line. `test_signals_returns_one_int8_per_candle`
-  would catch the resulting mismatch — but only in a run where some hypothesis is already broken.
+The lesson is the shape of the excuse: **"unreachable" was a statement about the fixtures, not
+about the code.** That is the same sentence, one layer up, as a mutant that is equivalent only
+under the tests you happen to have written — which is the definition of a hole, not of an
+equivalent. Three more of this round's survivors had the same shape and are closed the same way:
+`crosses_above` was only ever crossed against a CONSTANT level, `evaluate_all` was only ever given
+a long-only rule, and `hydrate`'s newest-month refresh was only ever seeded with ONE month, where
+the newest and the oldest are the same key.
+
+**The twenty shared helpers are the other half, and they are new.** The file's standing argument
+against per-hypothesis arithmetic tests — that a hundred of them would agree with the code because
+they were copied from it — is correct and does NOT transfer to `_pivots`, `_hold`, `_hold_n`,
+`_rolling_rank`, `_clv`, `_prior_extreme` or the calendar helpers. Each of those has a definition
+independent of its implementation (a Williams fractal, a percentile, a weekday, a close-location
+value), so an oracle test is not a restatement, and each protects between two and eight hypotheses
+at once. Twenty faults in them survived the whole suite before this round: sign flips, off-by-one
+hold windows, misaligned-but-still-causal windows, and three calendar unit slips. All twenty are
+closed, most of them by a single test per helper checked against the stdlib or against numpy.
+
+One of those twenty was not an arithmetic fault at all. **`structure._hold`'s pre-first-event fill
+could read `ev[-1]` — the last candle of the entire series — and the causality property did not
+see it**, because on every fixture in the suite the event-driven hypotheses get their first event
+INSIDE their own warm-up, where `signals()`'s mask zeroes exactly the bars the leak touches. The
+fix was a fixture, not a property: a quiet market whose only event is its last candle. On it the
+existing `acausal_probe` reports bar 320 and 800 disagreements. A causality suite that cannot see
+a lookahead because its fixtures are too eventful is worth recording as its own failure mode.
 
 The titles row is the one added with this document's own machinery pointed at the newest work,
 and it is worth reading because seven of its eight faults were live survivors before the tests
@@ -443,34 +496,191 @@ the product publishes, which this suite's own standard refuses.
 
 ---
 
-## Faults deliberately left open, and why
+## Faults left open, and why — the residual list
 
-One entry stands here. Six more used to, closed in a pass before this one, and the reasons this
-document gave for leaving them open are reproduced against each one below — because every one of those reasons was
-wrong, and wrong in the same way each time: **it described the hardest test it could think of, found
-that test bad, and stopped.** Four reasons covered the six faults; all four fell to an easier test
-that nobody had looked for. That is the failure mode to watch for in this section. If an entry here
-says "a test for this would have to X", the first question is whether it would.
+**This is the most useful section in the document and it should be read before the kill rate.**
+The table above says 407 of 443. This says what the other thirty-six are, module by module, with
+the reason each is still open and what specifically would close it. A kill rate is a summary and
+summaries are what rot here; a residual list is a set of named, reproducible facts.
 
-### `validation/` — one
+Every one of the thirty-six was applied to the source on 2026-09-11, run against the complete
+1,087-test suite, and survived it — twice, the second time serially with nothing else running on
+the machine. None is a guess.
+
+The standing warning on this section still applies, and it earned another confirmation this round:
+**if an entry says "a test for this would have to X", the first question is whether it would.**
+Four of the reasons this section once gave fell to an easier test nobody had looked for, and four
+more fell this round — every one of them a claim that the input needed was unreachable, when what
+was unreachable was only the fixture. "Unreachable" is a statement about your fixtures until you
+have shown otherwise.
+
+### 1. `core/bus.py` — four faults, and the question is not a test (4 open)
+
+`Subscription._offer` drops the NEWEST event instead of the oldest on overflow; the drop counter is
+not incremented; `maxsize or self._maxsize` becomes `and`; the close sentinel is swallowed so
+`__aiter__` never terminates. All four survive, and the first two invert a policy the module's own
+docstring spends four lines justifying — drop the oldest, because losing a bar is recoverable and
+being disconnected by Binance is an IP ban.
+
+**They survive because nothing imports `core/bus.py`.** `grep -rn "core.bus" src tests scripts`
+returns nothing; `registry.load_plugin_modules` takes an explicit module list that does not name
+it. It is 108 lines of correct, documented, unreachable code. **The action is not "write four
+tests"** — filing it under "modules with no tests" invites exactly that. Decide whether it ships:
+wire it to the live feed path it was written for, or delete it and delete this entry. If it stays,
+the four tests are cheap and named in the `core` campaign report.
+
+### 2. `server/app.py` — eleven, and this is where the real risk is (11 open)
+
+The three private routes and the `WAVELAB_PUBLIC` gate are airtight — eight faults, eight kills,
+each on a test named after what it broke, and the public front page joined them this round. **What
+the gate does not cover is uncovered to the floor.** Ranked by consequence:
+
+- **The equity curve can be dated one bar early, on all three validation routes.** `ts[1:]` →
+  `ts[:-1]`. `run_battery`'s convention fixes `equity[i]` as the equity AFTER the move from bar `i`
+  to bar `i+1`, so it must be stamped `ts[i+1]`. Under the edit the user's curve turns up BEFORE
+  the price does — the visual signature of lookahead, produced by code that has none, on the one
+  screen this product exists to make trustworthy. Nothing raises; the verdict, the Sharpe and every
+  test are unaffected, because only the rendering timestamps move. *Closes it:* drive
+  `/api/validate` against the synthetic engine `test_decide_route.py` already builds and assert
+  `[p["t"] for p in body["equity_curve"]] == [int(t)//1000 for t in w.ts[1:]]`; the cheap invariant
+  that catches it without rebuilding the window is `equity_curve[0]["t"] > int(w.ts[0])//1000` —
+  no return has happened at the first bar, so the first equity point can never be dated at or
+  before it.
+- **`horizon_bars=1` → `0` on the catalogue and rule routes.** `fwd[:-0]` is the empty slice, so
+  the base-rate test reports "far too few signals" for every strategy forever and the purge gap
+  between out-of-sample folds disappears. Two of the five tests degrade to inconclusive and the
+  report still renders as a normal verdict. *Closes it:* assert that `base_rate`'s `status` is not
+  `None` on a fixture with plenty of signals. The field already distinguishes "inconclusive" from a
+  verdict and no test reads it.
+- **The CSV body-size cap is inverted** (`>` → `<`): every legitimate CSV is refused with "the file
+  is larger than 12 MB" and the 500 MB one the docstring calls an attack is accepted. Caddy's
+  `max_size 12MB` masks it in production, which is exactly why it would survive review — the
+  application-layer half of a defence-in-depth pair is the half nobody exercises. *Closes it:* POST
+  1 KB of valid CSV and assert it is not refused; POST 13 MB and assert it is.
+- **The CSV coverage guard counts flat bars as covered** (`!=` → `==`): a file that aligns to almost
+  nothing gets a verdict computed on a handful of signals, and a well-aligned one is rejected.
+  *Closes it:* a CSV aligning to exactly 2 bars must 400; one aligning to 200 must not.
+- **`_flush` never clears `_pending`**: every fifth bar re-ingests the whole backlog. `store.ingest`
+  is idempotent so nothing corrupts, but the list grows without bound against a 768 MB cap and
+  write cost grows quadratically. *Closes it:* a spy store, two flushes, assert the second received
+  exactly 5 rows and `_pending == []` after each.
+- **`_ip` is untested**, and the direction deserves a decision before a test pins it. Caddy APPENDS
+  to any `X-Forwarded-For` the client sent, so `v.split(",")[0]` may return an attacker-chosen
+  value — unlimited validations on a node where each costs 5-10 s of CPU. The mutant taking `[-1]`
+  is the version that resists it. **Settle which is right against this deployment's Caddy config
+  first**; a test written today pins whichever behaviour happens to be there.
+- **Four faults in `store/trials.py` survive** (`int(not dirty)`; `ts_ms` in seconds;
+  `INSERT OR REPLACE` → `IGNORE`; one more below). The ledger now has its first tests — the schema
+  is covered and so is the sha/dirty pairing — but the row CONTENT is not. *Closes them:* the
+  fixture already exists in `TestTheTrialLedgerSchema`; assert `ts_ms` within a second of
+  `time.time()*1000`, assert `dirty` follows `_git_sha`'s second element, and re-record the same
+  `(config_hash, kind, fixture_set)` with a different value and assert the SECOND value stands.
+
+`store/trials.py` is also imported by nothing. Unlike `bus.py` it has a caller waiting — the README's
+argument against parameter search rests on this ledger — so the fix is to wire it, not to delete it.
+
+### 3. `config.py`, `registry.py`, `collect.py` — seventeen, and three different reasons (17 open)
+
+- **`registry.py`: seven.** The dotted-name check, the seam lookup, the seam membership test, the
+  collision guard, the `SEAMS` tuple, `resolve`'s lookup, and `load_plugin_modules`'s loop all
+  survive, for one reason: **`src/wavelab/registry.py` is imported by nothing.** (`hypotheses/base.py`
+  has its own unrelated `register`/`REGISTRY`.) `AppConfig.plugin_modules` exists, is loaded, and is
+  never passed to `load_plugin_modules` — the config field and the loader never meet. The sharpest
+  of the seven is the collision guard: inverted, a second provider silently REPLACES the first and
+  `resolve` hands back the wrong one, which is the seam's only safety property. *Closes them:* one
+  `tests/test_registry.py`, about eight assertions, plus a decision on whether `plugin_modules`
+  should be wired to `load_plugin_modules` or deleted. Right now it is a knob attached to nothing.
+- **`collect.py`: five, and these are NOT dead code.** `scripts/provision_vps.sh` ships
+  `ExecStart=/opt/wavelab/.venv/bin/python -m wavelab.collect` and `scripts/deploy.sh` smoke-imports
+  it, so this is the production collection process with no test of any kind. Both liquidation
+  recorders can be pointed at `"okx"` — the copy-paste that removes the redundancy the module's own
+  comment exists to explain, while the log still prints two lines; the six-hour silence alarm can
+  become six minutes, so the one alarm an operator has fires on every quiet period until they learn
+  to ignore it; the heartbeat can print hours under an `m` suffix, understating silence 60×; the
+  derivatives poller can follow the wrong symbol; and `WAVELAB_SYMBOLS` can split on `";"`, turning
+  two symbols into one bogus one. *Closes them:* `monkeypatch.setenv` + `importlib.reload` (the
+  module computes `DATA`/`SYMBOLS` at import), fakes for the two recorder classes, and one direct
+  call of the heartbeat body at 5 h and at 7 h of silence.
+- **`config.py`: five shipped constants with no consumer.** `shadow_opposite_direction`,
+  `expected_loss_r`, `stop_buffer_pct`, `fee_bps_taker` and `r3_on` can each be changed and nothing
+  goes red. Four of the five are shadowed by `config/assets/btcusdt.toml`; the deeper problem is
+  that the values the planner actually uses are **re-declared** in `waves/projection.py:PlanConfig`
+  — `stop_buffer_atr`, `stop_buffer_pct`, `max_stop_atr`, `min_stop_atr`, `fee_bps_taker`,
+  `ev_min_r`, `expected_loss_r` all have two definitions. So `EngineConfig`'s entire risk block is
+  documentation that feeds `config_hash` and nothing else, and mutating it moves the recorded trial
+  identity without moving the engine, which is the wrong way round. **The fix is not a test.** Make
+  `PlanConfig` take its values from `EngineConfig`, or delete the duplicates. Until then a test here
+  would pin a number nothing reads. `EngineConfig` and `PlanConfig` also disagree about the same
+  invariant on the same two names — `min_stop_atr >= max_stop_atr` refuses equality in one and
+  accepts it in the other — and that should be settled in the same change.
+
+### 4. `validation/` — three, and two of them want a source change rather than a test (3 open)
 
 **Blocks are cut from the tail rather than the head.** `Mc[:, : nb * L]` keeps the first `nb` whole
-blocks, so the final `n % L` observations — the most recent ones — are dropped. Taking
-`Mc[:, n - nb * L:]` instead drops the oldest ones. Re-measured again 2026-09-11, as one of this
-round's ten spot-checks: the suite is **green** under that edit, so this is still a live survivor
-and this entry is still true. Which end is a defensible design choice rather
-than a defect, and it now carries a comment in the source saying so — including the bound that makes
-it arbitrary: the `nb >= 30` guard forces `L <= n/30`, so under 3.3% of the sample is dropped either
-way, and `Mc` was centred over all `n` observations so neither end carries the mean. The comment also
-names the condition under which it would stop being arbitrary: at `nb = 4` this would be a quarter of
-the series, and then the end you keep is a real decision about which regime the null is drawn from.
+blocks; `Mc[:, n - nb * L:]` keeps the last. Still a live survivor, re-measured 2026-09-11.
 
-Do not confuse this with `nb = n // L` itself, which is a different edit on the same line and **is**
-killed: `nb` also decides the `nb >= 30` switch between the two estimators, so
-`max(1, n // L - 1)` re-routes borderline series onto the other one and
-`test_which_of_the_two_bootstraps_runs_is_decided_at_thirty_blocks` goes red. That conflation was
-made twice while closing this section. The block COUNT is guarded; the choice of END is not.
+**The reason this entry used to give for leaving it open is wrong, and the correction matters more
+than the survivor.** It said the two are "not distinguishable at this size", bounded by the `nb >= 30`
+guard forcing under 3.3% of the sample to be dropped either way. That bounds the wrong quantity.
+Shifting the slice start by `r = n % L` **re-phases every block boundary**: block `k` covers
+`[kL, (k+1)L)` one way and `[r+kL, r+(k+1)L)` the other. Measured on a 6-strategy, n=1007 panel with
+`L=10`, where the dropped remainder is 7 observations (0.70%): **0 of 100 blocks have the same
+membership.** The bootstrap's null is a function of the partition, not of the 0.7% that fell off the
+end. Against the real `reality_check()`, p-values differ on 24 of 25 random panels by up to 0.088,
+and the `significant` verdict flips **in both directions** — not a conservative bias that could be
+waved through, but noise on the one bit the module publishes. *Closes it:* a panel long enough for
+the `nb >= 30` branch with a non-zero remainder, a fixed seed, and the assertion that a panel
+differing ONLY in its first `r` observations returns the SAME `p_value` — that is what names the
+end, where a golden number alone would not. If the team decides the end genuinely does not matter,
+the honest fix is the other one: drop the remainder symmetrically from both ends so there is nothing
+to pin. **An unpinned choice defended by a false claim is the worst of the three.** The source
+comment at `reality_check.py:144-156` carries the same wrong argument and needs the same correction.
 
+Do not confuse this with `nb = n // L`, a different edit on the same line that **is** killed: `nb`
+also decides the `nb >= 30` switch between estimators. The block COUNT is guarded; the END is not.
+
+**The two retained-fraction bars** (`keeps >= 0.5` in the delay test, `keeps_oos >= 0.5` out of
+sample) are neither closed nor equivalent, and are deliberately not chased as tests. A distinguishing
+input exists and was found by bisection — `theta = 2.072219536719574` lands `keeps` exactly on 0.5,
+0 ulps — but it is a magic constant tuned to this platform's float arithmetic and would be brittle
+across numpy versions. **The real finding is structural.** The analogous threshold in the random
+control IS closed, robustly, because the suite can assert `t.passed == (t.value >= t.reference)` —
+the decision variable is published next to the grade, so the threshold has nowhere to move. That is
+not available here because **`keeps` and `keeps_oos` are stored nowhere; they exist only inside an
+f-string**. *Closes them:* publish the retained fraction as a field on `Test`, or make
+`value`/`reference` the ratio and its bar as tests 3 and 5 already do. Then one invariant closes
+both, on every fixture at once, with no magic number. Recorded as a design gap in what `Test`
+publishes, not as a test hole.
+
+### 5. `labeling/barriers.py` — one (1 open)
+
+**Partial minute data is a crash rather than a degradation.** `i < len(fine_highs)` → `<=` raises
+`IndexError` when a both-barriers bar lands at exactly `i == len(fine_highs)` — fine data supplied
+for some bars and not this one. Ranked last of the open faults on purpose: it fails LOUDLY, and no
+shipped caller reaches it, because both call sites in `backtest/run.py` omit `fine_highs`/`fine_lows`
+entirely and the `fine_highs and …` short-circuit always wins. It is still a hole rather than an
+equivalent: `resolve_triple_barrier` is exported in `__all__`, the suite itself calls it with fine
+data, and ragged fine data is the whole reason that bounds check is written the way it is. *Closes
+it:* one call with `fine_highs=[np.array([101.0])]` against a two-bar window, asserting the
+pessimistic flagged label `("sl", True, 2)` rather than an exception.
+
+### What is NOT on this list, and should be
+
+Two things this round measured that are not faults and not tests, recorded here because the
+residual list is where someone will look for them:
+
+- **`barriers.py`'s docstring promises an alarm that does not exist.** It says the ambiguity RATE
+  "above 5% means the barriers are too close together and the labels no longer describe real
+  trades". The rate is recorded (`BacktestResult.ambiguity_rate`), but **the 5% threshold exists in
+  no code and in no test** — nothing anywhere compares it to any number. A stated alarm with no
+  alarm behind it.
+- **Nothing asserts `high >= low` on a `Bar`.** `Bar.__post_init__` validates only the UTC-grid
+  remainder. Several equivalence proofs in this round's campaigns rest on `low <= high`, which the
+  codebase relies on everywhere and states nowhere; the live WebSocket adapter could construct a
+  bar with a negative `range` and no exception was raised anywhere between the socket and the ATR.
+  That adapter now has a field-by-field test, but the invariant is one comparison in the
+  constructor and would close this class of fault on every adapter at once — including the two
+  feeds that still have no tests.
 ### Closed in the PREVIOUS pass, and what the reason for leaving them open got wrong
 
 **The cost ceiling and the noise floor** (`cost_r > max_cost_r` loosened to `>=`,
@@ -897,14 +1107,21 @@ These are not mutants that survived. They are behaviours with no test of any kin
 
 ### 1. The served path — the decision route is now covered; the validation routes are not
 
-`server/app.py` is 582 lines. `test_server_status.py` (4 tests) covers warm-up status transitions,
-`test_limits.py` (7 tests) covers rate limiting, `test_server_i18n.py` (9 tests) checks that every
-emitted string is translated, and `test_decide_route.py` (30 tests) covers `/api/decide` and the
-PUBLIC gate. `/api/hypotheses` is driven only for the catalogue prose — one test in
+`server/app.py` is **693 lines** — every count in this paragraph was wrong and they are re-counted
+here: `test_server_status.py` (**10** tests) covers warm-up status transitions, `test_limits.py`
+(**13**) covers rate limiting, `test_server_i18n.py` (**11**) checks that every emitted string is
+translated, and `test_decide_route.py` (**38**) covers `/api/decide`, `/api/history`, the websocket
+wire and the PUBLIC gate. `/api/hypotheses` is driven only for the catalogue prose — one test in
 `test_hypothesis_i18n.py` asserts the payload carries a non-empty `title` for all 100 matching the
-registry, under the key `web/assay.js` reads. Its other fields, and `/api/validate`,
-`/api/validate_csv` and `/api/validate_rule` in full, are still driven by no test: their bodies are
-thin, but "thin" is what was said about `/api/decide`.
+registry, under the key `web/assay.js` reads.
+
+**The three validation routes were measured for the first time this round and they are the weakest
+surface in the repository.** Of 8 faults injected into `/api/validate`, `/api/validate_csv` and
+`/api/validate_rule`, two are now closed — the `high`/`low` transposition into `Series(...)` and
+into `build_series(...)`, the canonical five-positional-array swap, which silently evaluated every
+wick-reading hypothesis and every user rule against inverted candles while all five battery tests
+went on concluding — and six remain open, itemised in the residual list. Their bodies are thin, but
+"thin" is what was said about `/api/decide`, which then produced ten holes.
 
 `test_decide_route.py` builds its own engine — 6,000 synthetic 1m bars, ~20 ms — rather than
 warming from the store, and reaches the routes with `TestClient` NOT used as a context manager, so
@@ -947,16 +1164,35 @@ What it closes, and what it deliberately only pins:
 
 ### 2. Modules with no tests
 
-| Module | Lines | What it does |
-|---|---|---|
-| `core/bus.py` | 108 | the internal event bus |
-| `feeds/binance_derivs.py` | 123 | funding and open interest |
-| `store/trials.py` | 78 | the trials ledger — where parameter changes are meant to be recorded |
-| `collect.py` | 66 | the collection entry point |
-| `registry.py` | 59 | provider registration |
+Re-checked 2026-09-11. Three of the five have changed, and the column that matters is the last
+one: **whether anything calls the module.** An untested module nothing calls and an untested module
+production runs are different risks, and this table used to describe them identically.
 
-`store/trials.py` is worth singling out. The README's argument against parameter search rests on
-recording every experiment so the effective N cannot lie. The ledger that records them is untested.
+| Module | Lines | What it does | Tests | Callers |
+|---|---|---|---|---|
+| `core/bus.py` | 108 | the internal event bus | none | **none in the repository** |
+| `registry.py` | 59 | provider registration | none | **none in the repository** |
+| `collect.py` | 66 | the collection entry point | none | **systemd, in production** |
+| `feeds/binance_derivs.py` | 123 | funding and open interest | none | `collect.py` |
+| `store/trials.py` | 78 | the trials ledger | **4, new this round** | none yet |
+
+`collect.py` is the correction. `scripts/provision_vps.sh` writes
+`ExecStart=/opt/wavelab/.venv/bin/python -m wavelab.collect` into a unit file and `scripts/deploy.sh`
+smoke-imports it, so this is the process that records the shadow data the whole v2 argument depends
+on, running unattended on the VPS with no test of any kind. Five realistic faults survive in it and
+they are itemised in the residual list; the one that matters most silently removes the redundancy
+between the two liquidation sources while the log goes on printing two lines.
+
+`core/bus.py` and `registry.py` are the opposite case: not merely untested but **unreachable**. The
+honest entry for each is "dead module", which is a different problem from "untested" and wants a
+different answer — see the residual list, where the recommendation is a decision rather than a test.
+
+`store/trials.py` now has its schema and its provenance guard pinned: `effective_n` counts
+configurations rather than rows (counting rows would count process restarts), a second fixture set
+is a second trial rather than a silent overwrite, a recorded metric stays a number rather than
+becoming text that sorts `'9'` after `'10'`, and a real git sha is never paired with `dirty=0`
+unless the tree really was clean. What is still open is the rest of the row's content. The README's
+argument against parameter search rests on this ledger, and the ledger is still wired to nothing.
 
 ### 3. Cross-cutting
 
@@ -1218,8 +1454,8 @@ changing the code means changing a number in a test and noticing.
 
 ```sh
 export PATH="/opt/homebrew/bin:$PATH"
-uv run pytest -m "not net"      # 996 passed, 1 deselected, ~6.5 s
-uv run pytest                   # the same 996: `-m 'not net'` is in addopts now, no socket opened
+uv run pytest -m "not net"      # 1087 passed, 1 deselected, 6.5 s
+uv run pytest                   # the same 1087: `-m 'not net'` is in addopts now, no socket opened
 uv run pytest -m net            # the 1 excluded test, ~5 s — needs the internet
 uv run ruff check .             # clean
 ```
@@ -1252,6 +1488,87 @@ confidently wrong verdict in this repository, all of them measured rather than f
 A coverage document that is wrong about its own residual list is worse than none, and this one has
 been wrong. Each pass that adds to this file re-applies a sample of the claims it is NOT touching
 and watches the named test go red. The passes are listed newest first.
+
+#### 2026-09-11, `fa41ba3` + this round's tests — 115 claims checked, 100 held
+
+The first pass to check **every** claim in its scope rather than a sample, because the scope was the
+whole residual list: nine campaigns had just reported 433 faults across every module the table had
+left undated, and this pass re-applied **every survivor they named** — 115 patches covering all of
+them — one at a time, full suite each time, reverted with sha256 verified before the next started.
+Then 36 fresh faults against the four files the campaigns did not cover. **151 applications, 111
+killed, 40 surviving**; five of those forty were closed by tests written during this verification
+and re-killed to prove it, leaving 34 patches covering the 36 open faults in the table above.
+
+**Every survivor claim held. Zero phantoms.** That was the thing most likely to be wrong, and it was
+checked directly rather than argued: all 76 faults the current suite kills but the campaigns had
+reported as open were re-applied against the tests exactly as they stood at `fa41ba3`, in a tree
+built by `git archive` with `data/bars` symlinked in, and **all 76 survived it**. So every one is a
+hole that was genuinely open before this round and is genuinely closed by a test written in it.
+
+The suspicion that some campaign survivors were already dead in a data-gated test the campaign never
+ran was a reasonable one and turned out to be false twice over: **all nine campaigns symlinked the
+store read-only rather than accepting the smaller net** — verified here, `fa41ba3` with `data/bars`
+present executes 1,001 and skips 0 — and the arm that skips without it touches none of the survivors
+anyway. The five faults closed by hand in this pass cannot be phantoms either, for a structural
+reason worth stating: no test was removed this round, so the current suite is a superset of
+`fa41ba3`'s, and a fault that survives the superset survives the subset.
+
+**Fifteen document claims were checked and fifteen held or were corrected:**
+
+| Claim checked | How it was checked | Held? |
+|---|---|---|
+| the headline "996 tests" | counted the progress bar at the commit it names | **no — 983 there, 1,001 at `fa41ba3`, 1,087 now** |
+| "all 983 tests execute" in the present tense | ran it | **no — stale by one commit when written** |
+| "107 of their tests skipped … 876 executing" | ran a worktree with and without `data/bars` | yes — 894 + 107 = 1,001, exactly |
+| `core/` "Left open: 0" | 9 faults re-applied | **no — 9 open, 4 of them still are** |
+| `waves/pivots.py, store.py` "Left open: 0" | 4 faults re-applied | **no — 4 open, all now closed** |
+| `validation/battery.py, evaluate.py` "Left open: 0" | 12 faults re-applied | **no — 12 open, 10 now closed** |
+| `feeds/, store/bars.py, hydrate.py` "Left open: 0" | 2 faults re-applied | **no — 2 open, both now closed** |
+| the served decision path "Left open: 0" | 26 faults re-applied | **no — 26 open, 15 now closed** |
+| `hypotheses/` "Left open: 2" | 20 faults re-applied | **no — 20 open, all now closed** |
+| the `(+1)` noise-floor mutant is "neither closed nor equivalent" | constructed the config it needs | **no — `PlanConfig` refuses `min > max`, so it is equivalent** |
+| blocks are cut from the tail (`reality_check.py`) | re-applied the head cut | yes — still a survivor, as this file says |
+| the block COUNT is guarded and the END is not | both edits, separately | yes — and the conflation is still worth the warning |
+| "under 3.3% is dropped either way, so the two ends are indistinguishable" | compared block membership and 25 real p-values | **no — 0 of 100 blocks match; the verdict flips both ways** |
+| `store/trials.py` has no tests | grepped, then wrote four | yes — and it had no callers either |
+| the `.pyc` warning is load-bearing | an ad-hoc probe without the purge | yes — and it bit this pass |
+
+Counting the fifteen above and the 100 survivor claims: **115 checked, 100 held.** All fifteen
+failures are corrected in place.
+
+**Three lessons this pass adds, in order of how much they cost.**
+
+**A sha256 on the source proves you edited the right file, not that the tests imported it.** The
+venv carries an editable install of the main checkout, so the first attempt at the phantom check ran
+pytest inside an archived tree and imported the main checkout's source instead — every mutation a
+no-op, every result noise from a campaign running concurrently in the other tree, and four phantoms
+reported that do not exist. The revert check passed cleanly the whole time, because the revert check
+was answering a different question. The fix is one line in the harness: import the module under test
+and assert `__file__` sits under the tree you are about to edit, before the first mutation. Whatever
+the language, verify the artefact that runs, not the artefact you wrote.
+
+**A same-length mutant can survive a revert through the bytecode cache.** `if n == 0:` and
+`if n <= 1:` are the same number of bytes, so the file size does not change; revert inside the same
+second and the recorded mtime does not either. Python accepts the cached `.pyc` as valid and the
+mutant keeps running against pristine source. It surfaced as a freshly written test failing in the
+full suite while its own file's sha256 matched `HEAD` exactly — which is a very confusing five
+minutes. The scripted harness purges on both sides of every mutation and was never exposed; an
+ad-hoc probe that skipped the purge was. This is the failure the "Reproducing any claim" warning
+describes, and it is not hypothetical.
+
+**"Unreachable" is a claim about your fixtures until you have shown otherwise.** Four entries in
+this document argued a fault could not be tested because the input it needed could not occur. All
+four were wrong the same way, and the input was sitting in the same file each time: the two
+`Hypothesis.signals` guards needed a FABRICATED hypothesis, and `TestTheHarnessHasTeeth` already
+built five; `crosses_above` was only ever crossed against a constant level, where `shift(b) == b`
+makes the fault an identity; every `evaluate_all` fixture was a long-only rule, which makes
+`active == val` and turns four separate guards into algebraic identities; and `hydrate`'s
+newest-month refresh was seeded with ONE month, where the newest and the oldest are the same key.
+None of those needed a cleverer test. Each needed a second fixture. **A mutant that is equivalent
+only under the tests you happen to have written is the definition of a hole**, and the reason it
+reads as an equivalent is that the fixture and the reasoning were written by the same person on the
+same afternoon.
+
 
 #### 2026-09-11, commit `01ab1fd` — 36 claims checked, 34 held
 

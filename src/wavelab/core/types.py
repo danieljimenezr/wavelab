@@ -70,6 +70,26 @@ class Bar:
                 f"the {self.tf} UTC grid (remainder {self.open_time_ms % self.tf.ms}). "
                 "The adapter must align to the grid, not round."
             )
+        # The other costliest adapter mistake, and the one nothing was checking: high and low
+        # transposed. It is two characters in a column mapping or a CSV header read in the wrong
+        # order, and downstream NOTHING complains — the ATR comes out negative and is used as a
+        # scale, every wick-reading rule evaluates on inverted candles, and the pivot detector
+        # finds extremes that are the wrong way round. All of it renders.
+        #
+        # Four comparisons at construction close the whole class, on every adapter at once and for
+        # every adapter written later. The ordering asserted is the definition of the four fields:
+        # the high is the highest price the bar traded at, so nothing in it can be above the high
+        # and nothing below the low. A bar that fails this is not a bad bar, it is not a bar.
+        if not (self.low <= self.high
+                and self.low <= self.open <= self.high
+                and self.low <= self.close <= self.high):
+            raise ValueError(
+                f"Bar {self.symbol} {self.tf} at {self.open_time_ms}: "
+                f"O={self.open} H={self.high} L={self.low} C={self.close} is not a bar — the high "
+                "is not the highest price or the low is not the lowest. Transposed high and low is "
+                "the usual cause, and it is silent everywhere downstream: a negative ATR, inverted "
+                "wicks, and pivots at the wrong extremes, none of which raises anything."
+            )
 
     @property
     def close_time_ms(self) -> int:

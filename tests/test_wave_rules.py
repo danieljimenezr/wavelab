@@ -972,6 +972,88 @@ class TestTheGuidelineScore:
             "guideline that can be judged, so it is the whole score"
         )
 
+    def test_the_guideline_window_is_as_wide_as_the_sigma_it_names(self):
+        """A guideline is a WINDOW, and its width is the only part of it that filters anything.
+
+        Every other score assertion in this file stands exactly ON a Fibonacci ratio, where the
+        curve reads 1.0 for any bell shape however wide — so the width itself is unpinned, and
+        widening it is a one-character edit (`(x - mu) / sigma` reads almost identically to
+        `(x - mu) * sigma`, and every sigma here is below 1). Widen the bells and every count on
+        the card scores ~1.0: `min_score` stops excluding anything, the ordering collapses onto
+        the completeness tie-break, and the card fills with `abc` readings that offer no entry.
+        The user sees a product that has quietly stopped discriminating, not one that is broken.
+
+        w2's sigma is 0.18, so a retracement one sigma past the golden pocket is worth exactly
+        e^-1/2 and three sigma past it e^-4.5. Those two numbers ARE the width.
+        """
+        for sigmas, expected in ((1.0, math.exp(-0.5)), (3.0, math.exp(-4.5))):
+            retr = 0.618 + sigmas * 0.18
+            score, fit = score_guidelines((100.0, 200.0, 200.0 - 100.0 * retr), MatcherConfig())
+            assert fit["retr_w2"] == pytest.approx(retr), "sanity: the fixture retraces what it says"
+            assert score == pytest.approx(expected, abs=1e-9), (
+                f"a wave 2 retracing {retr:.3f} — {sigmas:g} sigma off the 0.618 pocket — scored "
+                f"{score:.6f} and should score {expected:.6f}. At impulse@2 the w2 retracement is "
+                "the whole score, so this number is the bell's width: the guideline is no longer "
+                "as narrow as the 0.18 it was declared with"
+            )
+
+    @pytest.mark.parametrize(("p3", "ext"), [(300.0, 1.618), (400.0, 2.618)])
+    def test_the_two_wave_three_extension_targets_are_alternatives_not_conditions(self, p3, ext):
+        """1.618 OR 2.618 — either one is the signature of a healthy impulse, never both at once.
+
+        The two targets are combined with `max` for exactly that reason, and `min` is the same
+        edit distance away. Under `min`, a wave 3 sitting exactly on a published target scores
+        WORSE than one that landed in the gap between them: 0.19 against 0.56 here. The card then
+        ranks the malformed impulses above the textbook ones, and because the archetype of the top
+        card is what decides whether an entry zone is offered at all, the well-formed setups stop
+        being offered while the card still looks full and confident.
+
+        Stated as a comparison rather than as a fixed score so that the denominator — how many
+        guidelines an impulse@3 is averaged over — cannot absorb the failure: all three structures
+        here have four vertices and are divided by the same weight.
+        """
+        cfg = MatcherConfig()
+        on_target, fit = score_guidelines((100.0, 200.0, 138.2, p3), cfg)
+        between, fit_between = score_guidelines((100.0, 200.0, 138.2, 348.2), cfg)
+        assert fit["ext_w3"] == pytest.approx(ext), "sanity: the fixture extends what it says"
+        assert fit_between["ext_w3"] == pytest.approx(2.1), (
+            "sanity: the comparison structure has to sit BETWEEN the two targets, where neither "
+            "of them is satisfied"
+        )
+        assert on_target > between, (
+            f"a wave 3 extending exactly {ext} scored {on_target:.4f} while one extending 2.1 — "
+            f"on neither target — scored {between:.4f}. The two targets are alternatives: an "
+            "impulse on one of them is the best-formed wave 3 there is, not the worst"
+        )
+
+    def test_a_fourth_vertex_on_its_own_guideline_does_not_deflate_the_score(self):
+        """The score is divided by the weight of the guidelines this state can SHOW, and no others.
+
+        `test_a_partial_structure_is_scored_only_on_what_it_can_show` makes that claim at
+        impulse@2; this is the impulse@3 half, and it is the half that was open. The w4 term is
+        guarded at five vertices while its WEIGHT sits in a second list four characters away — let
+        the weight go active a state early and a zero term is averaged into every impulse@3, so
+        every one of them is multiplied by 0.75 with nothing else changing.
+
+        impulse@3 is "you are inside wave 3 — manage, do not enter". A uniform 25% deflation does
+        not make it look wrong, it makes it lose the ranking to worse-fitting impulse@2 and
+        impulse@4 readings and drop off a four-slot card, so the user is shown an entry where the
+        honest reading was to sit still.
+        """
+        three = (100.0, 200.0, 138.2)                 # w2 exactly on the golden pocket
+        four = (*three, 300.0)                        # w3 exactly 1.618 of w1
+        at_2, _ = score_guidelines(three, MatcherConfig())
+        at_3, fit = score_guidelines(four, MatcherConfig())
+        assert at_2 == pytest.approx(1.0), "sanity: the impulse@2 prefix is a perfect structure"
+        assert "retr_w4" not in fit, (
+            "impulse@3 published a wave 4 retracement out of four vertices: there is no wave 4 yet"
+        )
+        assert at_3 == pytest.approx(at_2), (
+            f"adding a fourth vertex that sits exactly on its own guideline moved the score from "
+            f"{at_2:.4f} to {at_3:.4f}. A guideline the structure satisfies perfectly cannot cost "
+            "it anything: the denominator is counting a guideline this state cannot show"
+        )
+
     def test_no_single_guideline_can_run_away_with_the_score(self):
         """The score is compared against a threshold and against other scores, so it has to stay on
         one scale: a weighted average of terms in [0,1].
@@ -1633,6 +1715,69 @@ class TestTheZoneFigureIsGuardedLikeTheHeadline:
             f"zero risk, and no trade — and the card quotes {r.rr_in_zone}R for it. Dividing by "
             "that zero is the same defect one step further on: it takes the served route down"
         )
+
+    @pytest.mark.parametrize("name,pts,direction,atr", [
+        ("long", (70000.0, 80000.0, 74000.0), Direction.LONG, 900.0),
+        ("short", (80000.0, 70000.0, 76000.0), Direction.SHORT, 900.0),
+    ], ids=["long", "short"])
+    def test_a_zone_that_straddles_its_own_stop_quotes_no_reward(self, name, pts, direction, atr):
+        """The residue of the same guard: a midpoint on the live side of a stop that is INSIDE
+        the zone.
+
+        The two tests above walk the stop across the midpoint. This one stops short of it, which
+        is the case a midpoint test cannot see and the one that is worth the most on the card.
+        The zone is an instruction — "rest a limit anywhere between these two prices" — so the
+        entry it has to answer for is the worst one it permits: the rim nearest the stop. Once
+        the stop is inside the zone, a limit resting in the dead half fills below its own
+        invalidation, and the card is telling the reader to do that.
+
+        And the arithmetic runs the wrong way. The further in the stop sits — the more of the
+        published zone is unusable — the closer the midpoint gets to it, and `rr_in_zone` is the
+        reward divided by that shrinking distance. Walking the stop through this count's own
+        72,140-75,000 zone: 12.9R one twentieth of the way in, 23.2R at a quarter, 580.8R a hair
+        under the midpoint, and 0.0 the moment it crosses and the old guard finally fires. So the
+        midpoint test is not merely incomplete, it is most permissive exactly where the number it
+        guards is least defensible, and the biggest R:R the product can print comes from the one
+        geometry in which it is unreachable at any price.
+
+        Isolated deliberately: the fill is far on the live side so the entry gate cannot refuse
+        it, and the midpoint is asserted to still be on the live side so the guard the other two
+        tests pin cannot be what answers here. What is left is the rim.
+        """
+        cfg = PlanConfig()
+        s = 1 if direction is Direction.LONG else -1
+        h = _hypothesis(pts, direction)
+
+        base = build_plan(h, h.points[2], atr, cfg)
+        assert base.plan is not None, base.reasons
+        lo, hi, mid = base.plan.entry_lo, base.plan.entry_hi, base.plan.entry_mid
+        assert base.rr_in_zone > 0, (
+            f"{name}: fixture check — the untouched count has to quote a zone figure at all, or "
+            f"a zero below proves nothing; it quotes {base.rr_in_zone}")
+
+        # A quarter of the way into the zone from the rim a limit could fill at: far enough in to
+        # be unmistakable, far enough from the midpoint that the guard above stays silent.
+        fill = mid + s * 5000.0
+        cushion = max(cfg.stop_buffer_atr * atr, 2 * cfg.tick_size, cfg.stop_buffer_pct * fill)
+        want_stop = (lo if s > 0 else hi) + s * 0.25 * (hi - lo)
+        r = build_plan(replace(h, invalidation_price=want_stop + s * cushion), fill, atr, cfg)
+
+        assert r.plan is not None and lo < r.plan.stop < hi, (
+            f"{name}: fixture check — the stop has to land strictly inside the published "
+            f"{lo:,.0f}-{hi:,.0f} zone for this to be a straddle at all; it is at "
+            f"{r.plan.stop if r.plan else r.reasons}")
+        assert s * (mid - r.plan.stop) > 0, (
+            f"{name}: fixture check — the MIDPOINT must still be on the live side of the stop, "
+            f"or this is the case the two tests above already cover and not the residue of it")
+        assert r.rr_t2 > 0, (
+            f"{name}: the fill was refused too, so this no longer isolates the zone figure — "
+            f"the plan came back with {r.reasons}")
+        assert r.rr_in_zone == 0.0, (
+            f"{name}: the stop sits at {r.plan.stop:,.0f}, inside the {lo:,.0f}-{hi:,.0f} zone "
+            f"the card publishes, so a quarter of the prices it invites a limit at are already "
+            f"past the invalidation — and the card answers {r.rr_in_zone:.2f}R, quoted at a "
+            f"midpoint that is the only part of the zone still alive. There is no single reward "
+            f"to quote for a zone whose two rims sit on opposite sides of the stop")
 
 
 class TestAnEntryPastItsOwnStopIsRefusedRatherThanSized:

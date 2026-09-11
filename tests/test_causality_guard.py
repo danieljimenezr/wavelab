@@ -12,6 +12,7 @@ from wavelab.core.clock import LiveClock, SimClock
 from wavelab.core.ring import Ring
 from wavelab.core.timeframes import TF_15M
 from wavelab.core.types import (
+    AuxEvent,
     Bar,
     Decision,
     Direction,
@@ -234,6 +235,37 @@ class TestCausalDecorator:
                         "is_closed": False})
         with pytest.raises(CausalityError, match="UNCLOSED"):
             f(b.close_time_ms, unclosed)
+
+    def test_a_bar_like_that_never_declares_is_closed_is_guarded_all_the_same(self):
+        """The module checks by ATTRIBUTE so that, in its own words, "any future type exposing the
+        same contract is protected without touching this file". `Bar` alone cannot prove that.
+
+        `Bar` is the only shipped type with a `close_time_ms` and it always carries `is_closed`, so
+        the `getattr(v, "is_closed", True)` default is dead today and alive the first time someone
+        wraps a raw exchange kline, a replay row or a store-backed view. Two separate things have
+        to hold for such a wrapper to be safe and neither is exercised by `Bar`: the close-time
+        comparison has to apply to it at all, and the optional flag has to default the way the
+        module intends. It defaults OPEN — a bar-like that says nothing is taken to be closed and
+        let through — which is the permissive direction, so this test is the record of the choice:
+        change the default and it goes red, and the change gets made deliberately instead of by a
+        `getattr` nobody re-reads.
+        """
+        class DuckBar:
+            """A bar-like from some future adapter: the two timestamps, and no `is_closed`."""
+            open_time_ms = T0
+            close_time_ms = T0 + TF_15M.ms - 1
+
+        @causal
+        def f(now_ms: int, bar) -> int:
+            return bar.close_time_ms
+
+        assert f(DuckBar.close_time_ms, DuckBar()) == DuckBar.close_time_ms, (
+            "a bar-like carrying no `is_closed` was refused at the very instant it closed: every "
+            "bar-like but `Bar` is treated as permanently in flight, so the duck-typed contract "
+            "the module advertises protects nothing and blocks everything"
+        )
+        with pytest.raises(CausalityError, match="after now_ms"):
+            f(DuckBar.open_time_ms, DuckBar())   # and the close-time guard still applies to it
 
     def test_it_rejects_a_bar_that_closes_later(self):
         @causal
@@ -511,6 +543,68 @@ class TestRiskIsMeasuredTheSameInBothDirections:
             "its 0.0 fallback and every short is journalled as a trade with no reward"
         )
         assert short.rr_at(95.0) > 0.0
+
+
+class TestADirectionCarriesItsOwnSign:
+    """`Direction.sign` is what turns a side into a multiplier, and it has no caller yet.
+
+    That is what makes it dangerous rather than harmless: the first `decide()`, sizing path or
+    P&L attribution to need a sign will reach for it precisely BECAUSE it looks like the tested
+    way to get one. Inverted, it raises nothing and empties nothing — every long is booked with a
+    short's sign, the backtest becomes its own mirror image, and the equity curve is wrong in the
+    one direction nobody investigates, because a result that improved looks like a discovery.
+    """
+
+    def test_long_is_positive_short_is_negative_and_flat_is_neither(self):
+        assert Direction.LONG.sign == 1, (
+            f"LONG signs itself {Direction.LONG.sign}: a long profits when price rises, so every "
+            "winning long would be booked as a loss"
+        )
+        assert Direction.SHORT.sign == -1, (
+            f"SHORT signs itself {Direction.SHORT.sign}: a short's P&L is carrying a long's sign, "
+            "so a losing short is recorded as a winner"
+        )
+        assert Direction.FLAT.sign == 0, "FLAT takes no side: it multiplies any move to nothing"
+
+    def test_the_two_sides_book_the_same_move_against_each_other(self):
+        """The property, not the three constants: the sides are opposites, whatever the encoding.
+
+        A helper that returned +1 for both sides would satisfy "LONG is positive" and still make
+        the book directionless — every hedge would add instead of cancel.
+        """
+        rise = 10.0
+        assert Direction.LONG.sign * rise > 0 > Direction.SHORT.sign * rise, (
+            "a rise does not pay the long and cost the short: the two sides are not opposites"
+        )
+
+
+class TestAnEventKnowsWhenItHappenedAndWhenItWasLearned:
+    """`AuxEvent` carries two timestamps for the same reason a `Pivot` does, and `latency_ms` is
+    the only arithmetic in the type with a direction to get wrong.
+
+    Its own docstring is explicit that the gap between "when it happened" and "when we found out"
+    CANNOT be reconstructed after the fact — either it is recorded from the start or the news
+    history is born useless for calibrating latency. `latency_ms` is the single accessor that
+    turns those two fields into that quantity. Reversed, every funding, liquidation and news
+    latency ever measured comes out negative; nothing raises, the rows look fine, and the person
+    who eventually finds it will be debugging why the v2 lag model is inverted, long after the
+    history it was fitted on was written.
+    """
+
+    def test_latency_runs_from_the_event_to_the_moment_it_was_learned(self):
+        ev = AuxEvent(ts_event_ms=1_000_000, ts_ingest_ms=1_000_350, kind="funding")
+        assert ev.latency_ms == 350, (
+            f"an event learned 350 ms after it happened reports a latency of {ev.latency_ms}: the "
+            "two timestamps are subtracted the wrong way round, so every lag in the history is "
+            "the negative of the truth"
+        )
+        assert ev.latency_ms > 0, "nothing is ever learned before it happens"
+
+    def test_an_event_learned_the_instant_it_happened_has_no_latency(self):
+        """The zero is the fixed point of the subtraction and the only value a sign flip survives,
+        so it is here to say that zero means simultaneous — not as the proof of the direction."""
+        t = 1_000_000
+        assert AuxEvent(ts_event_ms=t, ts_ingest_ms=t, kind="liquidation").latency_ms == 0
 
 
 class TestTheClockOnlyEverMovesForward:

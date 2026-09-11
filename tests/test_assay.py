@@ -164,6 +164,52 @@ class TestCrossings:
         fired = crosses_above(a, np.full(4, 2.0))
         assert fired.tolist() == [0, 1, 0, 0], "only the bar of the crossing itself counts"
 
+    #: A fast line and a slow line, both falling, the fast one falling less. Chosen so that the
+    #: previous bar of the SLOW line and its current bar sit on opposite sides of the fast line.
+    FAST = np.array([7.0, 6.0, 5.0, 4.0])
+    SLOW = np.array([10.0, 5.0, 4.0, 2.0])
+
+    def test_a_cross_between_two_MOVING_series_compares_both_at_the_same_bar(self):
+        """★ Everything above crosses a path against a CONSTANT, and a constant hides the
+        defect this test exists for.
+
+        `crosses_above(a, b)` asks two questions — is `a` above `b` now, was it at or below `b`
+        before — and "before" has to mean the previous bar on BOTH sides. Drop the shift from the
+        second one (`prev_a, prev_b = shift(a), b`) and the second question becomes "was `a` at or
+        below where `b` is NOW", which compares bar i-1's fast line against bar i's slow line. For
+        a constant `b` those are the same number, so `LEVEL` above cannot tell the two apart: the
+        fault is an exact no-op on every fixture in this class.
+
+        It is not a no-op on the editor's own front-page example, `crosses_above(ema(close,21),
+        ema(close,55))` (`web/assay.html:197`), which is two moving series. Measured over fifty
+        400-bar random walks: 171 crossings become 289, and every extra one is a trade the rule
+        never signalled. The user is told their EMA-cross idea takes 69% more trades than it does,
+        and on the worst of the fifty it is twice as many.
+
+        Both directions are pinned, because one alone would be satisfied by a rule that simply
+        never fires. A real cross must be seen, and a non-cross must not be invented — and the
+        fault does both, which is what makes it impossible to notice from a trade count.
+
+        `crosses_below` carries the identical line and the identical hole, so it is checked on the
+        mirror image of the same two paths: negate them and crossing up becomes crossing down.
+        """
+        assert crosses_above(self.FAST, self.SLOW).tolist() == [0, 1, 0, 0], (
+            "the fast line is below the slow one on bar 0 (7 against 10) and above it on bar 1 "
+            "(6 against 5): that is one cross, on bar 1. Reading the slow line at bar 1 for both "
+            "halves of the comparison asks whether 7 was under 5 and the cross is silently lost")
+        assert crosses_below(-self.FAST, -self.SLOW).tolist() == [0, 1, 0, 0], (
+            "and the mirror image of a cross up is a cross down; `crosses_below` carries the same "
+            "line and must not lose it either")
+
+        # The other direction: never above the slow line's PREVIOUS value, so never a cross.
+        rising_together_a, rising_together_b = np.array([3.0, 6.0]), np.array([2.0, 5.0])
+        assert crosses_above(rising_together_a, rising_together_b).tolist() == [0, 0], (
+            "the fast line is above the slow one on both bars (3 over 2, then 6 over 5), so it "
+            "never crossed anything. Comparing bar 0's fast line against bar 1's slow line asks "
+            "whether 3 was under 5 and invents a crossing out of two lines that simply rose")
+        assert crosses_below(-rising_together_a, -rising_together_b).tolist() == [0, 0], (
+            "and its mirror invents nothing either")
+
 
 class TestOperators:
     """`and`/`or` have to work element by element: that is what anyone actually writes."""
@@ -609,6 +655,49 @@ class TestBattery:
             f"{r.n_effective} independent episodes out of {r.n_signals} bars")
         assert t.passed is False, "and one observation is not enough to conclude anything"
 
+    def test_each_signal_is_stamped_with_its_own_bars_timestamp_and_not_its_neighbours(self):
+        """★ The one place in the battery where a value from bar i+1 can still reach bar i.
+
+        Test 5 hands `effective_n` the timestamps of the bars the signal is active on. Slice that
+        array one place along — `ts_ms[1: n + 1]` instead of `ts_ms[: n]`, the sort of edit that
+        looks like a fencepost fix — and every signal is dated by the bar AFTER the one it fired
+        on. Nothing raises and the count is usually identical, because a constant offset preserves
+        every gap and `effective_n` only ever compares differences.
+
+        Every timestamp fixture in this file is a perfect grid (`_ts`), so on all of them the
+        fault is a provable no-op. Real bars are not: a halted feed, a delisting, a month the
+        store never healed. Over 4,000 random 60-bar series with an eighth of the bars missing,
+        1,056 gave a different episode count — in both directions, so it is not even conservative.
+        `n_effective` is the denominator of every p-value the product publishes.
+
+        The property is stated where it cannot be satisfied by accident: the count is a fact about
+        WHEN THE SIGNALS FIRED, so moving a bar the strategy never traded must not touch it. Here
+        the hole is opened at bar 200, the first bar after the position is closed — a bar with no
+        signal on it, and the bar the mutant reads for the last signal that has one.
+        """
+        n, held = 400, 200
+        c = 100 * np.exp(np.cumsum(np.random.default_rng(5).standard_normal(n + 1) * 0.02))
+        sig = np.zeros(n + 1)
+        sig[:held] = 1.0                                  # one position, bars 0-199, then flat
+
+        def ts_with_a_hole(days):
+            steps = np.full(n + 1, DAY, dtype=np.int64)
+            steps[0] = 0
+            steps[held] += days * DAY                     # the feed goes quiet AFTER the exit
+            return BASE + np.cumsum(steps)
+
+        unbroken = run_battery(c, ts_with_a_hole(0), sig, bar_ms=DAY, n_random=3)
+        gapped = run_battery(c, ts_with_a_hole(30), sig, bar_ms=DAY, n_random=3)
+
+        assert unbroken.n_effective == 2, (
+            f"{held} bars held as one position, a mean duration of {held // 2} bars, is 2 "
+            f"episodes on a daily grid; the count came back {unbroken.n_effective}")
+        assert gapped.n_effective == unbroken.n_effective, (
+            f"a thirty-day hole was opened at bar {held}, which this strategy is flat on and "
+            f"every bar it traded sits before — yet the episode count moved from "
+            f"{unbroken.n_effective} to {gapped.n_effective}. The only way a bar nobody traded "
+            "can change the count is if the signals are being dated by the bar after their own")
+
     @pytest.mark.parametrize("n,hold,gap,episodes,expected", [
         (1200, 10, 100, 24, False),     # comfortably short
         (1200, 10, 40, 60, True),       # comfortably long
@@ -794,8 +883,14 @@ class TestTheBaseRateIsARelativeQuestion:
 
     In an asset that rose 1,748% any mostly-long rule is right most of the time. The comparison
     against the base rate is the only thing standing between that fact and a report congratulating
-    the user on having discovered the market. `evaluate.py`'s equivalent guard is tested and
-    sharp; the battery's — the one the server actually calls — had no test at all.
+    the user on having discovered the market. `evaluate.py` carries the same guard for the offline
+    sweep, and when this class was written that copy was the tested one while the battery's — the
+    one the server actually calls — had no test at all.
+
+    That sentence outlived the fix, and it was the reason nobody went back. Re-measured, the
+    comparison had reversed: every fault in the battery's copy died here, and three in
+    `evaluate.py`'s survived — its base rate, its market hit rate and the sign of its position.
+    Both copies are pinned now, and `TestOutOfSampleDiscipline` holds the other half.
 
     The fixture drifts hard and is nearly noiseless, so every bar's forward move is essentially the
     same number. That makes the arithmetic below exact rather than statistical: an always-long rule
@@ -975,6 +1070,35 @@ class TestTheBaseRateIsARelativeQuestion:
             f"eight signals is far too few to judge a base rate, but it was graded {t.status!r}")
         assert "few" in t.detail, "and the report has to say why there is no answer"
 
+    @pytest.mark.parametrize("k,answers", [(19, False), (20, True)])
+    def test_twenty_signals_is_the_floor_and_a_floor_includes_its_own_value(self, rising, k,
+                                                                           answers):
+        """The boundary of the refusal above, which nothing in the suite went anywhere near.
+
+        The test before this one sits at eight signals — comfortably inside the refusal, so it
+        pins that a refusal happens somewhere and not where. Loosen `m.sum() >= 20` to `> 20` and
+        it stays green while a strategy with exactly twenty signals stops being graded at all: its
+        base rate becomes «far too few signals», and the battery's most important question goes
+        unanswered for every borderline idea forever. Nothing crashes and nothing prints a wrong
+        number, which is why it would survive a read-through.
+
+        `evaluate_all` pins BOTH of its floors at their own value — twenty out-of-sample signals
+        and `min_signals` — and both faults die there. The battery is the copy the server calls
+        and it had neither. Nineteen must refuse, twenty must answer.
+        """
+        sig = np.zeros(RISING_N)
+        # Spread thinly across the history so every one of them has a forward move to be graded on.
+        sig[np.linspace(0, RISING_N - 3, k).astype(int)] = 1.0
+        assert int((sig[:RISING_N - 1] != 0).sum()) == k, "the fixture must fire exactly k times"
+
+        t = self._base_rate(rising, sig)
+        assert (t.passed is None) is not answers, (
+            f"{k} signals against a floor of twenty was graded {t.status!r}. The floor is a "
+            "number to REACH: at nineteen there is nothing to conclude and the field has to stay "
+            "empty, at twenty the battery owes the user an answer")
+        if not answers:
+            assert "few" in t.detail, "and a refusal has to say why, or it reads as a failure"
+
 
 OOS_N = 1200
 
@@ -1075,6 +1199,53 @@ class TestTheBatteryHoldsBackItsOwnOutOfSample:
         assert t.passed is expected, (
             f"keeping {kept:.0%} of the in-sample excess out of sample has to read "
             f"{'pass' if expected else 'fail'} against a bar of half; it read {t.status!r}")
+
+    #: Days in a year, which is what «annualised» is measured against. `run_battery` derives its
+    #: own `per_year` from `bar_ms`; this is the same fact stated from outside the code.
+    DAYS_IN_A_YEAR = 365.25
+
+    @pytest.mark.parametrize("folds", [5, 10])
+    def test_the_out_of_sample_cagr_is_annualised_over_the_out_of_sample_window(self, folds):
+        """The out-of-sample curve is SLICED to the out-of-sample bars, not masked to zero
+        outside them, and the difference is a rate the reader cannot check.
+
+        `_curve(r[oos], sig[oos])` and `_curve(r, sig * oos)` compound to the same final equity —
+        the masked bars contribute a zero return — so the two look interchangeable, and "use a
+        mask, not a slice" is the tidier of the two to write. But `_stats` annualises by the
+        LENGTH of the curve it is handed. The slice is 956 bars long and the mask is 1,200, so the
+        same money made over the same days is quoted as a rate earned over a quarter more year.
+        Measured on a coin-flip signal over a random walk, `cagr_oos` moved from -34.46% to
+        -28.65%: a sixth of the number, on a figure the report prints as a percentage per year
+        and nobody recomputes.
+
+        Neither purge test can see it — both use signals that hold nothing outside their target
+        region, so the masked weight is all zeros and both curves are flat at 1.0 — and the
+        half-the-edge test straddles a RATIO whose two halves move together.
+
+        So the fixture makes the answer a constant known outside the code: a market with the same
+        log return on every single bar, held from end to end. A constant rate compounds to the
+        same annual rate over any window whatsoever, which is exactly the invariant a length-
+        dependent denominator breaks. Running it at two fold counts is what pins the window
+        rather than one arithmetic result: five folds and ten hold different numbers of bars out,
+        and the answer may not move.
+        """
+        n = 1200
+        per_bar = np.log(1.001)                          # +0.1% a day, every day, for ever
+        close = 100.0 * np.exp(per_bar * np.arange(n + 1))
+        r = run_battery(close, _ts(n + 1), np.ones(n + 1), bar_ms=DAY, n_random=3, cost_bps=0,
+                        horizon_bars=1, folds=folds)
+        t = _battery_test(r, "out_of_sample")
+
+        annual = np.expm1(per_bar * self.DAYS_IN_A_YEAR)
+        assert t.value == pytest.approx(annual, rel=1e-9), (
+            f"a market that returns {per_bar:.6f} in log terms on every bar compounds to "
+            f"{annual:.6%} a year over any stretch of it you care to measure, and this strategy "
+            f"holds every bar of the out-of-sample stretch. The out-of-sample CAGR came back "
+            f"{t.value:.6%} at {folds} folds, which is the rate you get by dividing what the "
+            f"out-of-sample bars earned by the length of the WHOLE history")
+        assert t.reference == pytest.approx(annual, rel=1e-9), (
+            "and buy and hold over the same bars is the same market, so its out-of-sample CAGR "
+            f"is the same number: {t.reference:.6%}")
 
 
 class TestEffectiveN:
@@ -1362,6 +1533,30 @@ class TestOutOfSampleDiscipline:
         if evaluated:
             assert res[0].n_signals == n_signals
 
+    @pytest.mark.parametrize("n,evaluated", [(499, False), (500, True)])
+    def test_five_hundred_bars_is_a_floor_to_reach_like_the_other_two(self, n, evaluated):
+        """The third floor in this function, and the one nothing stood on.
+
+        A series shorter than 500 bars is dropped before a hypothesis is even run against it. The
+        two floors above are each pinned at their own value; this one is a bare `< 500` sitting
+        twelve lines earlier and it decides the same thing one level up — not whether a result is
+        published but whether the series is looked at at all.
+
+        The consequence is the argument `test_a_hypothesis_with_exactly_the_minimum_number_of_
+        signals_is_evaluated` already makes, one level up and therefore wider: a timeframe dropped
+        here never reaches the Reality Check, and the multiple-testing correction is computed over
+        whatever survived to be counted. Silently dropping one makes every other p-value slightly
+        better — a correction that weakens the more borderline things you tried.
+
+        Both sides are pinned because either alone is satisfied by a constant answer.
+        """
+        res, _ = evaluate_all({"h": _hyp("h", lambda s: np.ones(len(s), dtype=np.int8))},
+                              {"1d": _rising_series(n)}, horizon_bars={"1d": self.HORIZON},
+                              folds=self.FOLDS, n_boot=0)
+        assert bool(res) is evaluated, (
+            f"a {n}-bar series against a minimum of 500 produced {len(res)} results. 500 is a "
+            "floor to REACH: at exactly 500 the series is evaluated, at 499 it is not")
+
     def test_simply_being_long_in_a_rising_market_scores_nothing(self):
         """★ The correction is fed return IN EXCESS OF THE DRIFT, not raw return.
 
@@ -1378,6 +1573,131 @@ class TestOutOfSampleDiscipline:
             f"{r.per_bar.sum():+.4f} of credit on drift alone; it must earn exactly 0")
         assert r.edge == pytest.approx(0.0, abs=1e-9), (
             f"its edge over the base rate is 0 by construction, not {r.edge:+.4f}")
+
+    def test_the_base_rate_is_a_fact_about_the_market_not_about_the_strategy(self):
+        """★ The guard the test above CANNOT see, and the one the file's own comment says is the
+        safe one.
+
+        Every `evaluate_all` fixture in this class is an always-long rule, and for an always-long
+        rule `active` is the whole valid mask. So `fwd[val].mean()` and `fwd[active].mean()` are
+        the same average of the same array, and computing the base rate over the strategy's own
+        bars instead of the market's is an exact no-op on every one of them. The test above
+        asserts `edge == 0` — and under that fault `edge` is zero BY CONSTRUCTION for every
+        long-only hypothesis, so the test written to guard this passes because of it.
+
+        `run_battery` has the same guard and its own test of it, and the fault dies there. This is
+        the offline sweep's copy, which that class's docstring called the tested and sharp one —
+        true when it was written, and for as long as it stood there, the reason nobody came back.
+
+        Two rules on one market, one firing on every bar and one on every fourth. The base rate is
+        «being in the market at a random instant», so it is the same number for both of them —
+        and under the fault it is each rule's own score, which means every hypothesis in the sweep
+        ties itself and nothing can ever show an edge.
+        """
+        def every_fourth(s):
+            out = np.zeros(len(s), dtype=np.int8)
+            out[::4] = 1
+            return out
+
+        whole = self._run(lambda s: np.ones(len(s), dtype=np.int8))
+        picky = self._run(every_fourth)
+
+        assert picky.base_ret == pytest.approx(whole.base_ret), (
+            "the average forward move of this market cannot depend on which bars a strategy "
+            f"traded: {picky.base_ret:+.8f} for a rule firing on a quarter of them against "
+            f"{whole.base_ret:+.8f} for one firing on all of them")
+        assert picky.base_rate == pytest.approx(whole.base_rate), (
+            "and neither can how often the market itself rose: "
+            f"{picky.base_rate:.6f} against {whole.base_rate:.6f}")
+        assert picky.base_rate != pytest.approx(picky.hit_rate), (
+            f"this rule was chosen to be right less often than the market ({picky.hit_rate:.6f} "
+            f"against {picky.base_rate:.6f}). The two reading the same number is the signature of "
+            "the market's hit rate being counted over the strategy's own bars, and it turns the "
+            "column that answers «is it right more often than the market?» into «exactly as often»"
+        )
+        assert abs(picky.edge) > 1e-6, (
+            f"and its excess over the market is {picky.edge:+.8f}, not zero. An edge of exactly "
+            "zero for a SELECTIVE long-only rule is not a result, it is the base rate and the "
+            "score having collapsed into the same array")
+
+    def test_a_permanent_short_earns_the_base_rate_with_the_sign_it_took(self):
+        """The sign of the position is what turns «what the market did» into «what the strategy
+        earned», and every fixture in this class is long, so `evaluate_all` has never once been
+        run against a short. Drop the sign — `fwd[active] * np.abs(sig[active])` — and a rule that
+        loses money steadily being short a bull market is reported as a winner.
+
+        `run_battery`'s twin of this test exists and kills the same fault there. This is the
+        offline sweep's copy, and it had none.
+        """
+        r = self._run(lambda s: -np.ones(len(s), dtype=np.int8))
+        assert r.base_ret > 0, "the fixture must actually drift upward for this to mean anything"
+        assert r.mean_ret == pytest.approx(-r.base_ret), (
+            f"being short a market that rose {r.base_ret:+.6f} per period earns "
+            f"{-r.base_ret:+.6f}; it was scored {r.mean_ret:+.6f}")
+        assert r.hit_rate == pytest.approx(1.0 - r.base_rate), (
+            f"and it is right exactly when the market was wrong, so its hit rate is the "
+            f"complement of the market's: {r.hit_rate:.6f} against 1 - {r.base_rate:.6f}. Equal "
+            "to it, rather than complementary, means the short is being scored as a long")
+        assert r.edge == pytest.approx(-2.0 * r.base_ret), (
+            f"so it trails the market by twice the drift, and the excess is NEGATIVE: "
+            f"{r.edge:+.6f} against {-2.0 * r.base_ret:+.6f}")
+
+    def test_a_timed_rule_and_a_mistimed_one_are_scored_on_opposite_sides_of_the_drift(self):
+        """★ `mean_ret` is the LEVEL and `edge` is the EXCESS, and the two are asserted nowhere.
+
+        The only assertion on `edge` in this class is that an always-long rule scores zero — and
+        zero is the fixed point of a sign flip, so `base_ret - r.mean()` written for
+        `r.mean() - base_ret` passes it. `edge` is the field an offline sweep RANKS on: inverted,
+        the worst hypotheses come out on top and the report is a ranking of the things that lost
+        the most. `mean_ret` is asserted by nothing at all; return the excess in its place and the
+        column headed "mean return" prints +0.2% for a strategy that returned +2.7%.
+
+        Both need anchors away from zero and on both sides of it, so the fixture makes them exact
+        numbers known outside the code. Forward moves cycle 0%, 1%, 2%, 3%, 4% and the horizon is
+        twelve bars — two whole cycles plus two — so a rule that fires on one phase of the cycle
+        is graded on the same forward move every time it fires. Phase 3 is handed +27% and phase 0
+        +21% against a market averaging +24%: same history, same number of signals, one ahead of
+        the drift and one behind, and the mistimed rule deliberately MAKES MONEY, which is the
+        case a comparison against zero waves through.
+        """
+        n, horizon = 602, 12                             # 590 gradable bars: 118 whole cycles
+        moves = 0.01 * (np.arange(n) % 5)
+        close = 100 * np.exp(np.concatenate([[0.0], np.cumsum(moves)]))[:n]
+        ts = np.array([BASE + i * DAY for i in range(n)])
+        market = Series("1d", ts, close, close, close, close, np.ones(n))
+
+        def graded(phase):
+            def fires_on_one_phase(s):
+                out = np.zeros(len(s), dtype=np.int8)
+                out[phase::5] = 1
+                return out
+            res, _ = evaluate_all({"h": _hyp("h", fires_on_one_phase)}, {"1d": market},
+                                  horizon_bars={"1d": horizon}, folds=self.FOLDS, n_boot=0)
+            assert res, f"phase {phase} produced no result to inspect"
+            return res[0]
+
+        timed, mistimed = graded(3), graded(0)
+        assert timed.n_signals == mistimed.n_signals == 118, (
+            f"both rules must fire the same number of times for this to be a contrast: "
+            f"{timed.n_signals} against {mistimed.n_signals}")
+
+        for r, level in ((timed, 0.27), (mistimed, 0.21)):
+            assert r.base_ret == pytest.approx(0.24, abs=1e-9), (
+                f"the market's average forward move over these 590 bars is exactly +24%, not "
+                f"{r.base_ret:+.6f}")
+            assert r.mean_ret == pytest.approx(level, abs=1e-9), (
+                f"`mean_ret` is what the rule RETURNED, and this one is handed a {level:+.0%} "
+                f"move on every bar it fires on; it reads {r.mean_ret:+.6f}. {level - 0.24:+.2f} "
+                "is the excess, which belongs in `edge`")
+            assert r.edge == pytest.approx(level - 0.24, abs=1e-9), (
+                f"and `edge` is what it returned IN EXCESS of the market: {r.edge:+.6f} against "
+                f"{level - 0.24:+.6f}")
+
+        assert timed.edge > 0 > mistimed.edge, (
+            f"a rule that catches the cycle's best bars beat the market and a rule that catches "
+            f"its flattest bars did not, so their excesses have opposite signs: "
+            f"{timed.edge:+.4f} and {mistimed.edge:+.4f}. Both positive or both negative means "
+            "the sign of the comparison is not the one that decides the ranking")
 
     def test_a_one_bar_leak_at_the_boundary_is_caught_and_not_just_a_total_one(self):
         """The purge test above cannot see a purge that is one bar too SHORT. With five folds it
@@ -1442,6 +1762,52 @@ class TestOutOfSampleDiscipline:
         assert r.n_effective == -(-scorable // horizon), (
             f"{scorable} consecutive signals over a {horizon}-bar horizon are "
             f"{-(-scorable // horizon)} independent episodes, not {r.n_effective}")
+
+    def test_the_bar_width_is_the_typical_bar_and_not_an_average_of_the_holes(self):
+        """The test above pins the UNIT of the bar width. This one pins the statistic, which is a
+        separate decision and the one that decides what a gap does to the count.
+
+        `evaluate_all` derives the bar width from the timestamps as a MEDIAN. Take the mean
+        instead — one word, and the more natural word — and the two agree exactly on every fixture
+        in this file, because every one of them is a perfect grid. They do not agree on real
+        candles. A store with three unhealed month-long holes in it has a mean bar of two days and
+        a median bar of one, so the overlap window doubles and half the independent episodes
+        disappear. That direction is the conservative one, which is why it would be waved through
+        — but it is the same unstated assumption as the perfect grid everywhere else, and the
+        first thing it will silently halve is `n_effective` on exactly the timeframes whose
+        history has gaps in it.
+
+        The holes here are put in the LAST hundred bars and the rule fires only on the first
+        three hundred, so the bars it trades are a clean daily run either way. The count is then
+        an arithmetic fact about those bars and nothing else, and anything other than 30 means
+        the width was taken from the holes.
+        """
+        n, horizon, fires = 600, self.HORIZON, 300
+        steps = np.full(n, DAY, dtype=np.int64)
+        steps[0] = 0
+        for hole in (450, 500, 550):
+            steps[hole] += 200 * DAY                     # three unhealed months, well past bar 300
+        ts = BASE + np.cumsum(steps)
+        c = 100 * np.exp(np.cumsum(np.random.default_rng(9).standard_normal(n) * 0.01 + 0.002))
+        market = Series("1d", ts, c, c, c, c, np.ones(n))
+
+        def fires_on_the_clean_run(s):
+            out = np.zeros(len(s), dtype=np.int8)
+            out[:fires] = 1
+            return out
+
+        assert int(np.median(np.diff(ts))) == DAY, "fixture check: the typical bar is one day"
+        assert np.mean(np.diff(ts)) > 1.9 * DAY, (
+            "fixture check: and the MEAN bar is nearly two, or the two statistics cannot be told "
+            "apart here")
+
+        r = self._run(fires_on_the_clean_run, series=market)
+        assert r.n_signals == fires, f"the rule should have fired on all {fires} bars"
+        assert r.n_effective == fires // horizon, (
+            f"{fires} consecutive daily signals over a {horizon}-bar horizon are "
+            f"{fires // horizon} independent episodes. The count came back {r.n_effective}: the "
+            "holes are three hundred bars after the last trade and cannot have widened the "
+            "horizon these signals overlap in")
 
     def test_a_market_that_went_nowhere_produces_no_hits(self):
         """A hit is a trade that made money. On a perfectly flat market every forward return is
@@ -2008,3 +2374,162 @@ class TestTheBootstrapItself:
                 and pytest.approx(first.p_values["zzz"]) == last.p_values["aaa"]), (
             "each strategy's individual p-value has to follow the series, not the slot: "
             f"{first.p_values} against {last.p_values}")
+
+
+class TestTheBlocksAreCutToLeaveNothingBehind:
+    """The block bootstrap used to drop `n % L` observations and pick an end to drop them from.
+
+    That choice was documented as arbitrary on the grounds that it is a fraction of a percent of
+    the sample, and the grounds were wrong: what matters is not the share of DATA dropped but the
+    share of BLOCKS that change, and shifting the window by the remainder re-cuts every boundary.
+    Measured at n=20,000 — 20 observations, 0.10% of the sample, and **0 of 740 blocks identical**
+    between the two cuts. The p-values moved with them.
+
+    So the length is nudged to one that divides `n` instead. These tests pin that it does, that it
+    stays a block length rather than becoming whatever number happened to divide, and — the part a
+    cheerful implementation would skip — that it degrades visibly when no divisor exists rather
+    than pretending otherwise.
+    """
+
+    @pytest.mark.parametrize("n", [1200, 4000, 20000, 50000], ids=str)
+    def test_a_composite_sample_keeps_every_observation(self, n):
+        from wavelab.validation.reality_check import _block_length_that_divides
+        target = max(2, round(n ** (1 / 3)))
+        L = _block_length_that_divides(n, target, min_blocks=30)
+        assert n % L == 0, (
+            f"n={n} still drops {n % L} observations at L={L}. Every block boundary then depends "
+            f"on which end they come off, and no block is shared between the two choices"
+        )
+        assert n // L >= 30, f"n={n} fell to {n // L} blocks at L={L}, below the estimator's floor"
+
+    def test_the_chosen_length_is_still_the_estimate_and_not_merely_a_divisor(self):
+        """1 divides everything. So does 2. A search that only asked for a divisor would return a
+        block length short enough to destroy the autocorrelation the block bootstrap exists to
+        preserve — which makes a dependent series look independent and every p-value look better
+        than it is."""
+        from wavelab.validation.reality_check import _block_length_that_divides
+        for n, target in ((20000, 27), (50000, 37), (1200, 12)):
+            L = _block_length_that_divides(n, target, min_blocks=30)
+            assert abs(L - target) <= max(2, target // 5), (
+                f"n={n}: the search moved the block length from {target} to {L}, outside the ±20% "
+                f"the estimate's own uncertainty justifies"
+            )
+
+    def test_a_sample_with_no_divisor_in_range_degrades_instead_of_lying(self):
+        """7,919 is prime. No length near the estimate divides it, the remainder stays, and the
+        arbitrary end is back for that sample. Pinned because the failure has to remain visible:
+        an implementation that quietly widened the search until something divided would return a
+        number that is no longer a block length, and nothing would say so."""
+        from wavelab.validation.reality_check import _block_length_that_divides
+        target = 20
+        L = _block_length_that_divides(7919, target, min_blocks=30)
+        assert L == target, (
+            f"no length within ±20% of {target} divides 7919, so the search must hand back the "
+            f"estimate unchanged and leave the remainder visible. It returned {L}"
+        )
+        assert 7919 % L != 0, "7919 is prime; a divisor here would mean the fixture is wrong"
+
+
+    def test_the_bootstrap_actually_uses_it(self, monkeypatch):
+        """The tests above prove the search works. They do NOT prove anything calls it — I removed
+        the call from `reality_check` and all six stayed green, which is the difference between
+        testing a helper and testing the code that was supposed to use it.
+
+        A spy, not an outcome: the chosen length is consumed inside a loop and never returned, so
+        there is no number to assert on from outside. What can be asserted is that the decision is
+        delegated, with the sample length and the estimate it is meant to adjust.
+        """
+        import numpy as np
+
+        from wavelab.validation import reality_check as R
+
+        seen = []
+        real = R._block_length_that_divides
+
+        def spy(n, target, *, min_blocks):
+            seen.append((n, target, min_blocks))
+            return real(n, target, min_blocks=min_blocks)
+
+        monkeypatch.setattr(R, "_block_length_that_divides", spy)
+        rng = np.random.default_rng(5)
+        n = 20000                      # 20000 % 27 != 0, so the search has something to do
+        R.reality_check({f"s{i}": rng.normal(0.0002, 0.01, size=n) for i in range(4)},
+                        n_boot=60, seed=1)
+
+        assert seen, (
+            "reality_check ran a block bootstrap over 20,000 observations and never asked which "
+            "block length divides them, so the remainder is being dropped off an arbitrary end "
+            "again and every block boundary depends on which one"
+        )
+        n_seen, target, min_blocks = seen[0]
+        assert n_seen == n and min_blocks == 30, (
+            f"the search was called with n={n_seen}, min_blocks={min_blocks}: it has to be asked "
+            f"about the sample it is actually cutting, and about the estimator's own 30-block floor"
+        )
+        assert n % real(n_seen, target, min_blocks=min_blocks) == 0, (
+            "the length it was asked for leaves a remainder, so the call is decorative"
+        )
+
+
+class TestTheEquityCurveIsDatedWhereTheMoneyActuallyMoved:
+    """★ The curve is the screen's whole argument, and nothing checked when it says things happened.
+
+    `_curve` returns `exp(cumsum(r))` where `r[i]` is the return from close i to close i+1, so
+    `equity[i]` is realised at bar **i+1** and the payload pairs it with `ts[1:][i]`. Shift that to
+    `ts[:-1][i]` and every point moves one bar to the LEFT: the equity rises just before the price
+    does, on every route, for every strategy. Applied to all three validation routes, the whole
+    suite stayed green.
+
+    That is the worst shape a wrong chart can take here. A curve that anticipates the move is
+    exactly what a lookahead bug draws, on the one screen this product sells as the honest one, and
+    the number beside it — the CAGR — is unaffected, so nothing looks out of place.
+
+    The oracle is the price series, not the indexing expression: one jump, at a bar chosen here,
+    and the curve has to hang it on that bar. A test that recomputed `ts[1:][i]` and compared would
+    be two copies of one mistake.
+    """
+
+    BAR_MS = 86_400_000
+    JUMP_AT = 41                      # the close at which the price, and only the price, changes
+
+    @staticmethod
+    @pytest.fixture(scope="class")
+    def payload():
+        import numpy as np
+
+        from wavelab.server.app import _battery_own_series
+
+        n = 60
+        ts = np.arange(n, dtype=np.int64) * TestTheEquityCurveIsDatedWhereTheMoneyActuallyMoved.BAR_MS
+        close = np.full(n, 100.0)
+        close[TestTheEquityCurveIsDatedWhereTheMoneyActuallyMoved.JUMP_AT:] = 150.0   # realised between close[40] and close[41]
+        return ts, _battery_own_series(ts, close, np.ones(n), "one jump")
+
+    def test_the_curve_hangs_the_move_on_the_bar_it_was_realised_at(self, payload):
+        _, d = payload
+        curve = d["equity_curve"]
+        assert len(curve) > 2, "the curve was subsampled away; this fixture is too small to say"
+
+        jumps = [(i, c) for i, c in enumerate(curve)
+                 if i and c["b"] > curve[i - 1]["b"] * 1.2]
+        assert len(jumps) == 1, (
+            f"the fixture moves once and the curve shows {len(jumps)} jumps, so this is no longer "
+            "isolating the dating"
+        )
+        _, at = jumps[0]
+        bar = at["t"] * 1000 // self.BAR_MS
+        assert bar == self.JUMP_AT, (
+            f"the price moved from the close of bar {self.JUMP_AT - 1} to the close of bar "
+            f"{self.JUMP_AT}, and the curve dates that gain at bar {bar}. A curve that rises "
+            f"{self.JUMP_AT - bar} bar(s) before the price does is what a lookahead bug draws, on "
+            "the screen this product sells as the honest one"
+        )
+
+    def test_the_curve_starts_at_the_second_bar_and_not_the_first(self, payload):
+        """The first point is a RETURN, and the earliest return there can be is the one into bar 1.
+        Dating it at bar 0 claims a gain before any price existed to produce it."""
+        ts, d = payload
+        assert d["equity_curve"][0]["t"] == int(ts[1]) // 1000, (
+            f"the curve opens at {d['equity_curve'][0]['t']}, which is bar "
+            f"{d['equity_curve'][0]['t'] * 1000 // self.BAR_MS}. There is no return to plot there"
+        )

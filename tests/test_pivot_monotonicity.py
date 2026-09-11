@@ -82,9 +82,14 @@ class TestTheWritesThatKeepItAPrefix:
     """The prefix property above is only ever as strong as what `append_confirmed` refuses.
 
     Every property in this file is stated over histories that were built one legal write at a time.
-    The two guards below are what make "legal" mean something, and they are the two members of the
-    family with no test: the suite pins the confirmation-TIME guard from both sides, and leaves the
-    positional guard's own boundary and the confirmed/tentative channel split entirely unexercised.
+    The three guards below are what make "legal" mean something.
+
+    The confirmation-TIME guard was believed to be pinned from both sides and was not: what the
+    suite held was the equal case and a value below EVERY confirmation on record. The region where
+    the guard is actually decided — above the first confirmation and below the last, which is what
+    a replay catching up after an outage produces — had no test, and an index slip there is
+    invisible from outside because the store still hands back a tidy prefix. It just contains the
+    future.
     """
 
     @staticmethod
@@ -110,6 +115,53 @@ class TestTheWritesThatKeepItAPrefix:
         assert store.n_as_of(10**15) == 2, (
             "a pivot repeating the last idx was accepted: the beam now contains a leg of zero "
             "length and every ratio measured across it is a division by zero away"
+        )
+
+    def test_a_confirmation_interleaved_into_the_history_is_refused(self):
+        """The confirmation instant is compared against the LAST one on record, not the first.
+
+        `_conf_ts` is the array `as_of` bisects, so its only job is to stay sorted. Comparing
+        against `_conf_ts[0]` — a one-character slip on a parallel list — still refuses anything
+        older than the whole history, which is the only case the existing tests reach, and quietly
+        accepts a confirmation that lands in the MIDDLE of it. A `bisect_right` over an unsorted
+        array is undefined, and the store goes on returning prefixes, so nothing looks wrong.
+
+        The write that produces this is not exotic: a replay catching up after a feed outage
+        appends confirmations interleaved with the ones already stored. `idx=50` here is ahead of
+        everything on record on purpose, so the positional guard cannot fire and mask the result —
+        this test has to be decided by the confirmation-time guard alone.
+        """
+        store = self._store()                       # confirmed at 2000 and 4000
+        interleaved = Pivot(50, 3500, 95.0, PivotKind.HIGH, 5.0).confirmed_at(45, 3000)
+        with pytest.raises(ValueError, match="monotone"):
+            store.append_confirmed(interleaved)
+        assert store.n_as_of(10**15) == 2, (
+            "a confirmation older than the last one on record was accepted: `_conf_ts` is no "
+            "longer sorted, and every `as_of` from here on is a bisect over an unsorted array"
+        )
+
+    def test_the_store_never_hands_out_a_confirmation_from_the_future(self):
+        """What the guard above actually buys, said as a consequence rather than as a refusal.
+
+        With `_conf_ts` out of order, `bisect_right` does not merely lose a pivot — it hands back a
+        prefix containing a pivot confirmed LATER than the instant that was asked for. Here that is
+        seven seconds of pure lookahead served as settled history, and it passes every prefix
+        property in this file, because it IS a prefix. A backtest reading it would be trading a
+        swing hours before it existed and would simply look profitable.
+        """
+        store = PivotStore()
+        store.append_confirmed(Pivot(10, 500, 100.0, PivotKind.HIGH, 5.0).confirmed_at(15, 1000))
+        store.append_confirmed(Pivot(20, 8000, 90.0, PivotKind.LOW, 5.0).confirmed_at(25, 9000))
+        for idx, conf_ts in ((30, 2000), (40, 3000)):
+            with pytest.raises(ValueError, match="monotone"):
+                store.append_confirmed(
+                    Pivot(idx, conf_ts - 500, 95.0, PivotKind.HIGH, 5.0).confirmed_at(idx, conf_ts)
+                )
+
+        assert [p.confirmed_ts_ms for p in store.as_of(2000)] == [1000], (
+            "asked what was knowable at 2000, the store answered with a pivot confirmed at 9000: "
+            "that is the future served as settled history, and every prefix assertion in this "
+            "file still passes while it happens"
         )
 
     def test_an_unconfirmed_pivot_cannot_be_appended_to_the_confirmed_history(self):

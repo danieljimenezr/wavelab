@@ -125,7 +125,6 @@ class AppConfig(BaseModel, frozen=True):
     shadow_opposite_direction: bool = True
     engine: EngineConfig = Field(default_factory=EngineConfig)
     assets: dict[str, AssetConfig] = Field(default_factory=dict)
-    plugin_modules: list[str] = Field(default_factory=list)
 
 
 def load_config(root: Path | str = "config") -> AppConfig:

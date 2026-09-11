@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 
 import pytest
 
@@ -141,6 +142,77 @@ async def test_cancellation_is_not_swallowed_as_a_startup_error(clean_app, monke
 
     assert clean_app.startup_error is None
     assert clean_app.ready is False
+
+
+async def test_the_warm_up_asks_the_store_for_history_up_to_NOW_in_milliseconds(
+    clean_app, monkeypatch, capsys
+):
+    """A seconds/milliseconds slip here empties the history and still reports a healthy start.
+
+    `until` bounds the read: every bar in the store is stamped in epoch milliseconds, so an `until`
+    built in seconds is ~1.7e9 — three weeks after 1970 — and `iter_months(symbol, 0, until)` finds
+    nothing. The engine then warms with zero bars, `_start` sets `ready` anyway, and /api/status
+    reports `{ok: true, ready: true}`: a service that looks perfectly healthy and answers "not
+    enough data" on every route. That is worse than the crash this file was written for, because
+    there `ready` is False and a probe can act on it.
+
+    The fake store honours the range it is given, which is what makes this a test of the bound
+    rather than of the literal expression that computes it: get the unit wrong and no bars come
+    back, and the assertion that fails is the one about the bars.
+    """
+    import pandas as pd
+
+    ts = [1_700_000_040_000 + i * 60_000 for i in range(3)]   # on the 1m UTC grid
+    asked: list[tuple[int, int]] = []
+
+    class FakeStore:
+        def months(self, symbol):
+            return ["2023-11"]
+
+        def iter_months(self, symbol, lo, hi):
+            asked.append((lo, hi))
+            rows = [t for t in ts if lo <= t <= hi]
+            if not rows:
+                return
+            yield "2023-11", pd.DataFrame(
+                {"open": [1.0] * len(rows), "high": [2.0] * len(rows),
+                 "low": [0.5] * len(rows), "close": [1.5] * len(rows),
+                 "volume": [10.0] * len(rows)},
+                index=pd.Index(rows, name="open_time_ms"),
+            )
+
+    warmed: list[int] = []
+
+    class FakeEngine:
+        def warmup(self, bars):
+            warmed.extend(b.open_time_ms for b in bars)
+            return len(warmed)
+
+        def waves(self, tf):
+            return {"n_confirmed": 0}
+
+    monkeypatch.setattr(clean_app, "store", FakeStore())
+    monkeypatch.setattr(clean_app, "engine", FakeEngine())
+
+    n = clean_app.warmup()
+    capsys.readouterr()
+
+    assert warmed == ts, (
+        f"the engine was warmed with {len(warmed)} of the store's 3 bars. An `until` that does not "
+        "reach today's bars warms up on an empty history and reports success"
+    )
+    assert n == 3
+
+    (lo, hi) = asked[-1]
+    assert lo == 0, "warm-up reads from the beginning of the history, not from a rolling window"
+    assert hi > ts[-1], (
+        f"the store was asked for bars up to {hi}, which is before the newest bar it holds "
+        f"({ts[-1]}): every bar after that upper bound is invisible to the warm-up"
+    )
+    assert abs(hi - time.time() * 1000) < 5_000, (
+        f"the upper bound is {hi}; `now` in epoch milliseconds is {int(time.time() * 1000)}. A "
+        "bound in seconds is an instant in January 1970 and selects no bar at all"
+    )
 
 
 class TestTheStaticCachePolicy:

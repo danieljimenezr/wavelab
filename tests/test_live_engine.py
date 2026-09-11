@@ -529,6 +529,15 @@ class TestTheDecisionCard:
         The rounding is asserted as EQUALITY against `round(...)` rather than with a tolerance,
         because the precision is the claim: a card that prints a stop to the cent and computes on
         one rounded to a dime is a card describing a different trade, however small the difference.
+
+        All ten of them died here and NOWHERE else, which made this one test the only thing
+        standing between the payload and the state it was in before. Nine now have a second,
+        independent killer that reads only the card — see the four tests below and
+        `test_the_card_is_priced_off_the_bar_the_chart_ends_on` in tests/test_decide_route.py. The
+        tenth, `score`, still has only this test: the published score has no relation to any other
+        published figure, so the only way to catch it is against the count it came from, which is
+        what this test does. Deleting this test therefore still reopens `score` — and it remains
+        the only test that checks the card row by row against the plan the planner actually built.
         """
         seen_viable = 0
         for ts, price, card, plans in wire_20d:
@@ -584,6 +593,232 @@ class TestTheDecisionCard:
         assert seen_viable >= 200, (
             f"only {seen_viable} viable rows across 20 days: this comparison is not exercising the "
             "payload"
+        )
+
+    # ---- the published plan, read on its own terms -------------------------------------------
+    #
+    # The four tests below and the arithmetic one after them exist because the ten payload faults
+    # listed in `test_the_card_publishes_the_plan_that_was_actually_built` all died to that one
+    # test and to nothing else: weaken its fixture, or delete it in a hurry, and nine of the ten
+    # come back silently. They are deliberately NOT a second copy of it. That test holds the card
+    # against the plan objects `build_plan` returned — an outside oracle, and the right instrument
+    # for "is this the same trade, to the cent". These read nothing but the card: every figure is
+    # checked against the OTHER figures published beside it, which is how the reader reads them.
+    # So the two kinds fail for different reasons and neither can stand in for the other.
+
+    @staticmethod
+    def _viable(cards: dict) -> list[tuple[int, float, float, dict]]:
+        """Every viable row of the fixture, beside the card-level price and ATR it was quoted at."""
+        rows = []
+        for ts, c in cards.items():
+            if "price" not in c:          # the warm-up card: no ATR yet, no payload to read
+                continue
+            for h in c["hypotheses"]:
+                if h["viable"]:
+                    rows.append((ts, c["price"], c["atr"], h))
+        return rows
+
+    def test_in_zone_is_decided_on_the_zone_the_card_actually_prints(self, replay_20d):
+        """The entry zone is two numbers and a claim about where the price sits between them.
+
+        `in_zone` is the flag the reason line is written from — "the price is not inside any entry
+        zone" is the sentence the reader acts on — and `entry_lo`/`entry_hi` are the band
+        `drawPlan` shades on the chart. Publish them the wrong way round and the two stop agreeing:
+        the shading is inside out, the flag still says the price is in it, and there is no way to
+        tell from the card which of the two is lying.
+
+        Stated as an equivalence because either half alone is satisfied by a constant: a card that
+        never claims to be in a zone passes the forward direction, one that always claims it passes
+        the reverse.
+        """
+        _, cards, _ = replay_20d
+        rows = self._viable(cards)
+        n_in = sum(1 for *_, h in rows if h["in_zone"])
+        assert len(rows) >= 200 and 20 <= n_in <= len(rows) - 20, (
+            f"{n_in} of {len(rows)} viable rows were in a zone: both kinds have to appear or this "
+            "equivalence is only being checked in one direction"
+        )
+        for ts, price, _atr, h in rows:
+            inside = h["entry_lo"] <= price <= h["entry_hi"]
+            assert inside is h["in_zone"], (
+                f"{ts} {h['id']}: the card prints a zone of {h['entry_lo']}-{h['entry_hi']} at a "
+                f"price of {price} and calls that in_zone={h['in_zone']}. The band on the chart "
+                "and the sentence under it are describing different things"
+            )
+
+    def test_the_targets_run_away_from_the_entry_and_there_are_three_of_them(self, replay_20d):
+        """Three lines on the chart, in order, all of them still ahead of the entry.
+
+        `drawPlan` maps the list straight onto T1, T2, T3 by position, so the ORDER is the label:
+        reversed, the card promises the far target first and prices the trade off what is really
+        the near one; sliced, T3 is simply never drawn and the reader never sees the level the
+        count is actually projecting. A target behind the entry would be an exit the trade is
+        already past at the moment it is taken.
+
+        Checked as geometry — ordered in the direction the trade is taken, and beyond the far rim
+        of the zone — so the assertion holds for a long and a short without being told which.
+        """
+        _, cards, _ = replay_20d
+        rows = self._viable(cards)
+        assert len(rows) >= 200
+        for ts, _price, _atr, h in rows:
+            s = 1 if h["direction"] == "LONG" else -1
+            t = h["targets"]
+            assert len(t) == 3, (
+                f"{ts} {h['id']}: {len(t)} targets on the wire. The card draws three and the "
+                "backtest books the second"
+            )
+            assert s * (t[1] - t[0]) > 0 and s * (t[2] - t[1]) > 0, (
+                f"{ts} {h['id']}: targets {t} for a {h['direction']}. T1..T3 have to get further "
+                "away, not nearer: drawn in this order the chart labels the far one T1"
+            )
+            far_rim = h["entry_hi"] if s > 0 else h["entry_lo"]
+            assert s * (t[0] - far_rim) > 0, (
+                f"{ts} {h['id']}: the first target {t[0]} is not past the entry zone "
+                f"({h['entry_lo']}-{h['entry_hi']}) for a {h['direction']}: the trade would be at "
+                "its first target before it was filled"
+            )
+
+    def test_the_stop_is_the_published_invalidation_plus_the_declared_cushion(self, replay_20d):
+        """The one claim this project makes that a moving-average stop cannot: the stop MEANS
+        something, because it hangs off the price at which the count is objectively false.
+
+        Both numbers are published, and the link between them is checkable without leaving the
+        card: the stop sits a cushion beyond the invalidation, on the losing side, and the cushion
+        is the declared one measured in the ATR the card itself prints. Publish an invalidation
+        that is not the one the stop was built from — a rounding, a neighbouring pivot's price —
+        and the red line on the chart stops being the line the risk was sized off. Nothing about
+        the card looks wrong; the arithmetic under it is simply no longer about the same level.
+
+        The tolerance is the rounding budget the card's own precision allows and nothing more, so
+        publishing either number a decimal short of the cent it claims is outside it.
+        """
+        e, cards, _ = replay_20d
+        cfg = e.plan_cfg
+        rows = self._viable(cards)
+        assert len(rows) >= 200
+        for ts, price, atr, h in rows:
+            s = 1 if h["direction"] == "LONG" else -1
+            inv, stop = h["invalidation_price"], h["stop"]
+            near_rim = h["entry_lo"] if s > 0 else h["entry_hi"]
+            assert s * (near_rim - inv) > 0, (
+                f"{ts} {h['id']}: the invalidation {inv} is inside or beyond the entry zone "
+                f"({h['entry_lo']}-{h['entry_hi']}) for a {h['direction']}: the entry would be on "
+                "the wrong side of the price that says the count is over"
+            )
+            assert s * (inv - stop) > 0, (
+                f"{ts} {h['id']}: stop {stop} is not beyond the invalidation {inv} for a "
+                f"{h['direction']}. A stop at or inside it is swept by the wick that the cushion "
+                "exists to survive"
+            )
+            cushion = max(cfg.stop_buffer_atr * atr, 2 * cfg.tick_size, cfg.stop_buffer_pct * price)
+            # 0.005 each from `stop` and `invalidation_price` being printed to the cent, plus a
+            # quarter of the half-cent the ATR is rounded to: 0.01125, rounded up.
+            assert abs(stop - (inv - s * cushion)) <= 0.0125, (
+                f"{ts} {h['id']}: the card publishes a stop of {stop} and an invalidation of "
+                f"{inv}, which are {abs(stop - inv):.2f} apart; the declared cushion at an ATR of "
+                f"{atr} is {cushion:.2f}. One of the two numbers is not the one the other was "
+                "built from"
+            )
+
+    def test_each_of_the_two_ratios_is_quoted_at_its_own_entry_price(self, replay_20d):
+        """Two R:R figures travel on every viable row and they are not interchangeable.
+
+        `rr_t2` is the one at `price` — the close you can always buy at, the one the backtest books
+        and the one every gate on the card is decided by. `rr_in_zone` is the better number a
+        resting limit would get IF it fills, and it is the one the card used to quote alone while
+        the results measured the other. Filling either field with the other restores exactly that:
+        a headline ratio the measurement does not deliver, on a product whose argument is that it
+        does not flatter you. Nothing catches it downstream, because the backtest reads only one.
+
+        Each is recomputed here from the card's own targets, stop and zone, so the test says which
+        entry price each field is quoted at rather than that the two fields differ. The last
+        assertion is the reason that matters: the headline is not the smaller of the two, it is the
+        one at a price the reader can actually get, and below the zone a long is buying cheaper
+        than the zone entry — so a test that pinned `rr_t2 <= rr_in_zone` would be pinning a
+        falsehood that holds most of the time.
+        """
+        _, cards, _ = replay_20d
+        rows = self._viable(cards)
+        assert len(rows) >= 200
+        headline_is_larger = 0
+        for ts, price, _atr, h in rows:
+            s = 1 if h["direction"] == "LONG" else -1
+            t2 = h["targets"][1]
+            risk = abs(price - h["stop"])
+            mid = (h["entry_lo"] + h["entry_hi"]) / 2.0
+            risk_in_zone = s * (mid - h["stop"])
+            near_rim = h["entry_lo"] if s > 0 else h["entry_hi"]
+            assert risk > 0 and s * (near_rim - h["stop"]) > 0, (
+                f"{ts} {h['id']}: the published zone {h['entry_lo']}-{h['entry_hi']} reaches past "
+                f"the published stop {h['stop']} for a {h['direction']}. A limit resting in the "
+                "dead part of that zone fills below its own stop, and the ratio quoted for it is "
+                "arithmetic about a trade that cannot be taken"
+            )
+            assert abs(h["rr_t2"] - abs(t2 - price) / risk) <= 0.02, (
+                f"{ts} {h['id']}: rr_t2 is published as {h['rr_t2']}, but T2 at {t2} against the "
+                f"card's own price {price} and stop {h['stop']} is "
+                f"{abs(t2 - price) / risk:.2f}R. The headline ratio is not the one at the price "
+                "this card is quoting"
+            )
+            assert abs(h["rr_in_zone"] - abs(t2 - mid) / risk_in_zone) <= 0.02, (
+                f"{ts} {h['id']}: rr_in_zone is published as {h['rr_in_zone']}, but T2 against the "
+                f"middle of the published zone ({mid:.2f}) is "
+                f"{abs(t2 - mid) / risk_in_zone:.2f}R"
+            )
+            headline_is_larger += h["rr_t2"] > h["rr_in_zone"]
+        assert 0 < headline_is_larger < len(rows), (
+            f"the headline ratio was the larger of the two on {headline_is_larger} of "
+            f"{len(rows)} rows: both cases have to occur, or the two fields are being told apart "
+            "by their size rather than by the entry price each is quoted at"
+        )
+
+    def test_the_cost_and_the_size_are_the_ones_this_card_s_own_stop_implies(self, replay_20d):
+        """The arithmetic block: what the trade costs, how far the stop is, how much to buy.
+
+        This is the half of the card that makes a refusal arguable instead of an opinion, and it is
+        the half nothing reads — `cost_r` is the fee gate's own number and feeds the required hit
+        rate; `size_factor` is the answer to "how much", and it is the whole of the rule that says
+        a far stop CUTS THE SIZE and never tightens the stop. All three are functions of numbers
+        printed beside them, so a card that disagrees with itself here is telling the reader to buy
+        an amount its own stop does not justify.
+
+        `p_required` is recomputed from the card's published cost and headline ratio, which pins
+        the thing a reader would never notice: that the hit rate quoted is the one for the ratio
+        the card leads with, and not for the better one it also carries.
+        """
+        e, cards, _ = replay_20d
+        cfg = e.plan_cfg
+        rows = self._viable(cards)
+        assert len(rows) >= 200
+        cut = 0
+        for ts, price, atr, h in rows:
+            risk = abs(price - h["stop"])
+            stop_atr = risk / atr
+            assert abs(h["stop_atr"] - stop_atr) <= 0.02, (
+                f"{ts} {h['id']}: the card says the stop is {h['stop_atr']} ATR away; its own "
+                f"stop {h['stop']} at a price of {price} is {stop_atr:.2f} ATR of {atr}"
+            )
+            assert abs(h["cost_r"] - (2 * cfg.fee_bps_taker / 10_000) * price / risk) <= 2e-4, (
+                f"{ts} {h['id']}: cost_r {h['cost_r']} for a round trip of "
+                f"{2 * cfg.fee_bps_taker} bps on {price} against {risk:.2f} of risk. This is the "
+                "number the fee gate rejects on and it is printed to four decimals"
+            )
+            size = min(1.0, cfg.max_stop_atr / stop_atr)
+            cut += size < 1.0
+            assert abs(h["size_factor"] - size) <= 2e-3, (
+                f"{ts} {h['id']}: size_factor {h['size_factor']} at a stop of {stop_atr:.2f} ATR "
+                f"(ceiling {cfg.max_stop_atr}): the size the rule cuts to is {size:.3f}"
+            )
+            p_req = (cfg.expected_loss_r + h["cost_r"] + cfg.ev_min_r) / (h["rr_t2"]
+                                                                          + cfg.expected_loss_r)
+            assert abs(h["p_required"] - p_req) <= 0.01, (
+                f"{ts} {h['id']}: the card asks for a hit rate of {h['p_required']} where its own "
+                f"cost {h['cost_r']} and headline ratio {h['rr_t2']} require {p_req:.4f}"
+            )
+        assert cut > 0, (
+            "not one row in the fixture had its size cut, so the branch that cuts it — the rule "
+            "the module exists for — was never reached by this test"
         )
 
     def test_the_verdict_does_not_depend_on_anything_being_in_a_zone(self, replay_20d):
@@ -852,6 +1087,46 @@ class TestTheTripleBarrier:
         )
         assert out.r == pytest.approx((102.0 - 100.0) / 5.0), (
             f"the exit must be booked at the close of the last bar held, got {out.r}R"
+        )
+
+    def test_a_one_bar_window_is_a_one_bar_trade_and_not_a_non_trade(self):
+        """The `n == 0` guard is reached by no other test in this file, so its boundary is free.
+
+        Loosen it by one and a window of exactly one bar that touches neither barrier is booked as
+        `Outcome('vertical', 0.0, 0.0, 0.0, 0, False)` — a real trade recorded as a flat nothing.
+        It is the worst answer this function can give: it does not raise, it counts in `n`, and it
+        fails TOWARD zero, so expectancy is dragged to the middle and the one-bar members of the
+        tail the sizing is built on disappear. Two things reach it: `max_bars=1`, and a signal on
+        the second-to-last bar of history, where `H[i+1:]` has length one. `run.py`'s adjacent
+        end-of-history guard was itself a survivor one round ago; this is the same boundary a step
+        further down.
+
+        The empty window is asserted beside it because that is the case the guard is written for
+        and nothing has ever executed it either — without this line, deleting the guard outright
+        (an `IndexError` on `closes[-1]`) is also free.
+        """
+        one = resolve_triple_barrier(
+            100.0, 95.0, 110.0,
+            np.array([101.0]), np.array([99.0]), np.array([102.0]), max_bars=5,
+        )
+        assert (one.barrier, one.bars) == ("vertical", 1), (
+            f"a one-bar hold came back as {one.bars} bars of {one.barrier!r}: the trade was "
+            "resolved by the empty-window guard, which books it as a flat non-trade"
+        )
+        assert one.r == pytest.approx((102.0 - 100.0) / 5.0), (
+            f"the one bar held closed at 102.0 against a 5.0 risk, so it is 0.4R, not {one.r}R"
+        )
+        assert (one.mae_r, one.mfe_r) == (pytest.approx(0.2), pytest.approx(0.2)), (
+            f"the excursions of the one bar held are {(one.mae_r, one.mfe_r)}, not (0.2, 0.2): "
+            "a trade booked as zero bars has no excursions to report"
+        )
+
+        empty = resolve_triple_barrier(
+            100.0, 95.0, 110.0,
+            np.array([]), np.array([]), np.array([]), max_bars=5,
+        )
+        assert (empty.barrier, empty.r, empty.bars) == ("vertical", 0.0, 0), (
+            f"an empty window is the one thing that IS a zero-bar non-trade, got {empty}"
         )
 
     def test_a_stop_out_costs_exactly_one_r(self):

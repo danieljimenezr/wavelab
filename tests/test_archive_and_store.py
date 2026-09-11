@@ -17,6 +17,8 @@ import hashlib
 import io
 import json
 import os
+import sqlite3
+import subprocess
 import time
 import zipfile
 from datetime import UTC, date, datetime, timedelta
@@ -28,6 +30,7 @@ import pandas as pd
 import pytest
 
 from wavelab.core.timeframes import TF_1H, TF_1M
+from wavelab.core.types import Verdict
 from wavelab.feeds import binance_klines, binance_ws
 from wavelab.feeds.base import Market
 from wavelab.feeds.binance_archive import (
@@ -45,6 +48,7 @@ from wavelab.feeds.binance_rest import (
 )
 from wavelab.feeds.liquidations import LiquidationRecorder
 from wavelab.store import hydrate as hydrate_mod
+from wavelab.store import trials as trials_mod
 from wavelab.store.bars import BarStore
 
 JAN_2025 = 1735689600000   # 2025-01-01T00:00:00Z in ms
@@ -814,8 +818,14 @@ def _month_zip(month: date, n: int = 3, *, content_month: date | None = None) ->
     return _zip(_csv(start, n, TF_1M.ms, micros=False, header=False))
 
 
-def _archive_transport(files: dict[str, bytes], *, checksums: dict[str, str] | None = None):
-    """Serves the manufactured archive: the ZIP, its .CHECKSUM, and 404 for everything else."""
+def _archive_transport(files: dict[str, bytes], *, checksums: dict[str, str] | None = None,
+                       seen: list[str] | None = None):
+    """Serves the manufactured archive: the ZIP, its .CHECKSUM, and 404 for everything else.
+
+    `seen` collects the URLs actually requested (never the .CHECKSUM companions). Which files a
+    hydration ASKS for is a property in its own right — the store it writes cannot distinguish a
+    month that was re-downloaded from one that was already complete.
+    """
     checksums = checksums or {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -826,6 +836,8 @@ def _archive_transport(files: dict[str, bytes], *, checksums: dict[str, str] | N
                 return httpx.Response(404)
             digest = checksums.get(url.removesuffix(".CHECKSUM"), hashlib.sha256(raw).hexdigest())
             return httpx.Response(200, text=f"{digest}  x.zip")
+        if seen is not None:
+            seen.append(url)
         raw = files.get(url)
         return httpx.Response(200, content=raw) if raw is not None else httpx.Response(404)
 
@@ -887,9 +899,9 @@ class TestHydrationWritesWhatTheURLPromised:
     """End-to-end over a stub transport: no network, real parse, real store."""
 
     def _run(self, tmp_path, monkeypatch, months: list[date], files: dict[str, bytes],
-             *, concurrency: int = 6):
+             *, concurrency: int = 6, seen: list[str] | None = None):
         monkeypatch.setattr(hydrate_mod, "list_available_months", lambda *a, **kw: list(months))
-        transport = _archive_transport(files)
+        transport = _archive_transport(files, seen=seen)
         real_client = httpx.AsyncClient
 
         def fake_client(*a, **kw):
@@ -950,6 +962,41 @@ class TestHydrationWritesWhatTheURLPromised:
         assert len(out) == 3 and not out["is_gap"].any(), (
             f"the incomplete newest month was not refreshed: {len(out)} bars, "
             f"{int(out['is_gap'].sum())} still missing")
+
+    async def test_the_month_it_downloads_again_is_the_NEWEST_stored_one(self, tmp_path,
+                                                                        monkeypatch):
+        """The test above seeds ONE month, and with one month stored the newest and the oldest are
+        the same key — so it passes whichever end of the history the selection reaches for. Every
+        store after its first hydration holds more than one.
+
+        Reaching for the oldest instead re-downloads a month that was already complete and leaves
+        the incomplete one alone, permanently, at the newest end of the history — the join between
+        the archive and the live feed, which is the part every chart and every warm-up reads. It
+        raises nothing and it costs nothing visible: hydration reports the same success, `coverage`
+        reports the missing minutes as an ordinary Binance outage, and nobody re-runs it.
+        """
+        stored = [date(2024, 11, 1), date(2024, 12, 1), date(2025, 1, 1)]
+        store = BarStore(tmp_path / "bars")
+        for m in stored:
+            first_ms = int(pd.Timestamp(m, tz="UTC").value // 1_000_000)
+            store.ingest("BTCUSDT", pd.DataFrame(
+                {"open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 10.0},
+                index=pd.Index([first_ms], name="open_time_ms")))
+
+        files = {monthly_url("BTCUSDT", TF_1M, m): _month_zip(m, n=3) for m in stored}
+        seen: list[str] = []
+        await self._run(tmp_path, monkeypatch, stored, files, seen=seen)
+
+        monthly = [u for u in seen if "/monthly/" in u]
+        assert monthly == [monthly_url("BTCUSDT", TF_1M, date(2025, 1, 1))], (
+            "the months re-downloaded despite already being stored are "
+            f"{[u.rsplit('-1m-', 1)[-1].removesuffix('.zip') for u in monthly]}; only the newest "
+            "stored month (2025-01) is incomplete by construction, and it is the only one worth "
+            "a second download")
+        out = store.read("BTCUSDT", JAN_2025, JAN_2025 + 2 * TF_1M.ms)
+        assert len(out) == 3 and not out["is_gap"].any(), (
+            f"2025-01 is still short after hydration: {int(out['is_gap'].sum())} of {len(out)} "
+            "bars missing at the newest end of the history")
 
 
 def _clock_stopped_at(instant: datetime) -> type[datetime]:
@@ -1202,6 +1249,45 @@ class TestTheRestKlineMapping:
             f"{ts[:1]}..{ts[-1:]}")
 
 
+class TestTheLiveKlineMapping:
+    """`_to_bar` is the funnel every live bar in the system passes through.
+
+    The REST array above has a test that walks its twelve positions; the socket's named payload
+    had none. The seam tests below drive `_to_bar` on every message and read `open_time_ms`,
+    `is_closed` and `n_source_bars` off the result — so the five price and size fields could be
+    permuted among themselves and nothing anywhere would go red.
+    """
+
+    def test_every_named_field_of_the_socket_payload_lands_in_its_own_column(self):
+        """`k["h"]` and `k["l"]` are one character apart on the same line, and swapping them is
+        silent from end to end.
+
+        That used to be silent from end to end: `Bar.__post_init__` checked the UTC grid and
+        nothing else, so an inside-out bar was constructed without complaint, `Bar.range` came out
+        negative, and a negative range is what the ATR averages and what the ZigZag compares its
+        threshold against — a threshold of the wrong sign, on the one code path that runs
+        continuously in production, with the healed and archived bars stored beside it the right
+        way up so the join looked entirely ordinary.
+
+        `Bar` now refuses to be impossible, so that particular swap raises at construction. This
+        test stays because the constructor only catches the permutations that produce an impossible
+        bar: swapping `q` for `v`, or `n` for `V`, still lands the right shape with the wrong
+        numbers in it, and only a per-field assertion catches that.
+        """
+        # Binance's named payload, every field a different number so a key slip shows up.
+        payload = {"t": JAN_2025, "o": "100.0", "h": "102.0", "l": "98.0", "c": "101.0",
+                   "v": "5.0", "q": "7.0", "n": 8, "V": "9.0", "Q": "10.0", "x": True}
+        b = binance_klines._to_bar(payload, "BTCUSDT", TF_1M)
+        got = (b.open_time_ms, b.open, b.high, b.low, b.close, b.volume,
+               b.quote_volume, b.trades, b.taker_buy_base, b.taker_buy_quote)
+        assert got == (JAN_2025, 100.0, 102.0, 98.0, 101.0, 5.0, 7.0, 8, 9.0, 10.0), (
+            f"a kline field was read from the wrong key of the socket payload: {got}")
+        assert b.low <= b.open <= b.high and b.low <= b.close <= b.high, (
+            f"the bar is inside out: low={b.low}, high={b.high}, open={b.open}, close={b.close}. "
+            "Every price of a well-formed candle lies between its own low and its own high, and "
+            f"its range ({b.range}) is never negative")
+
+
 class TestTheGapHealSeam:
     """Binance cuts the WebSocket every 24 h BY DESIGN, so this seam is crossed daily. A hole
     there raises nothing at all: it just makes a window of N bars span more time than it claims."""
@@ -1426,3 +1512,198 @@ class TestTheLiquidationLogIsAppendOnly:
         assert (tmp_path / "okx-2026-09-10.jsonl").read_text().splitlines() == ["next day"], (
             "two different days were written into one file, so the daily rollover is not a "
             "rollover at all")
+
+
+# ----------------------------------------------------------------------------------------
+# The two SQL schemas. `trials.sql` has exactly one reader in the repository and `journal.sql`
+# has none at all, so until now nothing in the suite had executed either of them. A fault in a
+# DDL is invisible until the day something writes through it, and what it refuses or silently
+# discards on that day is exactly the evidence neither file can reconstruct afterwards.
+# ----------------------------------------------------------------------------------------
+
+SCHEMA_DIR = trials_mod.SCHEMA.parent
+
+
+class TestTheTrialLedgerSchema:
+    """`trials.sql` decides what the effective N is, and the effective N is what deflates the
+    Sharpe. Everything it gets wrong, it gets wrong downwards: a trial not counted makes the
+    correction weaker, which is the ANTI-CONSERVATIVE direction the file's own header says this
+    ledger exists to prevent.
+    """
+
+    @pytest.fixture
+    def log(self, tmp_path, monkeypatch):
+        """A real `TrialLog` over the shipped schema, with provenance stubbed out: `_git_sha`
+        shells out twice per row, and what is under test here is the ledger, not git."""
+        monkeypatch.setattr(trials_mod, "_git_sha", lambda: ("abc1234", False))
+        return trials_mod.TrialLog(tmp_path / "trials.sqlite")
+
+    def test_effective_n_counts_configurations_and_not_rows(self, log):
+        """The N that deflates the Sharpe is "how many configurations were ever evaluated", and a
+        row is not a configuration.
+
+        A `startup` row carries no fixture set, and SQLite treats NULLs in a unique index as
+        distinct, so `INSERT OR REPLACE` never collapses them: one row is appended every time the
+        service starts. Counting rows therefore counts RESTARTS. The correction grows with the
+        uptime of the box, the Sharpe is deflated by a number that has nothing to do with how much
+        searching was done, and the one figure the honesty machinery rests on becomes a fact about
+        the process supervisor.
+        """
+        for _ in range(3):
+            log.record("hash_a", "startup")
+        log.record("hash_b", "startup")
+
+        rows = int(log.db.execute("SELECT COUNT(*) FROM trials").fetchone()[0])
+        assert rows == 4, (
+            f"the fixture is not what this test needs: {rows} rows stored, 4 expected. Three of "
+            "them are the SAME configuration restarting, and the point of the test is that they "
+            "are stored and still counted once")
+        assert log.effective_n == 2, (
+            f"effective_n is {log.effective_n} over {rows} rows from 2 distinct configurations. "
+            "It counts DISTINCT config_hash, not rows: three restarts of one configuration are "
+            "one trial, and inflating them deflates the Sharpe by a number nobody searched for")
+
+    def test_the_same_configuration_under_a_second_fixture_set_is_a_second_trial(self, log):
+        """`fixture_set` is part of the unique key because evaluating one configuration against a
+        second set of fixtures is a second look at the data, and a second look is a trial.
+
+        Drop it from the key and the write is not an error — it is `INSERT OR REPLACE`, so the
+        later evaluation OVERWRITES the earlier one. The ledger then holds one row where two
+        evaluations happened, and the result that was replaced is the one thing in this project
+        that cannot be re-derived: the fixtures, the code and the configuration will all have
+        moved by the time anyone notices the row is alone.
+        """
+        log.record("hash_a", "fixture_eval", fixture_set="fx_2024", metric="sharpe", value=1.1)
+        log.record("hash_a", "fixture_eval", fixture_set="fx_2025", metric="sharpe", value=0.4)
+
+        kept = log.db.execute(
+            "SELECT fixture_set, value FROM trials WHERE kind = 'fixture_eval'"
+            " ORDER BY fixture_set").fetchall()
+        assert kept == [("fx_2024", 1.1), ("fx_2025", 0.4)], (
+            f"one configuration evaluated against two fixture sets left {kept}. Both are trials "
+            "and both are unrepeatable; a unique key that ignores fixture_set silently keeps "
+            "whichever ran last")
+
+    def test_a_recorded_metric_stays_a_number(self, log):
+        """`value REAL` is not decoration: it is the column the ledger is read back through.
+
+        A STRICT table accepts a float into a TEXT column by converting it, so the mistake raises
+        nothing at write time and shows up only when the rows are compared — and then it shows up
+        as an ORDERING, because '9.0' sorts after '10.0' in text. The best trial on record ranks
+        worst, which is the one comparison this table is kept for.
+        """
+        log.record("hash_c", "manual", metric="sharpe", value=9.0)
+        log.record("hash_d", "manual", metric="sharpe", value=10.0)
+
+        best = log.db.execute(
+            "SELECT value FROM trials WHERE kind = 'manual' ORDER BY value DESC").fetchone()[0]
+        assert best == 10.0, (
+            f"the best of the recorded metrics 9.0 and 10.0 came back as {best!r}: the column is "
+            "being compared as text, so every ranking taken off this ledger is inverted wherever "
+            "the digits disagree with the magnitudes")
+        stored = log.db.execute(
+            "SELECT typeof(value) FROM trials WHERE kind = 'manual'").fetchall()
+        assert {t for (t,) in stored} == {"real"}, (
+            f"a recorded metric is stored as {sorted({t for (t,) in stored})}, not as a number")
+
+    def test_a_real_sha_is_never_recorded_with_an_unknown_dirty_flag(self, tmp_path, monkeypatch):
+        """`_git_sha`'s docstring names this as the one pairing the function exists to prevent, and
+        `check=True` on BOTH calls is the entire mechanism.
+
+        Drop it from the `git status` call and a failure there — no repo, a lock held by another
+        process, git not on PATH in the unit file — exits non-zero with empty stdout. `bool("")`
+        is False, so the row is written as a real short sha with `dirty=0`: "this trial ran on a
+        pristine tree at abc1234", which nobody knows and which is precisely the claim the ledger
+        is kept to be able to make. It is silent, it is permanent, and it is indistinguishable
+        from a true row a year later when the provenance is the only thing left.
+
+        The demotion is to the ("?", False) sentinel, so the invariant is one-directional: dirty=0
+        is legal only next to an unknown sha, never next to a real one.
+        """
+        real = subprocess.run
+
+        def failing_status(cmd, *a, **kw):
+            if cmd[:2] == ["git", "status"]:
+                if kw.get("check"):
+                    raise subprocess.CalledProcessError(128, cmd, output="")
+                return subprocess.CompletedProcess(cmd, 128, "", "fatal: not a git repository")
+            return real(cmd, *a, **kw)
+
+        monkeypatch.setattr(trials_mod.subprocess, "run", failing_status)
+        log = trials_mod.TrialLog(tmp_path / "trials.sqlite")
+        log.record("hash_e", "startup")
+
+        sha, dirty = log.db.execute("SELECT git_sha, dirty FROM trials").fetchone()
+        assert (sha, dirty) == ("?", 0), (
+            f"`git status` failed and the row recorded sha={sha!r} dirty={dirty}: a real sha "
+            "paired with dirty=0 asserts a clean tree that was never established, and that is the "
+            "only pairing this ledger cannot be allowed to invent"
+        )
+
+
+class TestTheJournalSchema:
+    """The journal is the uncontaminated evidence this project is being built to accumulate: ~60
+    signals a year, and impossible to reconstruct once the weights, the configuration and the code
+    have drifted.
+
+    Nothing in the repository executes `journal.sql` yet, so these are the first rows it has ever
+    been asked to hold. A CHECK list that has drifted away from the enum the engine emits, or a
+    probability column typed INTEGER, fails neither at review nor at startup: it fails on the
+    first decision the journal is asked to record, which is the one decision that cannot be
+    recorded later instead.
+    """
+
+    ROW = ("INSERT INTO decisions (ts_ms, symbol, timeframe, verdict, maturity, ev_r_lo, n_cell,"
+           " p_required, engine_sha, config_hash, weights_version)"
+           " VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+
+    def test_it_accepts_a_decision_of_every_verdict_the_engine_can_emit(self):
+        """The three-state verdict lives in two places — `core.types.Verdict` and this CHECK — and
+        only one of them is executed by anything today.
+
+        ACTIONABLE is the rarest of the three and the only one worth keeping: a journal that
+        accepts NO_TRADE and WATCH and refuses the signal itself would look healthy for months,
+        because months of this product's output are no_trade rows.
+        """
+        db = sqlite3.connect(":memory:")
+        db.executescript((SCHEMA_DIR / "journal.sql").read_text())
+
+        for v in Verdict:
+            try:
+                db.execute(self.ROW, (JAN_2025, "BTCUSDT", "15m", v.value, 1,
+                                      0.42, 30, 0.55, "eng", "cfg", "w1"))
+            except sqlite3.IntegrityError as exc:
+                pytest.fail(f"the journal refused a {v.value!r} decision: {exc}")
+
+        got = db.execute("SELECT verdict, ev_r_lo, p_required FROM decisions ORDER BY id").fetchall()
+        assert [r[0] for r in got] == [v.value for v in Verdict], (
+            f"the journal stored {[r[0] for r in got]} for the verdicts {[v.value for v in Verdict]}")
+        assert all(r[1] == 0.42 and r[2] == 0.55 for r in got), (
+            f"a decision's numbers came back changed: {got}. ev_r_lo is the lower bound of a "
+            "bootstrap CI and p_required is a probability; neither one survives an integer column, "
+            "and a rounded bound is a claim the evidence does not support")
+
+    SNAP = ("INSERT INTO wave_snapshots (ts_ms, symbol, timeframe, count_id, rank, fit_score,"
+            " terminal_label, invalidation_price, invalidation_rule, provenance, engine_sha)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+
+    @pytest.mark.parametrize("provenance", ["live", "offline_reparse"])
+    def test_a_wave_snapshot_can_be_written_by_either_thing_that_writes_one(self, provenance):
+        """The sibling of the verdict CHECK above, and the one the test beside it does not reach.
+
+        `offline_reparse` is the whole reason the column exists: a count re-derived after the fact
+        is evidence of a different kind from one the live engine published, and the index on
+        `(symbol, timeframe, ts_ms, provenance)` exists so the two can be told apart when the
+        journal is read back. Drop that value from the CHECK — the same one-word edit that the
+        verdict list is now guarded against — and every live row still writes. The offline reparse
+        fails on its first row, which is the first time anyone tries to reconstruct history, and
+        by then the live rows it was going to be compared against are months old.
+        """
+        db = sqlite3.connect(":memory:")
+        db.executescript((SCHEMA_DIR / "journal.sql").read_text())
+        try:
+            db.execute(self.SNAP, (JAN_2025, "BTCUSDT", "15m", "c1", 0, 0.87,
+                                   "impulse@3", 61000.0, "R3", provenance, "eng"))
+        except sqlite3.IntegrityError as exc:
+            pytest.fail(f"the journal refused a {provenance!r} wave snapshot: {exc}")
+        assert db.execute("SELECT provenance FROM wave_snapshots").fetchone()[0] == provenance

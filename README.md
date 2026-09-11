@@ -108,10 +108,18 @@ to write, not merely tested for.
 function. **There is no vectorised path.** If backtest and live were two implementations, their
 divergence would silently reintroduce lookahead.
 
-**Anti-astronaut rule.** There are five seams (`FeedAdapter`, `FeatureProvider`, `Production`,
-`SignalSource`, `Veto`), each with a single method that matters. **If a seam needs a second
-meaningful method to be useful, it has been drawn in the wrong place.** No dependency injection
-container, no entry-point discovery, no plugin framework.
+**Anti-astronaut rule, applied to this paragraph first.** It used to claim five seams —
+`FeedAdapter`, `FeatureProvider`, `Production`, `SignalSource`, `Veto` — each with a single method
+that matters. A mutation audit went looking for them: **one exists.** `FeedAdapter` is a Protocol in
+`feeds/base.py` and not one feed declares it; the other four were never written; the registry that
+would have made them pluggable was never called by anything, and the `[plugins].modules` setting was
+wired to nothing. 167 lines of architecture that a reader would reasonably believe was load-bearing.
+
+It has been deleted rather than finished. The rule the paragraph was stating is the right one — if a
+seam needs a second meaningful method to be useful it has been drawn in the wrong place, and there is
+no DI container, no entry-point discovery and no plugin framework — and the way to honour it is not
+to ship the seams before anything needs them. Adding a second feed is a concrete afternoon's work
+against `feeds/base.py`; it does not need a registry, and when it does, the shape will be known.
 
 **No statistic as a bare number.** Always the triple *(value, the n it comes from, the state of the
 precondition)*. If the precondition fails, it shows "not computable — missing N", never a number. A

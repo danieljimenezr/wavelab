@@ -8,6 +8,7 @@ raises. That is why the step is asserted from the timestamps on every window con
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import ClassVar
 
 import numpy as np
 import pandas as pd
@@ -182,6 +183,36 @@ class TestRing:
             r.append(b)
         with pytest.raises(ValueError, match="out-of-order or duplicate"):
             r.append(bars[-1])
+
+    def test_a_window_whose_timestamps_repeat_is_refused_as_corrupt(self):
+        """The window's own assertion is the last thing between a corrupt ring and every
+        positional computation built on it, and a REPEATED timestamp is the corruption that
+        actually happens.
+
+        A decreasing timestamp means the write order was scrambled; a repeated one means a bar was
+        written twice, which is exactly what `append`'s duplicate guard and the store's
+        deduplication exist to prevent upstream — so it is the shape the failure takes when one of
+        those is wrong. It arrives silently: `np.diff` yields a 0 step, `gap[1:] |= d != tf.ms`
+        marks that one slot so `complete` still reads False, and the window then holds one fewer
+        DISTINCT bar than `len(w)` claims. Every ER(n), ATR and ZigZag threshold computed over it
+        is averaging one bar twice, and no number in the output looks wrong.
+
+        The repeat is written straight into the ring's storage because `append` is designed to make
+        it unreachable through the public API — which is the point. This check is the defence
+        against the writer that does not come in through `append`: a wrap that miscounts, a
+        restored buffer, a future bulk loader.
+        """
+        r = Ring(SYMBOL, TF_15M, capacity=8)
+        for b in make_bars(12):          # twelve bars into eight slots: the buffer has wrapped
+            r.append(b)
+        assert int(np.diff(r.window(8).ts).min()) > 0, (
+            "the premise: a healthy ring hands back STRICTLY increasing timestamps, so a repeat "
+            "is corruption and not a boundary case the caller has to tolerate"
+        )
+
+        r._ts[3] = r._ts[2]              # one bar duplicated; the sequence is still non-DEcreasing
+        with pytest.raises(ValueError, match="corrupt"):
+            r.window(8)
 
     def test_it_rejects_a_bar_from_another_symbol_or_timeframe(self):
         """A ring is one symbol and one timeframe; a mis-routed bar has no signature.
@@ -512,6 +543,24 @@ class TestTheUtcGridIsNotNegotiable:
                 close=1.5, volume=1.0, n_source_bars=1)
         assert m.coverage == 1.0
 
+    def test_a_bars_range_is_the_distance_from_its_low_up_to_its_high(self):
+        """`range` has no caller in the repository yet, and that is the argument for pinning it.
+
+        It is the obvious thing for a future ATR, a volatility filter or a ZigZag threshold to
+        reach for, precisely because it looks like the safe, already-covered way to ask how far a
+        bar travelled. Subtracted the wrong way round it returns a NEGATIVE distance on every
+        well-formed bar — a threshold with the wrong sign, which neither raises nor renders
+        oddly: the ZigZag simply confirms every pivot it is offered, and the count fills with
+        noise that looks like structure.
+        """
+        b = Bar(symbol=SYMBOL, tf=TF_15M, open_time_ms=T0,
+                open=1.0, high=2.0, low=0.5, close=1.5, volume=1.0)
+        assert b.range == pytest.approx(1.5), (
+            f"a bar spanning 0.5 to 2.0 reports a range of {b.range} instead of 1.5: the high and "
+            "the low are subtracted in the wrong order"
+        )
+        assert b.range >= 0.0, "a bar cannot travel a negative distance"
+
     def test_floor_ms_lands_on_the_bar_that_contains_the_instant(self):
         """`floor_ms` is the one method whose job is mapping an arbitrary instant onto the grid,
         and the direction it rounds is the whole of its meaning.
@@ -528,3 +577,43 @@ class TestTheUtcGridIsNotNegotiable:
             "the last millisecond of an hour belongs to that hour, not to the next one"
         )
         assert TF_1H.floor_ms(T0 - 1) == T0 - TF_1H.ms
+
+
+class TestABarRefusesToBeImpossible:
+    """★ High and low transposed is two characters in a column mapping, and it was silent.
+
+    Nothing downstream complains about an inside-out bar. `range` comes out negative, and that
+    negative is what the ATR averages and what the ZigZag measures its threshold against — so the
+    volatility scale the whole product is denominated in acquires the wrong sign. Every
+    wick-reading rule in the hypothesis library then evaluates on inverted candles, and the pivot
+    detector finds extremes the wrong way round. All of it renders, with numbers, and none of it
+    raises.
+
+    The constructor is the right place: it closes the class on every adapter at once, including the
+    ones written after this. The archive reader, the REST reader, the socket reader, the resampler
+    and the test fixtures all funnel through it.
+    """
+
+    #: (name, o, h, l, c) — each violates the definition of the four fields in a different way.
+    IMPOSSIBLE: ClassVar[list[tuple]] = [
+        ("high and low transposed", 100.0, 98.0, 102.0, 101.0),
+        ("close above the high", 100.0, 102.0, 98.0, 103.0),
+        ("close below the low", 100.0, 102.0, 98.0, 97.0),
+        ("open above the high", 103.0, 102.0, 98.0, 101.0),
+        ("open below the low", 97.0, 102.0, 98.0, 101.0),
+    ]
+
+    @pytest.mark.parametrize("name,o,h,l,c", IMPOSSIBLE, ids=[x[0] for x in IMPOSSIBLE])
+    def test_a_bar_that_cannot_exist_is_refused_at_construction(self, name, o, h, l, c):
+        with pytest.raises(ValueError, match="is not a bar"):
+            Bar("BTCUSDT", TF_1M, 0, o, h, l, c, 1.0)
+
+    def test_a_flat_bar_is_still_a_bar(self):
+        """The boundary, and it has to stay open: a minute in which one trade printed has
+        O == H == L == C. Refusing that would reject real data to catch a typo."""
+        b = Bar("BTCUSDT", TF_1M, 0, 100.0, 100.0, 100.0, 100.0, 1.0)
+        assert b.high == b.low == 100.0
+
+    def test_the_ordinary_bar_is_untouched(self):
+        b = Bar("BTCUSDT", TF_1M, 0, 100.0, 102.0, 98.0, 101.0, 5.0)
+        assert (b.open, b.high, b.low, b.close) == (100.0, 102.0, 98.0, 101.0)

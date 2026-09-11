@@ -215,8 +215,22 @@ def build_plan(h: Hypothesis, price: float, atr: float, cfg: PlanConfig | None =
     # plans measured, zero crossings, nearest approach 0.058R — but `build_plan` is exported and
     # takes a hand-set invalidation, and "unreachable today" is how the headline case got here.
     # 0.0 reads as "no reward", which is the honest answer for a geometry that makes no sense.
+    #
+    # The test is on the NEAR RIM of the zone and not on the midpoint the ratio is quoted at. A
+    # zone is an instruction — "rest a limit anywhere between these two prices" — so the entry it
+    # has to answer for is the worst one it permits, which is the rim nearest the stop. Testing
+    # the midpoint instead accepts every zone less than half of which is dead, and it is most
+    # permissive exactly where the number it guards blows up: as the stop walks up towards the
+    # midpoint from the live side, `risk_zone` goes to zero and the quoted reward goes to
+    # infinity. Measured on the (70000, 80000, 74000) count, walking the stop through that
+    # count's own 72,140-75,000 zone: 12.9R one twentieth of the way in, 23.2R at a quarter,
+    # 580.8R a hair under the midpoint, and 0.0 the moment it crosses. Every one of those is a
+    # zone whose lower half fills BELOW its own stop, and the more of it is dead the better the
+    # card looks. The rim test subsumes the midpoint one rather than replacing it: a rim on the
+    # live side puts the midpoint further from the stop still.
+    near_rim = lo if s > 0 else hi
     risk_zone = s * (entry_zone - stop)
-    rr_in_zone = abs(targets[1] - entry_zone) / risk_zone if risk_zone > 0 else 0.0
+    rr_in_zone = abs(targets[1] - entry_zone) / risk_zone if s * (near_rim - stop) > 0 else 0.0
     p_req = required_hit_rate(rr_t2, cost_r, cfg)
 
     size = 1.0

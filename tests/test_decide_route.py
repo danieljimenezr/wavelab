@@ -19,6 +19,14 @@ exactly as a caller would have to read it, and the constructor is asked to accep
 passes only because the PRIOR ceiling holds; `test_catching_up_changes_nothing_on_the_card` pins
 that this is the ONLY thing holding, so the day maturity rises somebody sees a red test.
 
+**What the two served payloads say about the same bar.** `/api/decide` and `/api/history` are
+read side by side — the card quotes a price, the chart draws a candle, and a user compares them
+without being told to. Nothing checked that they are talking about the same bar, that the chart is
+given the window it asked for, or that either of them dates a bar in the unit Lightweight Charts
+reads. Each of those is a silent failure: a card priced off the previous bar still renders, a
+`limit` that is ignored still draws, and a timestamp in milliseconds paints an empty chart with a
+green health badge above it.
+
 **The PUBLIC gate.** With `WAVELAB_PUBLIC` set, `/api/decide`, `/api/history` and `/ws` must stop
 answering. That is what keeps the owner's chart off the internet and it was protected by nothing
 but a code review. `PUBLIC` is computed at IMPORT time from the environment, so monkeypatching the
@@ -232,6 +240,122 @@ def test_a_timeframe_with_no_data_answers_not_ok_and_says_why(client):
     assert r.json()["error"] == "no data for nope"
 
 
+# ------------------------------------------------- the card, the chart, and the bar they share
+
+
+def test_the_card_is_priced_off_the_bar_the_chart_ends_on(client):
+    """The card's price and the last candle drawn are the same bar, or the reader is misled.
+
+    `/api/decide` prices the whole card — the entry zone it compares against, `rr_t2`, `cost_r` —
+    off one close it picks out of the ring. Reading one bar further back is a one-character edit
+    (`window(1)` -> `window(2)`, whose `close[0]` is then the PREVIOUS bar) and it is invisible:
+    every figure stays plausible, every line still draws, and on this fixture the price moves 0.76%
+    while the verdict does not move at all. What the user sees is a card quoting a price that is
+    not the one on the chart beside it, and an "inside the entry zone" that was decided against a
+    bar that closed an hour ago.
+
+    Checked across the two payloads rather than against the ring, because agreeing with each other
+    is the property: these are the two numbers a reader puts side by side.
+    """
+    card = client.get(f"/api/decide?tf={TF}").json()
+    bars = client.get(f"/api/history?tf={TF}&limit=1500").json()["bars"]
+    assert "price" in card, "the fixture must produce a full card or this test asserts nothing"
+
+    assert card["price"] == round(bars[-1]["close"], 2), (
+        f"the card is quoted at {card['price']} and the last candle on the chart closed at "
+        f"{bars[-1]['close']} (the one before it closed at {bars[-2]['close']}). The card and the "
+        "chart are describing different bars"
+    )
+
+
+def test_history_sends_exactly_the_window_that_was_asked_for(client, warm_engine):
+    """`limit` is the browser saying how many candles it wants, and it is a cap in both senses.
+
+    Ignored — `max(limit, len(ring))` instead of `min(...)` — every request ships the entire ring
+    instead. At the shipped `ring_capacity` of 8,192 that is a multi-megabyte JSON body answering a
+    request for five candles, on a route the page calls on every timeframe switch. Nothing errors:
+    the chart draws, slowly.
+
+    The unit is asserted in the same place because it is the other half of "the chart can draw
+    this": Lightweight Charts reads unix SECONDS, and a payload in milliseconds is not rejected,
+    it is simply drawn 55,000 years in the future — an empty chart under a green health badge.
+    """
+    ring = warm_engine.state.rings[TF]
+    body = client.get(f"/api/history?tf={TF}&limit=5").json()
+    assert len(body["bars"]) == 5, (
+        f"a request for 5 candles came back with {len(body['bars'])} of the ring's {len(ring)}"
+    )
+
+    whole = client.get(f"/api/history?tf={TF}&limit=1500").json()["bars"]
+    assert len(whole) == len(ring), (
+        "a limit above the ring's own length must not invent bars: it is a ceiling, not a demand"
+    )
+
+    assert body["bars"] == whole[-5:], "the window asked for is the most recent one, not the first"
+    assert body["bars"][-1]["time"] * 1000 == ring.last_closed_ts_ms, (
+        f"the last candle is dated {body['bars'][-1]['time']} for a bar the engine closed at "
+        f"{ring.last_closed_ts_ms} ms. Lightweight Charts reads unix seconds"
+    )
+
+
+def test_the_socket_and_the_chart_date_a_bar_the_same_way(client):
+    """The websocket path builds its bars through `bar_json`, which no test drove at all.
+
+    `/api/history` writes its own `int(t) // 1000` inline, so the two encoders can drift apart:
+    the page then loads a chart that is correct and starts receiving live bars 55,000 years away,
+    freezing the candles at the warm-up state while the badge stays green and the socket stays up.
+    Read back through the stdlib rather than recomputed, so this cannot agree with the expression
+    it is checking.
+    """
+    from datetime import UTC, datetime
+
+    b = make_bars(1, tf=TF_1M, seed=1)[0]
+    t = srv.bar_json(b)["time"]
+    assert datetime.fromtimestamp(t, UTC) == datetime.fromtimestamp(b.open_time_ms / 1000, UTC), (
+        f"bar_json dated a bar opening at {b.open_time_ms} ms as {t}, which reads as "
+        f"{datetime.fromtimestamp(t, UTC) if t < 3e10 else 'a date far outside any chart'}"
+    )
+
+    bars = client.get(f"/api/history?tf={TF}&limit=3").json()["bars"]
+    assert all(datetime.fromtimestamp(x["time"], UTC).year == 2020 for x in bars), (
+        "the two encoders have to agree: the fixture's bars are from 2020 on both paths"
+    )
+
+
+def test_the_chart_is_given_the_legs_for_the_window_it_is_drawing(client, warm_engine):
+    """The zigzag is clipped to the same window as the candles, and clipped on the RIGHT key.
+
+    `since_ms` is the first bar being drawn, so it is a vertex time. Slicing on any other instant
+    of the pivot — its confirmation, or the far end of the window — silently changes how much
+    structure reaches the page. Taken from the wrong end, the legs collapse to the anchor and the
+    chart renders as plain candles with no zigzag at all: the one thing the private chart exists
+    to show, gone, with a 200 and no console error.
+    """
+    whole = client.get(f"/api/history?tf={TF}&limit=1500").json()
+    assert len(whole["bars"]) == len(warm_engine.state.rings[TF]), (
+        "precondition: this request has to cover the WHOLE ring, or 'every pivot is drawn' is not "
+        "the right claim to make about it"
+    )
+    legs = whole["waves"]["legs"]
+    drawn = [x for x in legs if not x["tentative"]]
+    assert whole["waves"]["n_confirmed"] > 10, "the fixture must have structure to draw"
+    assert len(drawn) == whole["waves"]["n_confirmed"], (
+        f"{len(drawn)} of the {whole['waves']['n_confirmed']} confirmed pivots reached a chart "
+        "whose window is the entire ring: structure is being dropped from the picture"
+    )
+
+    narrow = client.get(f"/api/history?tf={TF}&limit=5").json()
+    first_bar_ms = narrow["bars"][0]["time"] * 1000
+    assert len(narrow["waves"]["legs"]) < len(legs), (
+        "a five-candle window must not carry every leg of the ring: that is what stretches the "
+        "time axis until the candles are unreadable"
+    )
+    assert narrow["waves"]["legs"][0]["ts"] <= first_bar_ms, (
+        "the first leg has to start at or before the first candle drawn, or the zigzag begins in "
+        "mid-air"
+    )
+
+
 # ------------------------------------------------------ the Decision invariants, via the route
 
 
@@ -413,6 +537,33 @@ def test_public_mode_still_serves_the_product_and_says_it_is_public(public_app):
     assert c.get("/").status_code == 200, "in public mode Assay is the front page"
 
 
+def test_the_public_front_page_is_assay_and_not_the_private_chart(public_app):
+    """The flag's FOURTH surface, and the only one a visitor reaches without knowing a path.
+
+    `/api/decide`, `/api/history` and `/ws` are the three that are gated by a 404; `/` is gated by
+    which file it answers with, and a 200 is what both answers look like. Swapping them serves the
+    owner's chart shell on the public front page AND takes Assay — the product — off it. The page
+    is not even visibly broken: `scripts/caddy_assay.conf` does not publish `/app.js`, so the
+    script 404s and the visitor gets a blank dark page with nothing in the console.
+
+    Asserted on which script the page pulls in, because that is the one line that differs between
+    the two files and it is the line that decides what the browser then runs.
+    """
+    body = TestClient(public_app.app).get("/").text
+    assert "./assay.js" in body, "the public front page must serve Assay"
+    assert "./app.js" not in body, (
+        "the public front page is serving the owner's private chart: its script is not published "
+        "by the reverse proxy, so the visitor gets a blank page instead of the product"
+    )
+
+
+def test_the_private_front_page_is_still_the_chart(client):
+    """The mirror. A gate that served Assay on both hosts would pass the test above and quietly
+    take the chart away from the one person it is for."""
+    body = client.get("/").text
+    assert "./app.js" in body and "./assay.js" not in body
+
+
 def test_the_private_host_still_serves_all_three(client):
     """The other half of the gate, and the half a flipped condition breaks.
 
@@ -445,3 +596,79 @@ def test_the_flag_reads_both_vocabularies(value):
 @pytest.mark.parametrize("value", [None, "", "0", "false", "no", "off"])
 def test_anything_else_leaves_the_private_host_private(value):
     assert _isolated(WAVELAB_PUBLIC=value).PUBLIC is False
+
+
+class TestTheValidationRoutesSeeTheBarsTheRingHolds:
+    """The two routes that turn a ring into a `Series` each do it with five positional arrays of
+    the same dtype, and nothing has ever checked the order.
+
+    `Series(tf, w.ts, w.open, w.high, w.low, w.close, w.volume)` and
+    `build_series(w.open, w.high, w.low, w.close, w.volume)` are the canonical argument-swap site:
+    transpose `high` and `low` and every hypothesis and every user-written rule that mentions a
+    wick is evaluated against inverted candles. The battery still runs, all five tests still
+    conclude, and the verdict published is a verdict on a strategy nobody wrote. There is no
+    exception and no warning: `Bar.__post_init__` validates the UTC grid and nothing asserts
+    `high >= low` anywhere between the feed and here.
+
+    Both tests below are answered against the ring itself rather than against a recorded number,
+    so neither can agree with the expression it is checking.
+    """
+
+    @pytest.fixture
+    def ready_client(self, client):
+        """The validation routes refuse with 503 until warm-up has finished; the engine handed to
+        them here is already warm."""
+        before = srv.APP.ready
+        srv.APP.ready = True
+        yield client
+        srv.APP.ready = before
+
+    def test_the_rule_editor_is_given_candles_the_right_way_up(self, ready_client):
+        """`high > low` is true of every well-formed candle and of no inverted one, so the route's
+        own "not enough bars" refusal is what fires under the swap — a rule the user can see is
+        universally true comes back as holding on zero bars out of four hundred."""
+        r = ready_client.post("/api/validate_rule", json={"tf": TF, "long": "high > low"})
+        assert r.status_code == 200, (
+            f"a rule that is true of every candle was refused: {r.status_code} {r.text}. "
+            "`high > low` holds on nothing only if the two are being fed in swapped"
+        )
+        n = int(re.search(r"(\d+) long bars", r.json()["report"][0]).group(1))
+        ring = srv.APP.engine.state.rings[TF]
+        assert n == len(ring), (
+            f"`high > low` held on {n} of the ring's {len(ring)} candles: it holds on all of them "
+            "unless the wicks arrived transposed"
+        )
+
+        inverted = ready_client.post("/api/validate_rule",
+                                     json={"tf": TF, "long": "close > high"})
+        assert inverted.status_code == 400 and "0 bars" in inverted.json()["error"], (
+            f"`close > high` is true of no candle and came back {inverted.status_code}: "
+            f"{inverted.text}"
+        )
+
+    def test_the_catalogue_route_evaluates_the_hypothesis_on_the_ring_it_was_given(
+            self, ready_client):
+        """The oracle is the hypothesis itself, run over a `Series` this test builds from the same
+        ring in the documented order. A route that assembles those five arrays differently — or
+        over a different slice of the ring — disagrees with it."""
+        from wavelab.hypotheses import load_all
+        from wavelab.hypotheses.base import Series
+
+        name = "candles.outsized_wick"
+        h = load_all()[name]
+        ring = srv.APP.engine.state.rings[TF]
+        w = ring.window(len(ring))
+        expected = int((h.signals(
+            Series(TF, w.ts, w.open, w.high, w.low, w.close, w.volume)) != 0).sum())
+        assert expected > 0, (
+            f"{name} fires on none of these {len(ring)} candles, so this test would pass against "
+            "any argument order at all"
+        )
+
+        r = ready_client.get(f"/api/validate?hyp={name}&tf={TF}")
+        assert r.status_code == 200, r.text
+        assert r.json()["n_signals"] == expected, (
+            f"the route evaluated {name} on {r.json()['n_signals']} candles where the same "
+            f"hypothesis over the same ring fires on {expected}: the series the route builds is "
+            "not the one the ring holds"
+        )

@@ -8,6 +8,8 @@ with what it says afterwards.
 
 from __future__ import annotations
 
+from itertools import pairwise
+
 import numpy as np
 import pytest
 from hypothesis import HealthCheck, given, settings
@@ -147,6 +149,79 @@ class TestFrozenThreshold:
             expected = (p.price - p.thr_at_extreme if p.kind is PivotKind.HIGH
                         else p.price + p.thr_at_extreme)
             assert p.confirm_price == pytest.approx(expected)
+
+    def test_the_latched_threshold_is_the_one_computed_on_the_bar_of_the_extreme(self):
+        """★ "FROZEN at the extreme bar" is two claims and only the second one was ever checked.
+
+        `test_a_volatility_explosion_unconfirms_nothing` pins "never recomputed afterwards". This
+        pins "latched THERE": a new extreme moves the pivot and re-latches its threshold in the
+        same call, and dropping the second half — inlining the tuple assignment and forgetting the
+        re-latch — leaves the threshold frozen at the PREVIOUS extreme's bar, which in a trend is
+        hundreds of bars and any amount of volatility back.
+
+        Nothing in the suite could see that, because the gate and the published grey line read the
+        same stale field: they agree with each other and the count confirms exactly where the chart
+        promised it would. Only the bars disagree. Here the warm-up is flat at 100 so the frozen
+        value would be the 0.5% floor, 0.5, latched fifteen bars ago at a price of 100 — while the
+        bar that actually set the extreme has an ATR of 7.14 and a threshold of 10.71. The grey
+        line the user is sold moves from 189.29 to 199.50: the count would confirm on a 0.25%
+        pullback in a market whose average range is 7%, which is noise, not structure.
+        """
+        z = ZigZag()
+        for i in range(15):                       # flat: true range 0, so the ATR seeds at 0
+            z.update(_T0 + i * TF_4H.ms, 100.0, 100.0, 100.0)
+        seeded = z.store.provisional_as_of(10**15)
+        assert seeded is not None and seeded.thr_at_extreme == 0.5, (
+            "sanity: on the flat warm-up the 0.5% floor binds, so the stale value this test has to "
+            f"distinguish from is 0.5 and not {seeded and seeded.thr_at_extreme}"
+        )
+
+        z.update(_T0 + 15 * TF_4H.ms, 200.0, 199.0, 200.0)   # true range 100 -> ATR 100/14
+        prov = z.store.provisional_as_of(10**15)
+        assert prov is not None and prov.price == 200.0, "sanity: the new high is the new extreme"
+        assert prov.thr_at_extreme == pytest.approx(1.5 * 100.0 / 14.0), (
+            f"the extreme moved to the bar at 200.0 carrying a threshold of {prov.thr_at_extreme}: "
+            "the threshold was not re-latched with it, so it is frozen at some earlier bar's "
+            "volatility and the count will confirm on a move that bar never justified"
+        )
+        assert z.confirm_price() == pytest.approx(200.0 - 1.5 * 100.0 / 14.0), (
+            "the grey line on the chart is the extreme minus the LATCHED threshold, so a stale "
+            "threshold is published to the user as the price at which the count stops being a maybe"
+        )
+
+    def test_every_pivot_carries_the_threshold_of_its_own_bar(self):
+        """The general statement of the test above, over a whole series and both directions.
+
+        A fault seeded on the HIGH branch only would leave the count biased in one direction — lows
+        confirming on a threshold from the right bar and highs on a stale one — and no reading of
+        the chart would attribute it to this line. The oracle is an independent `WilderATR` replayed
+        over the same bars, so this compares the latched value against the MARKET rather than
+        against another field of the same pivot, which is what every existing threshold test does.
+        """
+        ts, h, l, c = _series(400, seed=6)
+        cfg = ZigZagConfig()
+        oracle, thr_at = WilderATR(cfg.atr_period), []
+        for i in range(ts.size):
+            oracle.update(float(h[i]), float(l[i]), float(c[i]))
+            thr_at.append(max(cfg.k_atr * (oracle.value or 0.0), cfg.min_pct * float(c[i])))
+
+        pivots = detect_batch(ts, h, l, c, cfg).store.as_of(10**15)
+        assert len(pivots) >= 20, f"only {len(pivots)} pivots: the fixture proves too little"
+        gaps = [abs(thr_at[b.idx] - thr_at[a.idx]) / thr_at[b.idx]
+                for a, b in pairwise(pivots)]
+        assert max(gaps) > 0.10, (
+            "sanity: on this fixture every bar's threshold is within 10% of every other's, so a "
+            "threshold latched at the wrong bar would be indistinguishable from the right one and "
+            "this test would prove nothing"
+        )
+
+        for p in pivots:
+            assert p.thr_at_extreme == pytest.approx(thr_at[p.idx]), (
+                f"the {p.kind.name} pivot at bar {p.idx} carries a threshold of "
+                f"{p.thr_at_extreme:.4f} while bar {p.idx} priced it at {thr_at[p.idx]:.4f}: the "
+                "value was latched at some other bar, so the grey line published for this pivot "
+                "was drawn from a volatility the market had at a different time"
+            )
 
     def test_a_volatility_explosion_unconfirms_nothing(self):
         """Without freezing the threshold, an ATR that blows up could invalidate already-confirmed
@@ -705,6 +780,36 @@ class TestWhatIsDrawnSaysWhatItKnows:
         assert {p.ts_ms for p in pivots if p.ts_ms >= since} <= {x["ts"] for x in legs}, (
             "the window dropped pivots that fall inside it"
         )
+
+    def test_the_window_reaches_back_exactly_one_leg_and_no_further(self):
+        """The other half of the anchor: ONE extra leg backwards, not two, not a lag's worth.
+
+        The test above is one-sided by construction — it checks that nothing inside the window was
+        dropped and that the first leg starts outside it, and both stay true when the window
+        reaches back FURTHER. `since_ms` is a vertex time ("draw from here"), and the pivot carries
+        a second timestamp forty characters away on the same object: slice on `confirmed_ts_ms`
+        instead and the window silently starts one whole confirmation lag early — a median of a few
+        bars, hundreds in a trend, so it is not a bounded amount of extra chart.
+
+        That is sent on the wire to every chart the server draws. The user asks for a window, gets
+        legs from before it with no way to tell which ones they asked for, and the leftmost part of
+        their screen is structure they did not request — while the test suite says the window is
+        anchored correctly.
+        """
+        ts, h, l, c = _series(400, seed=6)
+        z = detect_batch(ts, h, l, c)
+        pivots = z.store.as_of(10**15)
+        assert len(pivots) >= 6, f"only {len(pivots)} pivots: the fixture proves too little"
+
+        for k in range(1, len(pivots)):
+            since = pivots[k].ts_ms
+            legs = z.legs_as_of(10**15, since_ms=since)
+            before = [x["ts"] for x in legs if x["ts"] < since]
+            assert before == [pivots[k - 1].ts_ms], (
+                f"the window from {since} (pivot {k}) reaches back to {before}, and the only "
+                f"vertex it is allowed to reach back to is pivot {k - 1} at "
+                f"{pivots[k - 1].ts_ms}: one leg, so the first visible one has an origin"
+            )
 
 
 class TestReplayIsTheSameCodeAsLive:
