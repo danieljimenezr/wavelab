@@ -87,6 +87,7 @@ def _ema_cross_21_55(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="trend.ema_cross_21_55",
     family="trend",
+    title="Side with the faster of two averages",
     rationale="New information is not incorporated within one candle because the large participant "
               "cannot execute within one candle: a mandate of any size is sliced over days so as "
               "not to move the price against itself, so today's buyer is also tomorrow's buyer. "
@@ -126,6 +127,7 @@ def _ema_stack_21_55_200(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="trend.ema_stack_21_55_200",
     family="trend",
+    title="Only when all three horizons agree",
     rationale="Each horizon belongs to a different participant: intraday, swing and allocator. "
               "While they disagree, whoever is positioned against the move provides the liquidity "
               "that absorbs whoever is positioned with it, and price reverts. When all three "
@@ -163,6 +165,7 @@ def _ema200_filter(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="trend.ema200_filter",
     family="trend",
+    title="Long above the EMA 200, short below",
     rationale="The 200 average measures no physical property of the market: it is a public focal "
               "point that risk desks, the financial press and allocation bots quote daily. Its "
               "power, if it has any, is entirely reflexive — there are real mandates that cut "
@@ -201,6 +204,7 @@ def _macd_12_26_9(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="trend.macd_12_26_9",
     family="trend",
+    title="Trade MACD acceleration, not the level",
     rationale="The MACD against its signal line measures the ACCELERATION of the flow imbalance, "
               "not its level. Systematic momentum programmes scale size continuously as a "
               "function of the signal rather than in binary fashion: when the drift accelerates "
@@ -241,6 +245,7 @@ def _adx_dmi_14(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="trend.adx_dmi_14",
     family="trend",
+    title="Trade direction only above ADX 25",
     rationale="Separates two questions that moving averages run together: is there a trend? (ADX) "
               "and in which direction? (DMI). The proposed mechanism is that persistence only "
               "appears once the dispersion of opinion has already resolved: if most of the "
@@ -300,6 +305,7 @@ def _donchian_turtle_55_20(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="trend.donchian_turtle_55_20",
     family="trend",
+    title="Break the 55-bar high, exit at 20",
     rationale="Above a 55-bar high, short sellers' stops and breakout buy orders pile up. Their "
               "execution is a mechanical demand shock, insensitive to price, and the book is thin "
               "right there precisely because nobody has been willing to sell at that level yet; "
@@ -358,6 +364,7 @@ def _supertrend_atr14_x3(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="trend.supertrend_atr14_x3",
     family="trend",
+    title="Trail a wide stop, three ATR out",
     rationale="An invalidation threshold fixed as a percentage is incoherent across volatility "
               "regimes: the same 2% is noise in one regime and a signal in another. Supertrend "
               "puts the flip 3 ATR away from the midpoint, which is roughly where a risk desk "
@@ -397,6 +404,7 @@ def _psar_002_020(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="trend.psar_002_020",
     family="trend",
+    title="Tighten the stop with every new high",
     rationale="The SAR tightens the stop as the trend matures, accelerating with every new "
               "extreme. It reproduces an observable behaviour: the manager raises the stop after "
               "each new high to protect unrealised profit, and that staircase of stops is latent "
@@ -440,6 +448,7 @@ def _linreg_slope_55_atr14(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="trend.linreg_slope_55_atr14",
     family="trend",
+    title="Only when the drift outruns the noise",
     rationale="Drift is only exploitable relative to the noise you have to wade through to collect "
               "it; a market that grinds higher in the middle of a gale is not tradeable. The "
               "55-bar regression slope estimates the drift and the ATR14 the noise per bar, and "
@@ -483,6 +492,7 @@ def _ichimoku_kumo(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="trend.ichimoku_kumo",
     family="trend",
+    title="Above the Ichimoku cloud, flat inside it",
     rationale="The cloud is the only popular construction that declares the equilibrium zone with "
               "THICKNESS: between Senkou A and B there is no signal, and the thickness grows "
               "exactly when the recent extremes disagree with each other. It encodes the memory of "
@@ -522,6 +532,7 @@ def _aroon_25(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="trend.aroon_25",
     family="trend",
+    title="Time since the last high, not price",
     rationale="Aroon measures not price but TIME since the last extreme, and that is a different "
               "variable from everything else in this family. The thesis is that a trend is a "
               "renewal process: as long as new highs keep appearing frequently, there are buyers "
@@ -559,6 +570,7 @@ def _tsmom_365d(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="trend.tsmom_365d",
     family="trend",
+    title="Above where it traded a year ago",
     rationale="This is the trend hypothesis with the broadest cross-asset academic support "
               "(Moskowitz, Ooi and Pedersen): the sign of the last twelve months' return predicts "
               "the sign of the following period in almost every asset class and across more than a "

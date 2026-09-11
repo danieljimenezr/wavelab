@@ -224,6 +224,7 @@ def _donchian_break_20(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="structure.donchian_break_20",
     family="structure",
+    title="Flip sides on every Donchian 20 break",
     rationale="The high of the previous 20 candles is the level where the largest quantity of "
               "resting orders converges: the shorts' stops, stop entries from those waiting for "
               "confirmation, and hedges from option sellers. When price takes it out, those orders "
@@ -277,6 +278,7 @@ def _donchian_55_exit_20(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="structure.donchian_55_exit_20",
     family="structure",
+    title="Donchian 55 entry, exit flat at 20",
     rationale="This is not the same hypothesis as the 20 channel with a different number, and that "
               "is why it is registered separately: the claim here is not about the entry level but "
               "about the ASYMMETRY between entering and exiting. Entry happens only on the "
@@ -315,6 +317,7 @@ def _bos_swing(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="structure.bos_swing",
     family="structure",
+    title="Break of the last confirmed swing",
     rationale="The structural version of the breakout: instead of a fixed-length channel, the "
               "level is the last swing high or low CONFIRMED by a 5-candle fractal. The mechanical "
               "difference matters: a 20 channel moves through the mere passage of time even if "
@@ -356,6 +359,7 @@ def _choch(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="structure.choch",
     family="structure",
+    title="First break against the structure in force",
     rationale="The change of character is the first time the sequence breaks: we had been making "
               "higher highs and higher lows and suddenly the last low is lost. The mechanism is "
               "not the break itself but WHO is on the other side: in a rising sequence, each low "
@@ -392,6 +396,7 @@ def _swing_trend_state(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="structure.swing_trend_state",
     family="structure",
+    title="Long on higher highs, flat when mixed",
     rationale="The family's minimal hypothesis, and deliberately the dullest: no event and no "
               "breakout, just the classic Dow classification. Long while the last two confirmed "
               "pivots are a higher high AND a higher low, short in the mirror case, and flat when "
@@ -430,6 +435,7 @@ def _sweep_reversal_20(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="structure.sweep_reversal_20",
     family="structure",
+    title="Fade the break that closes back inside",
     rationale="The opposite face of `donchian_break_20`, on the SAME level and on purpose. If "
               "liquidity is piled up just behind the 20-candle extreme, there is a participant "
               "with a direct incentive to go and get it: whoever needs to execute size and can "
@@ -502,6 +508,7 @@ def _retest_hold(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="structure.retest_hold",
     family="structure",
+    title="Trade the break only after its retest",
     rationale="The broken level changes role, and there is a concrete flow reason for it: those "
               "who sold at resistance and got trapped try to get out at their entry point when "
               "price comes back, and those who missed the break have their reference there to buy "
@@ -544,6 +551,7 @@ def _compression_break(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="structure.compression_break",
     family="structure",
+    title="Break with the channel at its narrowest",
     rationale="A break only matters if there was contained disagreement beforehand. When the width "
               "of the 20 channel falls to its lowest of the last 60 candles, buyers and sellers "
               "have reached a narrow equilibrium and both camps have been stacking stops very "
@@ -583,6 +591,7 @@ def _volume_confirmed_break(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="structure.volume_confirmed_break",
     family="structure",
+    title="Only the break that volume confirms",
     rationale="If the breakout mechanism is the cascading execution of accumulated orders, then it "
               "has a compulsory fingerprint: volume. A break on volume below its 20-period average "
               "means there was nobody waiting at that level, that price got there by drift and not "
@@ -619,6 +628,7 @@ def _atr_buffered_break(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="structure.atr_buffered_break",
     family="structure",
+    title="Break half an ATR past the level",
     rationale="A direct complement to `sweep_reversal_20` and an explicit test of hypothesis 1. If "
               "it is true that the stops pile up just behind the level and that somebody goes "
               "looking for them, then the MARGINAL break —the one that pokes a few ticks above— is "
@@ -688,6 +698,7 @@ def _range_fade_swing(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="structure.range_fade_swing",
     family="structure",
+    title="Fade the swing extremes in mixed structure",
     rationale="Deliberately contradicts `bos_swing` on the same level, and only activates where "
               "that one should be weakest: when the sequence of pivots is mixed and there is no "
               "directional structure. The reasoning is about inventory. With no trend to absorb, "
@@ -743,6 +754,7 @@ def _swing_fade_unfiltered(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="structure.swing_fade_unfiltered",
     family="structure",
+    title="Fade the swing extremes in any structure",
     rationale="Unconditional control for `range_fade_swing`: fading the touch of the last "
               "confirmed pivot in ALL structural states, not only when the sequence is mixed. It "
               "claims no mechanism of its own —on the contrary, the inventory mechanism that "

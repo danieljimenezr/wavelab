@@ -124,6 +124,7 @@ def _tsmom_12_1(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="momentum.tsmom_12_1",
     family="momentum",
+    title="The year's trend, skipping the last month",
     rationale="Systematic trend funds and momentum-indexed products rebuild their portfolios over a "
               "12-month window; their rebalancing orders are large, slow and directional, and they "
               "push the price in the direction of the past return. The last month is excluded "
@@ -169,6 +170,7 @@ def _tsmom_consensus(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="momentum.tsmom_consensus",
     family="momentum",
+    title="One, three and six months all agree",
     rationale="Information diffuses at different speeds: retail reacts in days, treasuries and ETFs "
               "in months. Requiring the 1-, 3- and 6-month horizons to agree in sign selects the "
               "stretches in which the three cohorts push at once, which is when the order-book "
@@ -203,6 +205,7 @@ def _roc_short(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="momentum.roc10",
     family="momentum",
+    title="Follow the last ten candles' direction",
     rationale="Pure underreaction. When relevant information appears (a macro print, a move by a "
               "large holder, a regulatory headline) not every participant processes it at the same "
               "time: the adjustment is spread across several candles because the big desks slice "
@@ -240,6 +243,7 @@ def _roc_term_structure(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="momentum.roc_term_structure",
     family="momentum",
+    title="Speeding up, not just rising",
     rationale="Second-order herding effect. A trend that is ACCELERATING indicates that new "
               "participants are still coming in —rising leverage, rising perpetual funding, FOMO "
               "buying— whereas one that is decelerating indicates that the marginal buyer has run "
@@ -276,6 +280,7 @@ def _ao_sign(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="momentum.ao_sign",
     family="momentum",
+    title="AO above zero, recent buyers in profit",
     rationale="The AO subtracts the median price of the last 34 candles from that of the last 5, "
               "that is, it compares the average cost of the recent buying cohort with that of the "
               "previous one. If it is positive, those who bought recently are in profit and are in "
@@ -321,6 +326,7 @@ def _ao_confirms(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="momentum.ao_confirms_extreme",
     family="momentum",
+    title="New high confirmed by a stronger AO",
     rationale="A new price high accompanied by an AO HIGHER than at the window's previous high "
               "means that the displacement of the average cost is bigger than it was last time: the "
               "cohort doing the buying is more numerous, not the same people rotating the same "
@@ -368,6 +374,7 @@ def _ao_divergence(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="momentum.ao_divergence_extreme",
     family="momentum",
+    title="Fade the high the AO won't confirm",
     rationale="A new price high with an AO LOWER than at the previous high says that the price was "
               "made with less displacement of the average cost: the high is produced by short "
               "covering and late retail, with a smaller aggregate size, while the cohort that drove "
@@ -412,6 +419,7 @@ def _linreg_acceleration(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="momentum.linreg_acceleration",
     family="momentum",
+    title="Steepening regression slope, immune to wicks",
     rationale="The least-squares slope of twenty log prices uses all twenty observations, not just "
               "the endpoints, so a single cascading-liquidation wick —which is forced supply, not "
               "informed demand— does not dominate it. Its change over twenty candles measures "
@@ -453,6 +461,7 @@ def _sign_persistence(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="momentum.sign_persistence",
     family="momentum",
+    title="Counting green candles, ignoring their size",
     rationale="It counts how many of the last twenty candles closed up and discards magnitude "
               "entirely. The reason is that the two mechanisms leave different footprints: herding "
               "and systematic following produce a succession of small, repeated purchases —drift "
@@ -494,6 +503,7 @@ def _er_filtered(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="momentum.er_kaufman_filtered",
     family="momentum",
+    title="Momentum only when the path is straight",
     rationale="The efficiency ratio divides the net displacement by the total path travelled, so it "
               "is high when the price goes from A to B in almost a straight line. A straight path "
               "is the signature of a sustained imbalance of the book —somebody large executing in "
@@ -531,6 +541,7 @@ def _kama_cross(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="momentum.kama_cross",
     family="momentum",
+    title="Above a KAMA that flattens in chop",
     rationale="The KAMA uses the same efficiency ratio to interpolate between a 2-period average "
               "and a 30-period one: it sticks to the price when the path is efficient and flattens "
               "out when it is noisy. The participant this is meant to avoid being is a specific "
@@ -573,6 +584,7 @@ def _momentum_with_volume(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="momentum.momentum_with_volume",
     family="momentum",
+    title="Twenty-bar momentum backed by rising volume",
     rationale="The herd leaves its footprint in the volume: a leg with growing participation "
               "implies new money coming in, whereas one with falling volume is the same capital "
               "rotating among those already inside, and that one runs out on its own. We require "

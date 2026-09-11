@@ -35,6 +35,14 @@ const EN = {
 
   // ---- chart page
   'idx.analysing': 'analysing…',
+  'family.candles': 'Candle shapes',
+  'family.flow': 'Volume and flow',
+  'family.mean_reversion': 'Mean reversion',
+  'family.momentum': 'Momentum',
+  'family.seasonality': 'Calendar and seasonality',
+  'family.structure': 'Market structure',
+  'family.trend': 'Trend following',
+  'family.volatility': 'Volatility',
   'idx.public_server': "You are looking at the public server, and this chart is not on it.\n\n"
     + 'The chart is the owner\'s private view: /api/history, /api/decide and /ws answer 404 here '
     + 'on purpose. That is the guarantee working, not a fault.\n\n'
@@ -186,6 +194,14 @@ const ES = {
   'nav.assay': 'Assay',
 
   'idx.analysing': 'analizando…',
+  'family.candles': 'Formas de vela',
+  'family.flow': 'Volumen y flujo',
+  'family.mean_reversion': 'Reversión a la media',
+  'family.momentum': 'Momento',
+  'family.seasonality': 'Calendario y estacionalidad',
+  'family.structure': 'Estructura de mercado',
+  'family.trend': 'Seguimiento de tendencia',
+  'family.volatility': 'Volatilidad',
   'idx.public_server': 'Estás viendo el servidor público, y este gráfico no está ahí.\n\n'
     + 'El gráfico es la vista privada del propietario: /api/history, /api/decide y /ws responden '
     + '404 aquí a propósito. Es la garantía funcionando, no un fallo.\n\n'
@@ -338,6 +354,14 @@ const CA = {
   'nav.assay': 'Assay',
 
   'idx.analysing': 'analitzant…',
+  'family.candles': 'Formes d\'espelma',
+  'family.flow': 'Volum i flux',
+  'family.mean_reversion': 'Reversió a la mitjana',
+  'family.momentum': 'Moment',
+  'family.seasonality': 'Calendari i estacionalitat',
+  'family.structure': 'Estructura de mercat',
+  'family.trend': 'Seguiment de tendència',
+  'family.volatility': 'Volatilitat',
   'idx.public_server': 'Estàs veient el servidor públic, i aquest gràfic no hi és.\n\n'
     + 'El gràfic és la vista privada del propietari: /api/history, /api/decide i /ws responen 404 '
     + 'aquí expressament. És la garantia funcionant, no pas una errada.\n\n'

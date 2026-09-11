@@ -1,4 +1,4 @@
-.PHONY: help sync test bench lint run hydrate clean provision contain-test
+.PHONY: help sync test test-net bench lint run hydrate clean provision contain-test
 UV := uv
 
 help:
@@ -7,8 +7,11 @@ help:
 sync:          ## Install the environment (CPython 3.13 via uv)
 	$(UV) sync --group dev
 
-test:          ## Full suite. The M0 gate lives here.
+test:          ## Full suite, exactly what CI gates on. The M0 gate lives here.
 	$(UV) run pytest
+
+test-net:      ## The handful that really call Binance. Fails when someone else's API is down.
+	$(UV) run pytest -m net
 
 bench:         ## Actually measures the timings and records them in docs/BENCHMARKS.md
 	$(UV) run pytest tests/bench --benchmark-only -q || true

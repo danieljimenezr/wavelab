@@ -139,6 +139,7 @@ def _obv_ema21(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="flow.obv_ema21",
     family="flow",
+    title="Long while OBV holds above its average",
     rationale="OBV adds up each candle's entire volume with the sign of its close, so its slope "
               "measures whether the recent contracts have moved more on up candles or on down "
               "ones. The concrete mechanism: whoever buys into the rise ends up with inventory that "
@@ -183,6 +184,7 @@ def _obv_divergence(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="flow.obv_divergence20",
     family="flow",
+    title="Fade the extreme OBV does not confirm",
     rationale="A price high NOT accompanied by an OBV high means the last leg was signed by fewer "
               "contracts than the one before: price rises because supply has withdrawn, not because "
               "new demand has come in. A book that rises through the absence of sellers is thin, "
@@ -225,6 +227,7 @@ def _obv_leads(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="flow.obv_leads20",
     family="flow",
+    title="Follow the extreme OBV reaches first",
     rationale="It is the opposite cell of the same 2x2 table as `obv_divergence20`, and it is "
               "registered separately because it asserts a different mechanism and trades in the "
               "opposite direction: here the cumulative volume marks a new high while price has not "
@@ -266,6 +269,7 @@ def _mfi14(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="flow.mfi14_extremes",
     family="flow",
+    title="Fade MFI at 20 and 80",
     rationale="The MFI is an RSI in which each candle is weighted by its volume in money terms, so "
               "it only reaches 80 when the rise has been made on growing volume. That state is one "
               "in which almost everybody who wanted to buy has already bought, and has done so with "
@@ -305,6 +309,7 @@ def _vwap_side(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="flow.vwap_session_side",
     family="flow",
+    title="Long above the session VWAP, short below",
     rationale="The session VWAP is not just one more indicator: it is the price against which "
               "institutional execution is measured and settled, so there are real orders "
               "conditioned on it. An execution algorithm with a buy order slows down if the price "
@@ -346,6 +351,7 @@ def _vwap_band(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="flow.vwap_band2sigma",
     family="flow",
+    title="Fade price two sigma from the VWAP",
     rationale="It uses the same indicator as `vwap_session_side` but asserts the OPPOSITE mechanism, "
               "and that is why it is a separate hypothesis and not a variant: here what matters is "
               "not which side the price is on but how far away it has moved, measured in standard "
@@ -396,6 +402,7 @@ def _volume_thrust(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="flow.volume_thrust",
     family="flow",
+    title="Follow double volume on an expanding range",
     rationale="A candle with twice the average volume, a range greater than the ATR and a close in "
               "the top quarter of that range only happens when somebody crosses the spread over and "
               "over and takes out several levels of the book. Whoever does that is paying for "
@@ -444,6 +451,7 @@ def _volume_climax(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="flow.volume_climax",
     family="flow",
+    title="Fade a three-sigma volume spike at extremes",
     rationale="Volume more than three sigma from its 100-period moving average, happening right at "
               "a 20-candle extreme, is not participation: it is transfer. In crypto that spike is "
               "almost always a liquidation cascade, in which the exchange's engine sends market "
@@ -486,6 +494,7 @@ def _chaikin(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="flow.chaikin_osc_3_10",
     family="flow",
+    title="Side with accelerating Chaikin accumulation",
     rationale="The Accumulation/Distribution line is the cumulative volume delta that can be "
               "approximated without aggressor data: it splits each candle's volume between buying "
               "and selling according to where it closes inside the range, which is exactly what "
@@ -530,6 +539,7 @@ def _trend_with_participation(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="flow.trend_with_participation",
     family="flow",
+    title="Ride the trend only while volume expands",
     rationale="It asserts that volume does not give direction but does give permission. A sustained "
               "trend needs a continuous flow of new participants buying higher than the previous "
               "one did; if the 20-period average volume falls below the 100-period one, those still "
@@ -574,6 +584,7 @@ def _move_without_volume(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="flow.move_without_volume",
     family="flow",
+    title="Fade a move made on thinning volume",
     rationale="The exact reverse of `trend_with_participation`, and that is why it is "
               "registered: a five-candle move made on volume below its own 20-period average has "
               "transferred no inventory, it has only walked the price through an empty book. Nobody "
@@ -622,6 +633,7 @@ def _absorption(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="flow.absorption_narrow_range",
     family="flow",
+    title="Double volume that fails to move price",
     rationale="It is the complementary, disjoint cell to `volume_thrust` in Wyckoff's "
               "effort/result table: the same double volume, but a range SMALLER than the ATR. Twice "
               "the usual number of contracts changing hands while the price does not move has only "
@@ -671,6 +683,7 @@ def _nvi_fosback(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="flow.nvi_fosback",
     family="flow",
+    title="Long only while the low-volume days rise",
     rationale="The NVI accumulates the return ONLY of the candles whose volume falls relative to "
               "the previous one, isolating what price does when the public is not trading. "
               "Fosback's premise is that the retail crowd turns up with the volume and informed "
@@ -736,6 +749,7 @@ def _roc20_unfiltered(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="flow.roc20_unfiltered",
     family="flow",
+    title="Plain 20-bar momentum, no volume filter",
     rationale="Unconditional control for `trend_with_participation` and for "
               "`momentum.momentum_with_volume`: the sign of the 20-candle return, with no condition "
               "on volume whatsoever. It asserts no flow mechanism —it cannot, because it does not "

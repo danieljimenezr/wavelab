@@ -6,6 +6,7 @@ afterwards you always find something, and you have no way of telling signal from
 draws.
 
 Every hypothesis declares:
+  - `title`:     WHAT it claims, in one human line. English, like the rest of the record.
   - `rationale`: WHY it should work. Written before seeing a single number.
   - `prior`:     what effect is expected, and in which direction.
   - `params`:    FIXED. Not searched over. Changing one is a NEW hypothesis and another trial.
@@ -44,6 +45,13 @@ class Hypothesis:
 
     name: str
     family: str
+    # `name` is what the picker used to show, and it is a lookup key, not a name: a reader had to
+    # decode `flow.absorption_narrow_range` to know what they were about to validate. `title` is
+    # that same claim in one human line, and it carries NO DEFAULT on purpose. A default of "" is
+    # the failure this field exists to prevent: hypothesis 101 gets registered, the picker quietly
+    # falls back to the identifier for it alone, every test still passes, and nobody finds out
+    # except the reader. Without a default the omission is a TypeError at import.
+    title: str
     rationale: str
     prior: str
     fn: object                    # (Series) -> np.ndarray of {-1, 0, +1}
@@ -71,5 +79,11 @@ def register(h: Hypothesis) -> Hypothesis:
     if not h.rationale.strip() or not h.prior.strip():
         raise ValueError(f"{h.name}: every hypothesis must declare a rationale and a prior BEFORE "
                          "it is run. Without those it is not a hypothesis, it is a search.")
+    # The dataclass makes `title` impossible to forget; this makes it impossible to leave blank,
+    # which looks identical to the reader — an empty entry in the picker they cannot click on.
+    if not h.title.strip():
+        raise ValueError(f"{h.name}: title is empty. The catalogue is the first screen of the "
+                         f"product and this hypothesis would appear in it as a blank row, or as "
+                         f"the raw key '{h.name}', which is the bug titles were added to fix.")
     REGISTRY[h.name] = h
     return h

@@ -54,7 +54,15 @@ def _prev(a: np.ndarray) -> np.ndarray:
     The shift runs from the past towards the present, never the other way round. `np.roll(a, 1)` is
     banned here: it puts a[-1] —the last data point of the whole series— at position 0, which is
     exactly the information leak this project is hunting.
+
+    The empty case is written out rather than left to NumPy: `out[0] = np.nan` on a zero-length
+    array is an IndexError, and it took down `sweep_rejection_20` and `streak3_fade` — the only two
+    hypotheses in the file that reach `_prev` without a length guard in front of it — on a series
+    with no candles. `evaluate_all` swallows that in a bare `except` and moves on, so it showed up
+    as two hypotheses quietly missing from the report rather than as an error.
     """
+    if a.size == 0:
+        return a.astype(np.float64, copy=True)
     out = np.empty_like(a)
     out[0] = np.nan
     out[1:] = a[:-1]
@@ -98,6 +106,7 @@ def _bb_fade(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="mean_reversion.bb20_2_fade",
     family="mean_reversion",
+    title="Fade every close outside the Bollinger band",
     rationale="Closing outside the 2-sigma band over 20 candles means the price has moved further "
               "than the asset's own recent dispersion considers normal. The behaviour that would "
               "produce the effect is that of the market maker and the range trader: they see a "
@@ -154,6 +163,7 @@ def _bb_reentry(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="mean_reversion.bb20_2_reentry",
     family="mean_reversion",
+    title="Wait for the return inside the band",
     rationale="The same band as hypothesis 1 and the same 20/2, but the decision rule is the "
               "opposite one in time: you do not buy the fall, you buy the end of the fall. "
               "Requiring the previous candle to have closed outside and this one inside is asking "
@@ -196,6 +206,7 @@ def _bb_range_adx(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="mean_reversion.bb20_2_range_adx14",
     family="mean_reversion",
+    title="Fade the Bollinger band, ADX under 20",
     rationale="Hypothesis 1 with a single gate: trade only when the ADX14 is below 20, Wilder's "
               "threshold for 'no trend'. The claim being tested is structural, not cosmetic: the "
               "reversion premium exists because somebody absorbs impatient flow, and absorbing is "
@@ -236,6 +247,7 @@ def _keltner_fade(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="mean_reversion.keltner20_atr14_fade",
     family="mean_reversion",
+    title="Fade the Keltner channel, width in ATR",
     rationale="The Keltner channel in its modern form: EMA20 as the anchor and 2xATR14 as the "
               "width. Against Bollinger, what changes is WHAT counts as a normal move. Bollinger "
               "measures the dispersion of the closes; the ATR measures the true range, wicks and "
@@ -275,6 +287,7 @@ def _rsi_fixed(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="mean_reversion.rsi14_fixed_3070",
     family="mean_reversion",
+    title="Buy RSI below 30, sell above 70",
     rationale="RSI 14 with Wilder's original thresholds, 30 and 70. It is registered even though "
               "hardly anybody expects it to work, and for a methodological reason: it is the "
               "control for hypothesis 6. Cardwell's claim —that the RSI 'pins' at the extreme "
@@ -322,6 +335,7 @@ def _rsi_cardwell(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="mean_reversion.rsi14_cardwell_sma200",
     family="mean_reversion",
+    title="RSI 40/80 above SMA 200, 20/60 below",
     rationale="Andrew Cardwell observed that the RSI does not oscillate in the same range under "
               "every regime: in an uptrend it moves between 40 and 80, and in a downtrend between "
               "20 and 60. The mechanism behind it is one of participant composition. In a bull "
@@ -364,6 +378,7 @@ def _willr_fade(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="mean_reversion.willr14_fade",
     family="mean_reversion",
+    title="Fade the close at the 14-candle extreme",
     rationale="%R does not measure momentum: it measures where the price closes within the "
               "high-low range of the last 14 candles. That makes it sensitive to a different "
               "behaviour from the one the RSI picks up. Closing at the absolute floor of a two-week "
@@ -402,6 +417,7 @@ def _cci_fade(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="mean_reversion.cci20_fade",
     family="mean_reversion",
+    title="Fade the CCI extreme, robust to spikes",
     rationale="The CCI uses the typical price (H+L+C)/3 and normalises it by the mean ABSOLUTE "
               "deviation, not by the standard deviation. The difference is not cosmetic in BTC: the "
               "standard deviation squares, so a single liquidation candle inflates the denominator "
@@ -442,6 +458,7 @@ def _stretch_ema200(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="mean_reversion.stretch_ema200_atr14",
     family="mean_reversion",
+    title="Fade a 3-ATR stretch from the EMA 200",
     rationale="The eight previous hypotheses measure dislocations against an anchor of 14-20 "
               "candles, the range trader's horizon. This one changes scale: it measures the "
               "distance to the EMA200 in units of ATR14, with the multiplier 3 from the convention "
@@ -484,6 +501,7 @@ def _bb_volume_climax(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="mean_reversion.bb20_2_volume_climax",
     family="mean_reversion",
+    title="Fade the Bollinger band on double volume",
     rationale="The same Bollinger extreme as hypothesis 1, with one added condition: the candle's "
               "volume must double its 20-period average, the conventional threshold for climactic "
               "volume. Volume is what separates the two reasons the price can leave the band. If it "
@@ -538,6 +556,7 @@ def _sweep_rejection(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="mean_reversion.sweep_rejection_20",
     family="mean_reversion",
+    title="Fade the sweep with a rejection wick",
     rationale="The candle pierces the low of the previous 20 but closes in the upper third of its "
               "own range. That shape is the observable footprint of a specific sequence: beneath a "
               "visible low, buyers' stops and breakout sell orders accumulate; a participant who "
@@ -578,6 +597,7 @@ def _streak3(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="mean_reversion.streak3_fade",
     family="mean_reversion",
+    title="Fade three consecutive closes, no indicator",
     rationale="Three consecutive closes to the downside are bought; three to the upside are sold. "
               "There is no indicator, no normalisation by volatility and no threshold to tune, and "
               "that bareness is the point: it is the cleanest test of overreaction by "

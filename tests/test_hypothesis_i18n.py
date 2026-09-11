@@ -1,9 +1,9 @@
 """The es/ca prose of the hypotheses must not drift away from the Python.
 
-`rationale` and `prior` are the pre-registration: the text a reader weighs BEFORE deciding whether
-to believe a verdict. The record itself is English and lives in the .py files; the Spanish and
-Catalan versions are data in `web/hyp.{es,ca}.json`, fetched by the browser only when the reader is
-not reading in English.
+`title`, `rationale` and `prior` are the pre-registration: the text a reader weighs BEFORE deciding
+whether to believe a verdict — and, in the case of `title`, before deciding what to run at all. The
+record itself is English and lives in the .py files; the Spanish and Catalan versions are data in
+`web/hyp.{es,ca}.json`, fetched by the browser only when the reader is not reading in English.
 
 That split has one known weakness, and it is silent: edit a rationale in Python —or register a
 hypothesis number 101— and the translated files stay as they were. Nothing breaks. The es/ca reader
@@ -72,13 +72,19 @@ def test_no_translation_without_a_hypothesis(names, catalogues, lang):
 
 
 @pytest.mark.parametrize("lang", LANGS)
-def test_both_fields_are_present_and_not_empty(names, catalogues, lang):
+def test_every_field_is_present_and_not_empty(names, catalogues, lang):
     """An entry with only `rationale` fails no fetch and shows an empty `prior`: the falsification
-    condition —the part that makes this a pre-registration and not an advertisement— vanishes."""
+    condition —the part that makes this a pre-registration and not an advertisement— vanishes.
+
+    `title` is here for a quieter version of the same thing. It is the only one of the three that
+    is read BEFORE anything is chosen, and a missing one does not blank the picker: `hypLabel` in
+    web/assay.js falls back to the English title, so that one hypothesis sits in a Spanish list in
+    English and nothing anywhere says so. Which is the bug titles were added to fix, restored for
+    one row at a time."""
     broken = []
     for name in sorted(names & set(catalogues[lang])):
         entry = catalogues[lang][name]
-        for field in ("rationale", "prior"):
+        for field in ("title", "rationale", "prior"):
             value = entry.get(field)
             if not isinstance(value, str) or not value.strip():
                 broken.append(f"{name}.{field}")
@@ -96,7 +102,7 @@ def test_the_translation_is_not_the_english_text(names, catalogues, lang):
     for name in sorted(names & set(catalogues[lang])):
         entry = catalogues[lang][name]
         h = reg[name]
-        for field in ("rationale", "prior"):
+        for field in ("title", "rationale", "prior"):
             if entry.get(field, "").strip() == getattr(h, field).strip():
                 copied.append(f"{name}.{field}")
     assert not copied, (
@@ -107,7 +113,14 @@ def test_the_translation_is_not_the_english_text(names, catalogues, lang):
 
 def fingerprint(h) -> str:
     """The English a translation was made from, as 16 hex chars. Rationale and prior are hashed
-    together and separated by a NUL: reword either one and the fingerprint moves."""
+    together and separated by a NUL: reword either one and the fingerprint moves.
+
+    `title` is deliberately NOT in the hash, and that is a known hole: reword a title in Python and
+    the es/ca one goes stale with nothing to say so. Covering it would move all 200 stamps at once,
+    and a re-stamp of 200 entries nobody retranslated is exactly the silencing this alarm exists to
+    prevent — the staleness it would hide is a whole rationale, against one line of a title. If a
+    title fingerprint is ever wanted, it belongs in a SECOND field, stamped on its own.
+    """
     return hashlib.sha256(f"{h.rationale}\0{h.prior}".encode()).hexdigest()[:16]
 
 
@@ -219,4 +232,151 @@ def test_the_rule_language_help_is_translated(lang):
         f"{len(missing)} rule-language descriptions have no entry in SERVER_{lang.upper()} in "
         f"web/i18n.js and will be read in English by every {lang} user:\n"
         + "\n".join(f"  - {d}" for d in missing)
+    )
+
+
+# ------------------------------------------------------------------- the titles, as titles
+#
+# The two checks above ask whether a title EXISTS and whether it DIFFERS from the English. Neither
+# asks whether it says anything. `title` was added because the picker used to show
+# `flow.absorption_narrow_range` and a reader had to decode it; a title that is the same identifier
+# with the underscores taken out restores that bug while passing every check in this file, in
+# `register()` and in the browser. Measured when this was written: one of the hundred was exactly
+# that (`seasonality.turn_of_month_long` → "Long the turn of the month").
+
+#: Words that carry no information about the claim, so a title made of these plus the identifier's
+#: own words is the identifier read aloud. Deliberately short: the test's job is to catch a title
+#: that adds NOTHING, not to grade prose.
+_FILLER = frozenset((
+    "a", "an", "the", "and", "or", "of", "in", "on", "at", "to", "for", "with", "by", "from",
+    "into", "than", "that", "this", "its", "it", "is", "are", "be",
+    "no", "not", "every", "all", "only", "when", "while", "after", "before",
+    "over", "under", "out", "up", "down",
+))
+
+
+def _words(text: str) -> list[str]:
+    return [w for w in re.split(r"[^0-9a-z]+", text.lower()) if w]
+
+
+@pytest.mark.parametrize("lang", ("en", *LANGS))
+def test_a_title_is_not_the_identifier_read_aloud(names, catalogues, lang):
+    """A title has to add at least one word the identifier does not already contain.
+
+    The identifier is `family.some_words_20`, so "some words 20" is already on the screen next to
+    the title — `hypLabel` in web/assay.js prints `title · name`, deliberately, because the
+    identifier is the key in trials.sqlite and in the published study and a reader needs it to
+    quote. A title built only from those same words plus filler therefore occupies the row and
+    tells the reader nothing they could not already read two centimetres to the right.
+
+    Domain words shared with the identifier are fine and unavoidable — "Hammer after an oversold
+    fall" for `candles.hammer_oversold` says WHEN, "Flip sides on every Donchian 20 break" for
+    `structure.donchian_break_20` says WHAT HAPPENS. What is refused is the case where the
+    remainder is empty.
+
+    The es/ca arm is weaker on purpose: the identifier is English, so a Catalan title shares almost
+    no words with it and the rule above would be vacuous there. What is checked instead is the
+    blunt version — a translator who pasted the key into the field.
+    """
+    reg = load_all()
+    titles = {n: reg[n].title for n in names} if lang == "en" else {
+        n: catalogues[lang][n].get("title", "") for n in sorted(names & set(catalogues[lang]))}
+    assert titles, f"no {lang} titles were collected; this test would assert nothing"
+
+    empty = []
+    for name, title in sorted(titles.items()):
+        ident = name.split(".", 1)[1]
+        if _words(title) == _words(ident) or _words(title) == _words(name):
+            empty.append(f"{name}: {title!r} is the identifier with the punctuation changed")
+        elif lang == "en":
+            own = set(_words(ident))
+            if not [w for w in _words(title) if w not in own and w not in _FILLER]:
+                empty.append(f"{name}: {title!r} adds nothing to the identifier beside it")
+    assert not empty, (
+        f"{len(empty)} {lang} titles restate their own identifier. The picker shows "
+        f"`title · name`, so such a row says the same thing twice and the reader is back to "
+        f"decoding a key:\n" + "\n".join(f"  - {e}" for e in empty)
+    )
+
+
+# ------------------------------------------------------------ the catalogue, on the wire
+#
+# `title` in Python and `title` in hyp.{es,ca}.json are two of the three places it has to be
+# spelled the same. The third is the JSON `/api/hypotheses` puts on the wire, and it is the one
+# with no test: dropping the key from `list_hypotheses` leaves every check above green, and the
+# browser degrades quietly — `hypLabel` falls back to the bare identifier, which is the picker
+# exactly as it was before this work, with nothing anywhere saying so. That is not hypothetical;
+# the comment in `hypLabel` records it happening against a server process older than the field.
+#
+# The key names are PARSED OUT of web/assay.js rather than retyped, the same way
+# test_decide_route.py reads web/app.js: a list typed in here would only prove it agrees with
+# itself, and would keep passing after a rename on the JavaScript side.
+
+ASSAY_JS = (WEB / "assay.js").read_text(encoding="utf-8")
+
+
+def _js_function_body(src: str, name: str) -> str:
+    """The body of a top-level JS function, by brace matching."""
+    i = src.index(f"function {name}(")
+    j = src.index("{", i)
+    depth = 0
+    for k in range(j, len(src)):
+        if src[k] == "{":
+            depth += 1
+        elif src[k] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[j:k + 1]
+    raise AssertionError(f"unbalanced braces reading {name}() out of web/assay.js")
+
+
+#: Every `h.<key>` the picker reads off one entry of `/api/hypotheses`.
+PICKER_KEYS = {m for fn in ("hypLabel", "paintCatalogue")
+               for m in re.findall(r"\bh\.([A-Za-z_][A-Za-z_0-9]*)", _js_function_body(ASSAY_JS, fn))}
+
+
+def test_the_extractor_read_something_real_out_of_assay_js():
+    """The anti-vacuity guard, and the only place in this section that hard-codes a name. An
+    extractor pointed at a function that has been renamed returns an empty set, and the test below
+    would then pass while requiring nothing of the payload."""
+    assert PICKER_KEYS >= {"name", "title", "family"}, PICKER_KEYS
+    assert "hypProse(h.name)?.title" in ASSAY_JS, (
+        "the picker no longer prefers the translated title, so the es/ca checks in this file are "
+        "about a field nothing displays")
+
+
+def test_the_catalogue_route_serves_a_title_for_every_hypothesis(names):
+    """`/api/hypotheses` is what the picker actually reads; the registry is not.
+
+    This is the one route of the four the Assay side is served through that carries prose, and
+    `docs/TEST_COVERAGE.md` lists all four as unexercised. Half of that is now false.
+    """
+    import os
+
+    # Before the server is imported: `APP = App()` builds a BarStore at import time and a test
+    # must never be pointed at the real store. Same value as tests/test_decide_route.py.
+    os.environ.setdefault("WAVELAB_DATA", "/nonexistent-wavelab-test-store")
+    from fastapi.testclient import TestClient
+
+    from wavelab.server import app as srv
+
+    payload = TestClient(srv.app).get("/api/hypotheses").json()["hypotheses"]
+    assert len(payload) == len(names) == 100, f"the route served {len(payload)} of {len(names)}"
+
+    reg = load_all()
+    broken = []
+    for entry in payload:
+        missing = PICKER_KEYS - set(entry)
+        if missing:
+            broken.append(f"{entry.get('name')}: no {', '.join(sorted(missing))} on the wire")
+            continue
+        if not str(entry["title"]).strip():
+            broken.append(f"{entry['name']}: empty title on the wire")
+        elif entry["title"] != reg[entry["name"]].title.strip():
+            broken.append(f"{entry['name']}: the wire says {entry['title']!r}, the registry says "
+                          f"{reg[entry['name']].title.strip()!r}")
+    assert not broken, (
+        "web/assay.js reads these off each entry of /api/hypotheses and the route does not send "
+        "them. The picker does not break: `hypLabel` degrades to the bare identifier, which is "
+        "the screen this whole change existed to replace.\n" + "\n".join(f"  - {b}" for b in broken)
     )

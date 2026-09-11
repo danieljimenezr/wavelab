@@ -189,6 +189,7 @@ def _us_cash_hours(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="seasonality.us_cash_hours_long",
     family="seasonality",
+    title="Long through the New York session",
     rationale="Since the spot ETFs were approved, BTC's marginal buyer trades on New York hours: "
               "ETF creations and redemptions are struck against the 16:00 ET close, CME liquidity "
               "concentrates in the US session, and the desks that arbitrage the spot-futures basis "
@@ -225,6 +226,7 @@ def _asia_hours(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="seasonality.asia_hours_short",
     family="seasonality",
+    title="Short the thin Asian hours",
     rationale="Between 00:00 and 08:00 UTC (09:00-17:00 in Tokyo) the book is at its thinnest: the "
               "European and American desks are not there, and what remains is mostly heavily "
               "leveraged retail perpetual flow. With a thin book an order of the same size moves "
@@ -282,6 +284,7 @@ def _overlap_continuation(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="seasonality.overlap_day_trend",
     family="seasonality",
+    title="Follow the day's direction into the overlap",
     rationale="The overlap of the London afternoon with the New York morning (13:00-16:30 UTC) is "
               "the only stretch in which European and American desks are present at the same time, "
               "and therefore the one with the greatest aggregate depth of the day. A directional "
@@ -317,6 +320,7 @@ def _weekend(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="seasonality.weekend_short",
     family="seasonality",
+    title="Short the weekend, fiat rails closed",
     rationale="At the weekend the fiat rails are closed: no bank transfers, no creation or "
               "redemption of ETF shares, and the CME does not trade. What is left is the 24/7 "
               "perpetual with market makers who trim inventory because they cannot hedge on the "
@@ -351,6 +355,7 @@ def _friday_evening(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="seasonality.friday_derisk_short",
     family="seasonality",
+    title="Short into the CME weekly close",
     rationale="The CME weekly close (21:00 UTC in summer time, 22:00 in winter) forces basis desks "
               "to flatten or roll whatever they cannot hold against a closed market, and the "
               "leveraged longs paying funding trim before two days without fiat rails or regulated "
@@ -416,6 +421,7 @@ def _cme_gap(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="seasonality.cme_gap_monday",
     family="seasonality",
+    title="Fade the CME gap into Monday",
     rationale="CME BTC futures stop trading on Friday afternoon and reopen on Sunday night, while "
               "spot never stops: any weekend move opens a gap on the CME chart. On reopening, the "
               "desks that arbitrage the basis have to rebuild the hedge between the two markets, "
@@ -460,6 +466,7 @@ def _pre_funding(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="seasonality.pre_funding_fade",
     family="seasonality",
+    title="Fade the move before the funding stamp",
     rationale="Binance and the other perpetual venues settle funding at 00:00, 08:00 and 16:00 "
               "UTC. When the eight-hour window has been very directional, the crowded side is the "
               "one that pays, and part of that side closes in the hour before the stamp precisely "
@@ -496,6 +503,7 @@ def _turn_of_month(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="seasonality.turn_of_month_long",
     family="seasonality",
+    title="Long the last day of the month and the first three",
     rationale="Recurring purchases have a calendar: payroll, automatic DCA programmes on the "
               "exchanges and periodic contributions from funds and treasuries all cluster at month "
               "end and in the first days of the next one. That flow is price-insensitive — it buys "
@@ -534,6 +542,7 @@ def _pre_quarterly_expiry(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="seasonality.pre_quarterly_expiry_short",
     family="seasonality",
+    title="Short the week before quarterly expiry",
     rationale="The largest open interest in options and futures (Deribit and CME) expires on the "
               "last Friday of March, June, September and December. In the week before, that "
               "interest is closed or rolled: the spot-futures basis compresses, the desks that "
@@ -581,6 +590,7 @@ def _post_monthly_expiry(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="seasonality.post_monthly_expiry_long",
     family="seasonality",
+    title="Long the three days after monthly expiry",
     rationale="Once the monthly expiry has passed (last Friday, 08:00 UTC on Deribit), the delta "
               "hedging that anchors price to the strikes with the most open interest disappears, "
               "and positioning is rebuilt: expired calls are rolled to the next month, the desks "
@@ -625,6 +635,7 @@ def _halving_phase(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="seasonality.halving_cycle_phase",
     family="seasonality",
+    title="Long the halving expansion, short the contraction",
     rationale="The halving cuts miner issuance in half from one block to the next. Miners are "
               "structural sellers — they pay for energy in fiat currency — so the daily selling "
               "flow the market has to absorb halves on a date known in advance. The folk model of "

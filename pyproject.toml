@@ -68,10 +68,16 @@ packages = ["src/wavelab"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "-q --strict-markers"
+# `not net` belongs HERE and not only in the CI command. It used to live only in ci-cd.yml,
+# so `make test`, a bare `pytest`, and anything else a person or an agent ran went to
+# Binance — a different suite from the one that gates the deploy, and the difference was a
+# network call. Opt in explicitly with `-m net` (or `make test-net`) when that is what you
+# mean. The reasoning is the same one ci-cd.yml gives: a run that fails because of someone
+# else's API teaches people that red means "try again".
+addopts = "-q --strict-markers -m 'not net'"
 markers = [
     "slow: slow tests (long replays, hydration)",
-    "net: tests that hit the internet (excluded by default in CI)",
+    "net: tests that hit the internet (excluded by default everywhere; `-m net` opts in)",
 ]
 # A RuntimeWarning out of NumPy is this codebase's most likely silent-corruption signal: "invalid
 # value encountered in cast" is how a NaN becomes an arbitrary int8 position, and "divide by zero"

@@ -1211,8 +1211,8 @@ def _rising_series(n=1000, tf="1d", bar_ms=DAY, seed=9):
 
 
 def _hyp(name, fn, timeframes=("1d",)):
-    return Hypothesis(name, "test", "declared up front", "declared up front", fn,
-                      timeframes=timeframes, min_warmup=0)
+    return Hypothesis(name, "test", "a test hypothesis", "declared up front", "declared up front",
+                      fn, timeframes=timeframes, min_warmup=0)
 
 
 class TestForwardReturns:

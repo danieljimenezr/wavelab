@@ -170,6 +170,7 @@ def _squeeze_release(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="volatility.squeeze_bb_kc_release",
     family="volatility",
+    title="Bollinger inside the Keltner, trade the release",
     rationale="When the Bollinger bands (20, 2σ) fit inside the Keltner channel "
               "(EMA-20 ± 1.5·ATR-20), the dispersion of closes has sunk below the true range: the "
               "market is trading in a handkerchief while there is still intra-candle travel. That "
@@ -211,6 +212,7 @@ def _rs_vol_pct_low_carry(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="volatility.rs_vol_pct_low_carry",
     family="volatility",
+    title="Quiet RS volatility, follow the EMA-55",
     rationale="Rogers-Satchell realised volatility over 24 candles, placed in its 252-period "
               "rolling percentile, measures whether the market is quiet RELATIVE TO ITSELF rather "
               "than relative to an absolute threshold that BTC's price inflation would render "
@@ -254,6 +256,7 @@ def _bbw_pct_low_carry(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="volatility.bbw_pct_low_carry",
     family="volatility",
+    title="Narrow Bollinger width, follow the EMA-55",
     rationale="A controlled contrast to the previous one: identical direction rule (price against "
               "the EMA-55), identical percentile window (252), identical threshold (bottom "
               "quintile), and the ONLY thing that changes is the compression estimator: Bollinger "
@@ -295,6 +298,7 @@ def _rs_vol_pct_high_fade(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="volatility.rs_vol_pct_high_fade",
     family="volatility",
+    title="Fade the 3-candle push in extreme volatility",
     rationale="In the top decile of realised volatility, the move of the last 3 candles is "
               "dominated by forced liquidations: the exchange's risk engine sells (or buys) at "
               "market without looking at the price, and whoever provides liquidity against that "
@@ -329,6 +333,7 @@ def _rs_vol_pct_high_carry(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="volatility.rs_vol_pct_high_carry",
     family="volatility",
+    title="Follow the 3-candle push in extreme volatility",
     rationale="The opposite reading of the same state: in the top decile of realised volatility, "
               "forced liquidation is reflexive. Each liquidation moves price towards the next "
               "cluster of collateral, which liquidates in turn; the book empties out in the "
@@ -373,6 +378,7 @@ def _nr7_breakout(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="volatility.nr7_breakout",
     family="volatility",
+    title="Break the narrowest range of seven candles",
     rationale="Toby Crabel's NR7: the previous candle had the narrowest true range of the last "
               "seven. A local range minimum means buyers and sellers agreed on the price for a "
               "whole period, which concentrates the resting orders (stops and limits) into a very "
@@ -408,6 +414,7 @@ def _inside_bar_breakout(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="volatility.inside_bar_breakout",
     family="volatility",
+    title="Break the inside bar's own extremes",
     rationale="Inside bar: the range of the previous candle is STRICTLY contained within that of "
               "the one before it. It is not the same thing as NR7, and that is why it is "
               "registered separately: NR7 is narrowness relative to a sample of seven, the inside "
@@ -455,6 +462,7 @@ def _wide_range_thrust(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="volatility.wide_range_thrust",
     family="volatility",
+    title="Wide candle out of a quiet base",
     rationale="Range expansion AFTER contraction, which is the direct formulation of 'big moves "
               "are born in quiet periods': we require the previous candle's ATR-14 to have been "
               "below its 100-candle median (contraction) and the current true range to exceed "
@@ -505,6 +513,7 @@ def _keltner_breakout(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="volatility.keltner_breakout",
     family="volatility",
+    title="Close two ATR beyond the EMA-20",
     rationale="A volatility-normalised breakout with no compression component: a close above "
               "EMA-20 + 2·ATR-10, or below EMA-20 − 2·ATR-10. Under a random walk with the CURRENT "
               "volatility, getting two ATR away from the mean is rare; that it happens is evidence "
@@ -567,6 +576,7 @@ def _chandelier_trail(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="volatility.chandelier_atr_trail",
     family="volatility",
+    title="Trail three ATR from the 22-candle extreme",
     rationale="The Chandelier exit (Chuck LeBeau, 22/3): long while the close is above the "
               "22-candle low plus 3·ATR-22, short while it is below the 22-candle high minus "
               "3·ATR-22. The volatility content lies in the invalidation distance being scaled by "
@@ -620,6 +630,7 @@ def _natr_high_regime_trend(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="volatility.natr_low_regime_trend",
     family="volatility",
+    title="EMA-21/55 cross with NATR below median",
     rationale="The normalised ATR (NATR-14, the ATR as a percentage of price) placed in its "
               "252-period rolling percentile classifies the regime without depending on the price "
               "level. Below its median, the typical travel per period is small relative to the "
@@ -644,6 +655,7 @@ register(Hypothesis(
 register(Hypothesis(
     name="volatility.natr_high_regime_trend",
     family="volatility",
+    title="EMA-21/55 cross with NATR above median",
     rationale="The complementary half, registered so that the previous claim is falsifiable and "
               "not a selection made after the fact. Above the NATR-14 median, the same trend "
               "signal trades when the typical travel is large: a single candle can cover the "
@@ -703,6 +715,7 @@ def _ema55_side_unfiltered(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="volatility.ema55_side_unfiltered",
     family="volatility",
+    title="The EMA-55 side with no volatility gate",
     rationale="Unconditional control for `rs_vol_pct_low_carry` and `bbw_pct_low_carry`: exactly "
               "their same direction rule —close above or below the EMA-55— with no volatility gate "
               "at all. It claims no mechanism of its own, and that is the point: the two "
@@ -748,6 +761,7 @@ def _chandelier_fixed_pct(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="volatility.chandelier_fixed_pct",
     family="volatility",
+    title="Trail a fixed 6% instead of ATR",
     rationale="Control for `chandelier_atr_trail`. Exactly the same structure —long while the "
               "close is above the 22-candle low plus a buffer, short while it is below the "
               "22-candle high minus that buffer— with a single difference: the buffer is a FIXED "

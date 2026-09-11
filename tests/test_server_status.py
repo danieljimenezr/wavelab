@@ -141,3 +141,40 @@ async def test_cancellation_is_not_swallowed_as_a_startup_error(clean_app, monke
 
     assert clean_app.startup_error is None
     assert clean_app.ready is False
+
+
+class TestTheStaticCachePolicy:
+    """A deploy must not be able to pair the new JavaScript with the old dictionary.
+
+    StaticFiles sends an ETag and, by default, no `Cache-Control` — which leaves the browser free
+    to reuse a file without asking. With one file that is harmless. With several it is not: a
+    release that changes `assay.js` and `i18n.js` together can land a reader on the new script and
+    the cached dictionary, and the page then renders `undefined · candles.body_flow_20` with
+    nothing in the console. That happened here, to the person building the feature, on a machine
+    where both files were already correct on disk.
+
+    `no-cache` does not mean "do not cache" — it means "revalidate before use" — and the ETag is
+    already there, so the cost is a conditional request answered 304 with no body.
+    """
+
+    @pytest.fixture(scope="class")
+    def client(self):
+        from fastapi.testclient import TestClient
+        return TestClient(srv.app)
+
+    @pytest.mark.parametrize("path", ["/i18n.js", "/assay.js", "/app.js", "/assay.html"])
+    def test_the_app_s_own_files_are_revalidated_every_time(self, client, path):
+        r = client.get(path)
+        assert r.status_code == 200, f"{path} is not being served at all"
+        assert r.headers.get("cache-control") == "no-cache", (
+            f"{path} came back with cache-control={r.headers.get('cache-control')!r}. Anything "
+            "that lets a browser skip revalidation can pair it with a stale sibling."
+        )
+
+    def test_vendor_is_cached_hard_because_its_url_carries_its_version(self, client):
+        """The exception, and it has to stay one: the vendored chart bundle is version-pinned in
+        its own filename, so the bytes behind a given URL never change. Revalidating 200 KB on
+        every page load to be told it has not changed is the cost this exists to avoid."""
+        r = client.get("/vendor/lightweight-charts.standalone.production.mjs")
+        assert r.status_code == 200
+        assert r.headers.get("cache-control") == "public, max-age=31536000, immutable"

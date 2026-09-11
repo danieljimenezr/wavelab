@@ -330,7 +330,8 @@ async def list_hypotheses() -> JSONResponse:
     from wavelab.hypotheses import load_all
     hs = load_all()
     return JSONResponse({"hypotheses": [
-        {"name": h.name, "family": h.family, "rationale": h.rationale.strip(),
+        {"name": h.name, "family": h.family, "title": h.title.strip(),
+         "rationale": h.rationale.strip(),
          "prior": h.prior.strip(), "params": {k: str(v) for k, v in h.params.items()},
          "timeframes": list(h.timeframes)}
         for h in sorted(hs.values(), key=lambda x: (x.family, x.name))]})
@@ -646,6 +647,31 @@ async def status() -> JSONResponse:
     })
 
 
+class _Web(StaticFiles):
+    """StaticFiles, plus a cache policy, because not having one bites on exactly the wrong day.
+
+    The default sends an ETag and no `Cache-Control`, which leaves the browser free to serve a file
+    from disk without asking. That is fine for one file and dangerous for several: a deploy that
+    changes `assay.js` and `i18n.js` together can land a reader on the NEW assay.js and the OLD
+    i18n.js, and the page then renders `undefined · candles.body_flow_20` with nothing in the
+    console. It happened here while this very feature was being built.
+
+    So: the app's own files must revalidate every time. `no-cache` does not mean "do not cache" —
+    it means "ask first" — and with the ETag already there the answer is a 304 carrying no body, so
+    the cost is one conditional request, not a re-download.
+
+    `vendor/` is the exception and is cached hard: its filename carries the pinned version, so the
+    bytes behind a given URL never change. A year is the usual ceiling for that claim.
+    """
+
+    async def get_response(self, path: str, scope):
+        r = await super().get_response(path, scope)
+        if r.status_code < 400:
+            r.headers["Cache-Control"] = ("public, max-age=31536000, immutable"
+                                          if path.startswith("vendor/") else "no-cache")
+        return r
+
+
 if WEB.exists():
     if PUBLIC:
         # In public mode Assay IS the front page. Nobody should have to know a URL by heart.
@@ -654,7 +680,7 @@ if WEB.exists():
             from fastapi.responses import FileResponse
             return FileResponse(WEB / "assay.html")
 
-    app.mount("/", StaticFiles(directory=str(WEB), html=True), name="web")
+    app.mount("/", _Web(directory=str(WEB), html=True), name="web")
 
 
 def main() -> None:

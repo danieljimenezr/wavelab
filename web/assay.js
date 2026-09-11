@@ -22,6 +22,9 @@ let chart = null, sStrategy = null, sBH = null;
 let lastResult = null;
 let lastHelp = null;
 let lastCount = null;
+//: The catalogue as the API sent it, kept for the same reason: a language switch has to relabel
+//: 100 options and there is nothing on the server it needs to ask for to do it.
+let lastCatalogue = null;
 
 //: The pre-registration prose. The API always speaks English; in es/ca the translated version is
 //: substituted here, by hypothesis name. `??` and not `||`: a translation is either there or it
@@ -31,19 +34,52 @@ function prose(d) {
   return { rationale: tr?.rationale ?? d.rationale, prior: tr?.prior ?? d.prior };
 }
 
-async function loadCatalogue() {
-  const d = await (await fetch('/api/hypotheses')).json();
+//: What one option says. The title is the claim in a human sentence; the identifier trails it and
+//: does NOT disappear, because it is the name in docs/STUDY_100_HYPOTHESES.md, the key in
+//: trials.sqlite and the string a reader pastes into a bug report. A picker showing prose alone
+//: would leave them with nothing quotable.
+function hypLabel(h) {
+  const title = hypProse(h.name)?.title ?? h.title;
+  //: The empty branch is not paranoia, it happened: this file was reloaded from disk while the
+  //: server it talks to was still the process started before `title` existed, so /api/hypotheses
+  //: answered without the field and all 100 English options read "undefined · candles.…". A
+  //: missing title degrades to the identifier alone —the picker as it was— instead of to a word
+  //: from JavaScript's own vocabulary, which is a bug report about the wrong thing.
+  return title ? `${title} · ${h.name}` : h.name;
+}
+
+//: Idempotent, and called every time the language changes or the prose finishes arriving. A no-op
+//: until the catalogue is in hand, which is what makes the two callers at the bottom race-free.
+function paintCatalogue() {
+  if (!lastCatalogue) return;
   const sel = $('hyp');
+  const chosen = sel.value;
   sel.innerHTML = '';
   let family = null;
-  for (const h of d.hypotheses) {
+  for (const h of lastCatalogue) {
     if (h.family !== family) {
       family = h.family;
-      sel.appendChild(Object.assign(document.createElement('optgroup'), { label: family }));
+      //: Grouped by family, because 100 flat options is a wall. The API already sorts by
+      //: (family, name), so one pass suffices.
+      //: The key itself stays as it is in the data — `family` is immutable, like `name`, and is
+      //: what trials.sqlite and the published study call it. Only the label is translated, and `t`
+      //: falls back to the key, so a family added later reads `flow_v2` rather than reading blank.
+      sel.appendChild(Object.assign(document.createElement('optgroup'),
+                                    { label: t('family.' + family) }));
     }
-    sel.lastChild.appendChild(
-      Object.assign(document.createElement('option'), { value: h.name, textContent: h.name }));
+    sel.lastChild.appendChild(Object.assign(document.createElement('option'),
+      { value: h.name, textContent: hypLabel(h) }));
   }
+  //: Relabelling must not re-choose. Guarded on the name really being in the list because on the
+  //: first paint `chosen` is still the placeholder option's text ("loading…"), and assigning a
+  //: value that matches nothing empties the select instead of leaving the first item selected.
+  if (lastCatalogue.some((h) => h.name === chosen)) sel.value = chosen;
+}
+
+async function loadCatalogue() {
+  const d = await (await fetch('/api/hypotheses')).json();
+  lastCatalogue = d.hypotheses;
+  paintCatalogue();
   lastCount = d.hypotheses.length;
   $('status').textContent = t('catalog.count', { n: lastCount });
 }
@@ -338,17 +374,24 @@ document.querySelectorAll('.ex').forEach((b) => (b.onclick = () => {
 onLangChange(() => {
   if (lastCount != null) $('status').textContent = t('catalog.count', { n: lastCount });
   paintHelp();
-  if (!lastResult) return;
-  // THE case this layer exists for: a result already on screen when the language changes. The
-  // panel is repainted ONCE, after the prose for the new language is in hand, because `render`
-  // rebuilds the chart from scratch — painting twice would make it blink. `ensureHypProse` never
-  // rejects, so a dead file still repaints, with the English rationale.
+  // THE case this layer exists for: the catalogue and a result already on screen when the language
+  // changes. Both wait for the prose of the NEW language, and the panel is repainted ONCE, because
+  // `render` rebuilds the chart from scratch — painting twice would make it blink.
+  // `ensureHypProse` never rejects, so a dead file still repaints, with the English titles.
   const at = lastResult;
-  ensureHypProse().then(() => { if (lastResult === at) render(at); });
+  ensureHypProse().then(() => {
+    paintCatalogue();
+    if (at !== null && lastResult === at) render(at);
+  });
 });
 
 loadCatalogue();
 loadHelp();
 // Warmed at load, not at the first result: in es/ca the 110 KB is on its way while the reader is
 // still choosing a hypothesis. In English this is a no-op and nothing is downloaded.
-ensureHypProse();
+//
+// The two fetches race deliberately and neither waits for the other: whichever lands second calls
+// `paintCatalogue`, and the first paint is a no-op if it is the prose that arrived first. Holding
+// the picker back until 110 KB of rationales downloaded would be paying for prose this screen
+// does not show, so the reader can get English titles for a moment instead.
+ensureHypProse().then(paintCatalogue);

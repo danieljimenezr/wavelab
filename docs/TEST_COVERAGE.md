@@ -1,7 +1,23 @@
 # What the test suite protects, and what it does not
 
-**582 tests, ~4.1 s, `pytest -m "not net"`.** One test is deselected by default (`net`, it hits the
-real Binance archive). The suite gates deploys, so it is kept under five seconds.
+**947 tests, ~5.6 s, `pytest -m "not net"`.** One test is deselected by that flag (`net`, it hits
+the real Binance archive). The suite gates deploys and it is no longer under five seconds.
+
+Two traps in that sentence, both measured. The flag is not a default: `pyproject.toml` sets
+`addopts = "-q --strict-markers"` and nothing else, so a bare `uv run pytest` — which is what
+`make test` runs — SELECTS the `net` test, goes to the internet, and takes ten seconds instead of
+five. Only CI (`ci-cd.yml`) passes `-m "not net"`. And the second: every figure in this file is
+`-m "not net"`, so a bare run reports one test more than any count written down here.
+
+`test_hypothesis_library.py` is 1.5 s of it — measured as a delta, running the suite with and
+without that file back to back on the same machine, because absolute seconds here are a fact about
+the laptop. It runs all 100 hypotheses over four synthetic timeframes and four real ones, with
+~6,200 truncated recomputations for the causality probe among them — 3,120 per arm, counted, not
+estimated: the probe asks for up to twelve bars per (hypothesis, timeframe) pair and `probe_bars`
+dedupes, so 293 pairs yield 3,120 and not 3,516. It is the only file allowed to cost that much, and
+the reason is that it covers the largest surface in the repo. If it grows
+again, cut the number of cut points before cutting the probes: the probes are what caught the
+planted one-bar lookahead, and the cut points are the broad net under them.
 
 This document exists because a green suite is a claim, and this project is sold on refusing to
 flatter its user. The same standard applies to its own tooling: a test that cannot fail reads as
@@ -12,10 +28,23 @@ verifying the file is byte-identical by sha256.
 
 **The short version of where this suite is weak:**
 
-1. **~5,400 lines of hypothesis library have no test that runs them.** All 100 hypotheses. Only
-   their prose is checked.
-2. **The served HTTP path is barely tested.** `server/app.py` is 582 lines; four tests cover
-   warm-up status and seven cover rate limiting. `/decide` itself is not exercised.
+1. **The hypothesis library is now run, as properties rather than as a hundred hand-written
+   tests** (`tests/test_hypothesis_library.py`). What is asserted about all 100 is causality, the
+   {-1,0,+1} alphabet, the declared warm-up, scale-freedom, purity and behaviour on degenerate
+   input — over synthetic candles and over real ones from the store. What is NOT asserted is that
+   any hypothesis computes the indicator it says it computes: a `_bb_fade` that quietly used a
+   1-sigma band would pass every property here.
+
+   Six properties over a hundred hypotheses is not six hundred behaviours covered. Read the list
+   as what it is: a floor every hypothesis must clear, plus five recorded facts about the registry
+   that would move if somebody changed one. The BEHAVIOUR of any individual hypothesis — the level
+   it compares against, the period it uses, the direction it takes — is protected by nothing.
+2. **The served HTTP path is only tested where the product is served.** `/api/decide` and the
+   PUBLIC gate are now measured (`tests/test_decide_route.py`, 30 tests), and `/api/hypotheses` is
+   measured for the catalogue prose alone — that it carries a `title` for all 100 under the key
+   `web/assay.js` actually reads. `/api/validate`, `/api/validate_csv` and `/api/validate_rule`
+   are still not exercised end to end; what they call is heavily tested, what they put on the wire
+   is not.
 3. **Five modules have no tests at all**: `core/bus.py`, `feeds/binance_derivs.py`,
    `store/trials.py`, `collect.py`, `registry.py`.
 4. **One known internal inconsistency is pinned, not fixed** — the R:R quoted on a signal is
@@ -52,16 +81,96 @@ tidies the unrelated thing.
 | `validation/expr.py`, `reality_check.py`, `csv_import.py` | 31 | 2 | 1 |
 | `feeds/`, `store/bars.py`, `store/hydrate.py` | 27 | 1 | 1 |
 | `engine/live.py`, `labeling/barriers.py`, `backtest/run.py` | 29 | 1 | 13 |
-| **Total, where it was measured** | **185** | **7** | **26** |
-| `hypotheses/` (100 hypotheses, ~5,400 lines) | **0** | — | — |
-| `server/app.py` (582 lines) | **not measured** | — | — |
+| the served decision path (`/api/decide`, the PUBLIC gate, `LiveEngine.decide`'s wire keys) | 10 | 0 | — |
+| `web/app.js`, decision panel only (the keys it reads off the card) | 4 | — | — |
+| `hypotheses/` (100 hypotheses, ~5,400 lines) — six properties, not their arithmetic | 11 | 2 | — |
+| the catalogue's titles (`Hypothesis.title`, `/api/hypotheses`, `web/assay.js`, hyp.{es,ca}.json) | 8 | 0 | — |
+| **Total, where it was measured** | **218** | **9** | **26** |
+| `server/app.py`, the three validation routes | **not measured** | — | — |
 
-So the honest headline is **185 of 192 observable faults closed in the modules that were measured,
-and two of the largest surfaces in the repo not measured at all.** A kill rate of 96% over 40% of
-the codebase is not a 96% kill rate.
+So the honest headline is **218 of 227 observable faults closed in the modules that were
+measured.** The hypothesis library is no longer a blank row, but read its eleven with the caveat
+below: they are eleven faults against six PROPERTIES held over all 100 hypotheses, not eleven
+faults sampled across 5,400 lines of arithmetic. Most of that arithmetic is still unmeasured.
+
+The `hypotheses/` row is narrower than its name suggests, and so are the two rows above it.
+
+What the hypothesis row covers is every property `tests/test_hypothesis_library.py` asserts, each
+one killed by an edit to a real hypothesis: a one-bar lookahead planted in
+`mean_reversion._streak3` and a five-bar one in `volatility._squeeze_release`; the classic
+`structure._pivots` fault of stamping a Williams fractal on the bar of the extreme instead of the
+bar that confirms it, two candles before it is knowable; a 0.5 and a NaN emitted into a position
+series; a hypothesis gated on an absolute price of $30,000; `Hypothesis.signals`'s warm-up mask
+deleted; a hypothesis writing to the caller's `close` array in place; one whose condition can never
+be true; one declaring a timeframe the store cannot build; and one whose declared `min_warmup` is
+dropped below the number of candles its own function refuses to compute below. Each was applied,
+watched go red on a NAMED test, reverted, and the file confirmed byte-identical by sha256.
+
+Two faults in the same file are left open, both inside `Hypothesis.signals`, and both are open for
+the same reason: the registry as it stands cannot tell the difference.
+
+- **The `dtype=np.int8` in `np.asarray(self.fn(s), dtype=np.int8)` can be deleted and the suite
+  stays green.** Every one of the hundred already builds its own `int8` array, so the cast has
+  nothing to convert and `test_signals_returns_one_int8_per_candle`'s dtype branch is unreachable.
+  The cast is a defence against a hypothesis that returns floats, and the day one arrives the
+  alphabet property catches it on the RAW output anyway — so the cast being untested is a
+  statement about which layer holds the guarantee, not a missing test. Do not delete it: it is
+  what stops a float reaching an int8 position silently.
+- **The `raise ValueError` for a wrong-length return can be deleted too.** No hypothesis returns
+  the wrong number of signals, so nothing reaches the line. `test_signals_returns_one_int8_per_candle`
+  would catch the resulting mismatch — but only in a run where some hypothesis is already broken.
+
+The titles row is the one added with this document's own machinery pointed at the newest work,
+and it is worth reading because seven of its eight faults were live survivors before the tests
+that kill them were written: `title` dropped from the `/api/hypotheses` payload; the wire key
+renamed on the server side only; the same key renamed in `web/assay.js` only; `register()`'s
+blank-title refusal deleted; `title` given a default so it can be omitted at registration; an
+English title replaced by its own identifier; an English title de-slugged from its identifier
+("Turn of month, long"); an es/ca title replaced by the identifier. Every one of those leaves the
+product looking like it works. The picker does not break on a missing title — `hypLabel` degrades
+to the bare identifier, which is the exact screen this change existed to replace, restored one row
+at a time with nothing anywhere saying so.
+
+What it does not cover is any hypothesis's arithmetic. A hypothesis that is causal, finite,
+scale-free and pure while measuring entirely the wrong thing passes every property in the file. Two
+faults were planted to confirm that and both survived, as expected: a Bollinger band rebuilt at one
+sigma instead of two, and `streak3_fade`'s sign flipped end to end. The suite stays green for both.
+They are not counted above, because a survivor that no property claims to catch is a boundary
+rather than a hole — but it is a real boundary, and it is where the next reader should look.
+Closing it means testing 100 formulas against 100 restatements of themselves, which is exactly the
+work these properties were written to avoid, so it should probably not be closed at all.
+
+The two server rows are narrower than their names suggest too, and the narrowness is the point. The
+decision-path row covers the route the chart is served through and nothing else: the gate on all
+three private routes, the accepted spellings of `WAVELAB_PUBLIC`, the WATCH ceiling at the route,
+and each key the panel reads. The `web/app.js` row is not a front-end test — no JavaScript is
+executed anywhere in this suite. It is measured because `test_decide_route.py` parses the required
+key names OUT of `web/app.js` instead of retyping them, so renaming `h.entry_lo`,
+`h.invalidation_price`, `d.reasons` or a `VERDICT` key **in the JavaScript** turns the suite red
+too. What is
+checked is that the two sides agree on the names; whether the panel then draws the right thing is
+still checked by nobody.
 
 "Left open" counts only faults that are observable and deliberately not chased; the reason for each
 is given below. Nothing is left open because it was hard.
+
+One source change was made while closing the hypothesis hole, and it is recorded here rather than
+counted as a kill. `mean_reversion._prev` did `out[0] = np.nan` on a zero-length array, which is an
+`IndexError`, and it took down `sweep_rejection_20` and `streak3_fade` — the only two hypotheses in
+that file reaching `_prev` with no length guard in front of it — on a series with no candles.
+`evaluate_all` swallows that in a bare `except`, so the visible symptom was two hypotheses quietly
+absent from the report, which is the exact failure mode this document named as untested. The guard
+is two lines; the empty-series test that found it is counted once, against the behaviour, not twice.
+
+A second source change was made while measuring the titles, and it is recorded the same way.
+`seasonality.turn_of_month_long` was titled "Long the turn of the month", which is its own
+identifier with the underscores taken out. The picker prints `title · name`, so that row said the
+same thing twice and the reader was back to decoding a key — the bug titles were added to fix,
+surviving in one of the hundred. It now reads "Long the last day of the month and the first three",
+which is what `_turn_of_month` does, and es/ca were retranslated to match. The `en` fingerprints in
+hyp.{es,ca}.json were NOT touched: they hash rationale and prior, not title, and re-stamping them
+for a title change would be the silencing this document warns about. Measured before the change:
+one of the hundred failed the new check, and it is the only one.
 
 One accounting note, because it is the kind of thing that quietly inflates a table: closing
 `provisional_window`'s boundary required a source change (`n < 1` now raises instead of dying inside
@@ -144,6 +253,45 @@ case is refused, and that case is now tested
 (`test_a_stop_that_lands_on_the_entry_is_refused_and_does_not_take_the_engine_down`), which also
 pins the wrong-side behaviour as it stands so it cannot change silently.
 
+### Four hypotheses read a market with zero movement as maximally oversold
+
+TA-Lib returns 0, not NaN, for RSI, MFI and Williams %R when there is neither a gain nor a loss to
+divide by, and 0 is below every oversold threshold in the library. So a series in which the price
+never moves a tick reads as the most oversold market possible, and `flow.mfi14_extremes`,
+`mean_reversion.rsi14_fixed_3070`, `mean_reversion.rsi14_cardwell_sma200` and
+`mean_reversion.willr14_fade` go long on every candle of it.
+
+It cannot happen on BTC 1m, which is why this is a note and not a bug report. It can happen the day
+the catalogue is pointed at a stablecoin, a halted equity or a padded series, and then it fires
+continuously and confidently. The test asserts the set is exactly those four, so a fifth arrival
+is caught, and a fix turns the test red rather than passing silently.
+
+The eight `seasonality` hypotheses also signal on a flat market, and for them it is correct: they
+read the clock, and the clock does not care what the price did. The three that do not
+(`cme_gap_monday`, `overlap_day_trend`, `pre_funding_fade`) are the three that gate their calendar
+window on a price condition as well. Both halves are asserted, because "the price-blind ones fire
+and the price-gated ones do not" is the statement that has content; either half alone is a number.
+
+### `min_warmup` is a mask on the head of the series, not a bound on memory
+
+The natural reading of `min_warmup=200` is "a signal at bar i depends only on the last 200
+candles", and it is false. `Hypothesis.signals` uses it for one thing: zeroing the first N
+positions. `structure._hold` carries the last event forward until the opposite one arrives, with no
+limit at all, so a hypothesis built on it can hold a position that is information from a candle
+hundreds of bars outside any warm-up window.
+
+Measured with a built fixture rather than a seed: six hundred candles climb in a straight line, so
+`donchian_break_20` breaks out early and is long from then on; then the market stops dead for five
+hundred candles, with no new high, no new low and no event of any kind. Given the whole series the
+hypothesis is long through all of that silence. Given only the silence plus a re-warm of its full
+declared 200 candles, it is flat, and stays flat, for every one of the 300 bars compared.
+
+This matters to anyone sizing a ring buffer from `min_warmup`, and it is a design choice rather
+than a defect, so it is pinned rather than fixed. Three other hypotheses disagree with themselves
+by one to seven bars after a re-warm for the much milder reason that an EMA's memory is infinite
+(`candles.engulfing_trend`, `mean_reversion.stretch_ema200_atr14`, the `trend` EMA stack); that is
+rounding, and it is not pinned.
+
 ### Dead configuration
 
 - `RETRACEMENTS` in `rules.py` has exactly one reference in the whole repo: its own definition.
@@ -161,35 +309,48 @@ pins the wrong-side behaviour as it stands so it cannot change silently.
 
 These are not mutants that survived. They are behaviours with no test of any kind.
 
-### 1. The hypothesis library — the single largest hole
+### 1. The served path — the decision route is now covered; the validation routes are not
 
-`src/wavelab/hypotheses/` is ~5,400 lines across eight files defining about 100 hypotheses. **No
-test calls a single one of their `signals()` methods.** `test_hypothesis_i18n.py` checks that their
-Spanish and Catalan prose has not drifted from the English, which is worth having and is a test
-about translations, not about signals. `test_assay.py` builds its own synthetic `Hypothesis` objects
-to exercise the validation machinery.
+`server/app.py` is 582 lines. `test_server_status.py` (4 tests) covers warm-up status transitions,
+`test_limits.py` (7 tests) covers rate limiting, `test_server_i18n.py` (9 tests) checks that every
+emitted string is translated, and `test_decide_route.py` (30 tests) covers `/api/decide` and the
+PUBLIC gate. `/api/hypotheses` is driven only for the catalogue prose — one test in
+`test_hypothesis_i18n.py` asserts the payload carries a non-empty `title` for all 100 matching the
+registry, under the key `web/assay.js` reads. Its other fields, and `/api/validate`,
+`/api/validate_csv` and `/api/validate_rule` in full, are still driven by no test: their bodies are
+thin, but "thin" is what was said about `/api/decide`.
 
-So: the machinery that grades hypotheses is heavily tested, and the hypotheses themselves are not
-tested at all. A hypothesis whose `signals()` returns the wrong sign, reads a feature it should not
-have, or throws on an empty series would be caught only by `evaluate_all`'s bare `except`, which
-prints a line and moves on.
+`test_decide_route.py` builds its own engine — 6,000 synthetic 1m bars, ~20 ms — rather than
+warming from the store, and reaches the routes with `TestClient` NOT used as a context manager, so
+the lifespan never runs and the feed never opens a socket to Binance.
 
-### 2. The served path
+What it closes, and what it deliberately only pins:
 
-`server/app.py` is 582 lines. `test_server_status.py` (4 tests) covers warm-up status transitions
-and `test_limits.py` (7 tests) covers rate limiting. `test_server_i18n.py` (9 tests) checks that
-every emitted string is translated. **`/decide` itself has no test.**
-
-Two consequences are known and open:
-
-- **`emitting` has no production caller.** `/decide` calls `APP.engine.decide(tf, price)`
-  unconditionally in any mode, and `decide()` returns a plain dict, so `Decision`'s constructor —
-  the documented last line of defence, which refuses an actionable decision while catching up, while
-  stale, at PRIOR maturity or without a plan — never runs on the served path. Those refusals are
-  well tested as unit properties (`TestAnActionableDecisionHasToBeEarned`) and are not reached by
-  the code that answers HTTP requests.
-- **`LIVE` is never demoted to `CATCH_UP` by drift.** `update_health` promotes WARMUP → LIVE and
-  demotes CATCH_UP → LIVE; there is no LIVE → CATCH_UP edge. The only way in is `check_clock`, which
+- **The PUBLIC gate is no longer protected by code review alone.** With `WAVELAB_PUBLIC` set,
+  `/api/decide` and `/api/history` answer 404 and `/ws` closes with 1008 before `accept()`. The
+  flag is exercised through a second, isolated execution of `server/app.py` with the variable set,
+  not by monkeypatching `PUBLIC` — because `PUBLIC` is an import-time expression and the
+  accepted-spellings list is half the guarantee. Dropping `"yes"` from it is now a red test named
+  after the value.
+- **`emitting` still has no production caller, and that is now stated by a test instead of by this
+  paragraph.** `/api/decide` calls `APP.engine.decide(tf, price)` in any mode and returns its plain
+  dict, so `Decision`'s constructor — the documented last line of defence — never runs on the
+  served path. `test_catching_up_changes_nothing_on_the_card` measures the consequence: the card
+  served while CATCH_UP is byte-identical to the one served while LIVE, entry zones and all. That
+  is harmless only because the PRIOR ceiling caps every verdict at WATCH, so a stale zone is shown
+  as something to watch and never as something to take. The test asserts the ceiling is still
+  PRIOR, so whoever raises maturity lands on a red test and has to wire `emitting` in.
+- **The invariants are exercised through the route, not around it.** The card the route just served
+  is lifted into a `Decision` exactly as a caller would have to read it, and the constructor is
+  asked to accept it. Each of the three refusals — no plan, catching up, PRIOR maturity — is
+  provoked from a real response: removing any one of them from `__post_init__` turns exactly one
+  named test in that file red. This is not a second copy of
+  `TestAnActionableDecisionHasToBeEarned`; it is the claim that the route's output is something
+  those properties would accept.
+- **`LIVE` is never demoted to `CATCH_UP` by drift.** Untouched, still open, and it is the reason
+  the point above is only pinned and not fixed: even a route that consulted `emitting` would be
+  told LIVE. `update_health` promotes WARMUP → LIVE and demotes CATCH_UP → LIVE; there is no
+  LIVE → CATCH_UP edge. The only way in is `check_clock`, which
   compares *consecutive calls*. Measured: warm to LIVE, then advance the clock one second at a time
   for an hour, and the engine ends four trigger bars stale with the badge still reading LIVE and
   `emitting` still True. That is a stalled websocket that never disconnects, which is more common
@@ -198,7 +359,7 @@ Two consequences are known and open:
   clock in a single three-bar step, which `check_clock` does see, and the other enters CATCH_UP by
   assigning the mode directly.
 
-### 3. Modules with no tests
+### 2. Modules with no tests
 
 | Module | Lines | What it does |
 |---|---|---|
@@ -211,10 +372,19 @@ Two consequences are known and open:
 `store/trials.py` is worth singling out. The README's argument against parameter search rests on
 recording every experiment so the effective N cannot lie. The ledger that records them is untested.
 
-### 4. Cross-cutting
+### 3. Cross-cutting
 
-- **Nothing tests the web front end.** `web/` is not covered by this suite at all beyond the i18n
-  key checks.
+- **Nothing RUNS the web front end.** No JavaScript is executed anywhere in this suite, so nothing
+  checks that the panel draws the right thing. Three files now read `web/` as data rather than
+  ignoring it: `test_server_i18n.py` parses the translation tables out of `i18n.js`,
+  `test_decide_route.py` parses the decision panel's key names out of `app.js`, and
+  `test_hypothesis_i18n.py` parses the picker's key names out of `assay.js` — so a rename on
+  either side of any of the three fails. That is agreement on names, not behaviour, and the rest of
+  `web/` — the chart, the health badge, the timeframe selector, `paintCatalogue`'s grouping and
+  its keep-the-selection branch, all of `assay.html` — is covered by nothing. Concretely, and this
+  was checked in a browser rather than assumed: switching en/es/ca relabels all 100 options, keeps
+  the current selection and leaves the console clean. No test in this repo would notice if any of
+  that stopped being true.
 - **Nothing tests behaviour under a real feed.** Every websocket, REST and archive test drives a
   stub transport. The one test against real data is marked `net` and excluded from the gate.
 - **`provisional_window` has no caller in `src/`.** Its boundary is now tested because a chart
@@ -225,6 +395,70 @@ recording every experiment so the effective N cannot lie. The ledger that record
 ## Things that look like coverage and are not
 
 Recorded so nobody re-derives them.
+
+**One synthetic price path wearing four timeframes.** The hypothesis fixture built its 15m, 1h, 4h
+and 1d series from one seed, so all four had identical prices and differed only in their
+timestamps: a property asserted on four timeframes was being asserted four times on one price path
+rather than over four of them. It was found by a planted fault — a hypothesis gated on an absolute
+price of $30,000 — surviving the scale test, because that one path never crossed $30,000 after its
+warm-up. Each timeframe now draws its own path, and the scale test also runs on real candles, where
+BTC spans 20k to 120k inside the window and any absolute constant a hypothesis might compare
+against falls inside the series.
+
+**A shock so large it stopped testing anything.** The same fixture's regime change was originally
+`r*3 + 0.03` per bar, which over five hundred candles carries the price to 1e10. Every threshold in
+the library is then permanently on one side of itself and none of them is being exercised. It is
+now sized as a bear market: three times the volatility and a drift that takes about 95% off. A
+violent fixture and a useful one are not the same thing.
+
+**A purity test shielded by the tests that ran before it.** The hypothesis library's "does not
+write to the candles it was handed" test compares the input arrays before and after the call, and
+it took its series from the shared session fixture. An in-place edit that is idempotent — a clip, a
+`nan_to_num`, a sort — damages those arrays the first time anything runs and is a no-op every time
+after, so by the time the purity test ran it was comparing the damage against itself. A planted
+in-place `np.clip` survived it. The test now builds its own series. Any test that asserts "the
+input was not modified" has to own its input.
+
+**A single cut point against a shallow lookahead.** The first version of the causality property cut
+the series in two and compared the overlap. That is a weak instrument against `close[i+1]`: reading
+one bar ahead moves exactly ONE bar of the overlap — the one adjacent to the cut — and if that bar
+is flat in both runs the comparison comes back clean. Measured: a deliberate one-bar lookahead
+planted in `mean_reversion.streak3_fade` survived the bulk comparison at four of five cut points
+and was caught only by luck on the fifth. The property now probes twelve individual bars per
+hypothesis per timeframe, truncating at each one and requiring the signal there to be unchanged,
+and spends two thirds of its probes on bars where the hypothesis is actually in the market — which
+is where a stolen candle changes the answer. The bulk comparison is kept as a cheap broad net under
+it, not as the guard.
+
+**A test whose headline is guaranteed by a line somewhere else.**
+`test_fewer_candles_than_any_indicator_needs_is_answered_with_silence` runs the registry on 1, 2, 5
+and 50 candles and asserts none of them takes a position. It cannot fail on that claim: the
+shallowest `min_warmup` in the registry is 200, and `Hypothesis.signals` zeroes the first
+`min_warmup` positions, so on a 50-candle series the ENTIRE output is zeroed before the assertion
+sees it, whatever the hypothesis computed. What the test really holds down is that none of the
+hundred raises or returns the wrong length on a series far shorter than any indicator it uses —
+which is worth having, and is how the `_prev` `IndexError` above was found. Read the name as
+"does not blow up", not as "declines to trade". If a hypothesis is ever registered with a warm-up
+below 50, the headline claim starts being tested for the first time.
+
+**Fabricated lookaheads are not a substitute for a real one.** `TestTheHarnessHasTeeth` proves the
+causality checker bites, but it proves it on hand-built functions with one timeframe, a 200-candle
+warm-up and a signal on nearly every bar — the friendliest case the probe will ever see.
+`test_a_lookahead_planted_in_a_REAL_hypothesis_is_caught_and_named` plants the same fault in
+`mean_reversion.streak3_fade` and requires `acausal_probe` to name a bar on all four timeframes it
+declares. Measured while writing it, and this is the part worth carrying forward: `acausal_indices`
+at bar 1000 — BOTH bulk arms, every bar before the cut compared — comes back EMPTY on that fault.
+The broad net does not catch a one-bar lookahead in a real hypothesis at all. Against the commonest
+mistake in the industry the twelve probes are the only thing standing there, so the note at the top
+of this file about cutting cut points before cutting probes is not a preference, it is the
+measurement.
+
+**Four fabricated lookaheads sharing one name.** The same file memoises `h.signals(s)` on
+`(hypothesis name, series)` to stay inside the deploy gate's time budget. The tests that prove the
+causality checker has teeth fabricate throwaway `Hypothesis` objects, and all four were called
+`teeth.probe`, so they were handed each other's cached answers and one deliberate lookahead came
+back green. They are named after their functions now. A memo keyed on a name is a trap wherever
+names are not unique.
 
 **A `>=` boundary tested only from far away.** Several thresholds in this codebase were "tested" by
 fixtures sitting nowhere near them — the 90% price-parseability bar checked with a 67%-readable
@@ -241,6 +475,16 @@ signal floor and caught it only because the mutant it was aimed at survived. Use
 looks completely normal in a diff. One of mine landed nested inside a `net`-marked function and
 "passed" without running. The suite is now checked for this by an AST scan; if you are moving tests
 around, re-run it.
+
+**A key list derived from a file that moved.** `test_decide_route.py` parses the keys it requires
+out of `web/app.js` by brace matching, which is the right call — a retyped list only proves the
+list agrees with itself — but an extractor that finds nothing returns an empty set, and every
+`required - set(payload)` assertion built on it then passes by asserting nothing. Rename a function
+in `app.js` and four shape tests go green while checking zero keys.
+`test_the_extractor_read_something_real_out_of_app_js` is the whole defence: it is the one test in
+that file that hard-codes names, and it exists so the others do not have to. Same shape as the
+`at_the_limit > 0` problem below, arriving from the opposite direction — there a precondition was
+doing a test's work, here a test would be doing no work at all with nothing to say so.
 
 **A test whose only kill comes from a precondition.** `test_the_control_is_held_for_the_same_window`
 used to hold down two real faults through its `at_the_limit > 0` fixture-health check — an assertion
@@ -299,6 +543,35 @@ changing the code means changing a number in a test and noticing.
   long and a short off the same count are one observation. Reading it the other way takes this
   fixture from +0.043 to −0.009 expectancy and flips `edge_vs_null`. Both readings are defensible;
   this is the one in force.
+- **A hypothesis's `signals()` is checked against the six properties in
+  `test_hypothesis_library.py` and against nothing else.** Causality, alphabet, warm-up, scale,
+  purity, degeneracy. Its formula is checked by no test in this repo, deliberately.
+- **Every hypothesis in the registry is scale-free.** All 100, measured on a power-of-two factor
+  where the float arithmetic is exact and on 3.7 where it is not. There is no exception list, and
+  the first hypothesis to compare a price against an absolute number will need one — or a reason.
+- **The declared `min_warmup` is at least as deep as the hypothesis's own refusal floor.** Several
+  families decline to compute below a module constant (`candles._MIN_BARS = 320`, momentum's 391
+  for the 12-1 window); every hypothesis declares a warm-up that covers its own, so none of them
+  ever answers "flat, for want of data" at a bar it declared itself ready for. Nothing said this
+  before; the causality probe now enforces it as a side effect and says so in its failure message.
+- **A hypothesis never writes to the `Series` it is given.** `evaluate_all` runs all hundred over
+  the same arrays in registry order, so one in-place edit would make the result depend on
+  alphabetical order.
+- **`candles.range_gap` fires 102 times in nine years** — 99 on 15m, 3 on 1h, none on 4h. It is the
+  only hypothesis silent over the 1,600-candle real-data fixture, and it is rare rather than dead.
+  If a second name joins it there, that one probably is dead.
+- **Every hypothesis has an English title that adds at least one word its own identifier does not
+  contain**, filler words aside, and a Spanish and Catalan one that is neither empty, nor the
+  English, nor the identifier. The picker prints `title · name` and shows both, so a title made of
+  the identifier's own words is a row that says the same thing twice. Measured: one of the hundred
+  was exactly that when the check was written. Shared domain words are fine and expected —
+  "Hammer after an oversold fall", "Flip sides on every Donchian 20 break" — what is refused is a
+  title whose remainder is empty.
+- **`title` is not in the es/ca staleness fingerprint, deliberately.** `en` hashes rationale and
+  prior only, so rewording a title in Python leaves the translations stale with nothing to say so.
+  That hole is open on purpose: covering it would move all 200 stamps at once, and a re-stamp of
+  200 entries nobody retranslated hides a whole stale rationale to catch one stale line. If a title
+  fingerprint is ever wanted it belongs in a SECOND field, stamped on its own.
 - **Bars before a user's first imported signal are flat**, and a NumPy `RuntimeWarning` is a test
   failure suite-wide (`filterwarnings` in `pyproject.toml`) because NaN→int8 is undefined and
   silently produces a position 128× anything anyone asked for.
@@ -309,9 +582,15 @@ changing the code means changing a number in a test and noticing.
 
 ```sh
 export PATH="/opt/homebrew/bin:$PATH"
-uv run pytest -m "not net"      # 582 passed, ~4.1 s
+uv run pytest -m "not net"      # 947 passed, 1 deselected, ~5.6 s
+uv run pytest                   # 948 passed, ~10 s — RUNS the net test, and needs the internet
 uv run ruff check .             # clean
 ```
+
+`test_hypothesis_library.py` reads real candles from `data/bars/`. If that store holds fewer than
+56 months it SKIPS its real-candle arm, loudly, and the synthetic arm still runs. A skip there is
+not a pass: half of every property in that file is then unmeasured, including the arm that caught
+the planted one-bar lookahead when the synthetic arm did not.
 
 To check a single fault: edit the source, run the suite, confirm the named test fails, revert, and
 verify with `shasum -a 256` that the file is byte-identical. Purge `__pycache__` between runs, or set

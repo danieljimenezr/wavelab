@@ -113,6 +113,7 @@ def _engulfing_raw(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="candles.engulfing_raw",
     family="candles",
+    title="Every engulfing candle, no trend filter",
     rationale="An engulfing candle means that the entire price range the previous candle considered "
               "acceptable has been travelled end to end and the close has ended up on the other "
               "side of its open: whoever took a position during the engulfed candle is underwater "
@@ -154,6 +155,7 @@ def _engulfing_with_trend(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="candles.engulfing_trend",
     family="candles",
+    title="Engulfing that agrees with the EMA 200",
     rationale="The same engulfing candle, but only when it points in the direction of the "
               "underlying trend. The stop mechanism can only work if there is one side trapped and "
               "another with the capacity to push: in a rising market a bullish engulfing marks the "
@@ -194,6 +196,7 @@ def _hammer_oversold(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="candles.hammer_oversold",
     family="candles",
+    title="Hammer after an oversold fall",
     rationale="A hammer is a candle whose price fell a long way and came back: the lower wick is "
               "the visible footprint of passive demand that absorbed all the aggressive selling and "
               "handed the price back. That only says something after a fall, when the aggressive "
@@ -232,6 +235,7 @@ def _shooting_star_overbought(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="candles.shooting_star_overbought",
     family="candles",
+    title="Shooting star after an overbought rise",
     rationale="Exact mirror of the hammer: a long upper wick after a rise, that is, passive supply "
               "that absorbed all the aggressive buying and handed the price back. It is registered "
               "separately rather than as the short side of the same hypothesis because the "
@@ -271,6 +275,7 @@ def _close_in_range(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="candles.close_in_range",
     family="candles",
+    title="Close pinned to the range extreme",
     rationale="The close is the only price both sides agreed to carry a position at from one candle "
               "into the next; the rest of the range is prices somebody rejected. A close pinned to "
               "the extreme of the range means the winning side still had unfilled demand when the "
@@ -309,6 +314,7 @@ def _marubozu_continuation(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="candles.marubozu_continuation",
     family="candles",
+    title="Big body, no wick at the close",
     rationale="A closing marubozu is a large body with no wick on the close side: throughout the "
               "whole candle there was not one moment in which the losing side managed to hand the "
               "price back, not even at the end. It is the signature of a flow imbalance that met no "
@@ -350,6 +356,7 @@ def _doji_after_thrust(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="candles.doji_after_thrust",
     family="candles",
+    title="Fade the doji inside a strong trend",
     rationale="A doji is the first candle of a leg in which the dominant side finds enough "
               "counterparty to end up where it started; inside a mature directional move it would "
               "mark the point at which the marginal buyer (or seller) runs out, and that is why the "
@@ -395,6 +402,7 @@ def _outsized_wick(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="candles.outsized_wick",
     family="candles",
+    title="Fade the long wick, no context required",
     rationale="A long wick is the footprint of a level the price reached and came back from: proof "
               "that there really was passive liquidity there, which absorbed the aggressive flow "
               "and was left partly unfilled. Whoever has a large order at that price puts it back, "
@@ -436,6 +444,7 @@ def _range_expansion(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="candles.range_expansion",
     family="candles",
+    title="Ride a candle that doubles the ATR",
     rationale="A candle whose true range doubles the ATR of the previous 14 is not noise: it is a "
               "repricing in which the book was traded straight through. Our mechanism is "
               "informational: new information has come in, volatility clusters, and whoever has to "
@@ -489,6 +498,7 @@ def _inside_bar_break(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="candles.inside_bar_break",
     family="candles",
+    title="Inside candle, then close beyond the mother",
     rationale="A candle contained within the range of the previous one is a contraction of the "
               "traded range: both sides accept the same price interval and uncertainty drops. "
               "Protective orders pile up there on both sides of the mother candle's extremes. The "
@@ -538,6 +548,7 @@ def _range_gap(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="candles.range_gap",
     family="candles",
+    title="Fade the gap, expect it to fill",
     rationale="BTC trades without interruption, so a gap cannot be the result of information piling "
               "up while the market was closed: if a candle's entire range sits above the previous "
               "candle's high, the book has been emptied and the price has travelled with no trading "
@@ -579,6 +590,7 @@ def _three_directional_bars(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="candles.three_directional_bars",
     family="candles",
+    title="Three soldiers or crows, a sliced order",
     rationale="Three candles in a row with wide bodies, each closing near its high and above the "
               "previous one, is not an impulse: it is the footprint of a large order being executed "
               "in slices over time. A speculative impulse burns out in one candle; an execution "
@@ -622,6 +634,7 @@ def _body_flow(s: Series) -> np.ndarray:
 register(Hypothesis(
     name="candles.body_flow_20",
     family="candles",
+    title="Range turned into progress over 20 candles",
     rationale="Aggregates candle shape instead of hunting for a pattern: it measures what "
               "proportion of all the range traded over 20 candles has turned into net open-to-close "
               "progress. When that proportion is high, the same side is systematically winning the "
