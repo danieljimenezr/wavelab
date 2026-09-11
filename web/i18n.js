@@ -527,6 +527,8 @@ const DICTS = { en: EN, es: ES, ca: CA };
 // A miss falls through in English rather than breaking anything.
 
 const SERVER_ES = {
+  'the market has no range at all (ATR is zero): there is no volatility to measure a stop against, so there is no plan to make here.':
+    'el mercado no tiene ningún recorrido (el ATR es cero): no hay volatilidad contra la que medir un stop, así que aquí no hay plan que hacer.',
   // battery verdict summaries
   'IT READS THE FUTURE. The result is not reachable in real time.':
     'MIRA AL FUTURO. El resultado no es alcanzable en tiempo real.',
@@ -682,6 +684,8 @@ const SERVER_ES = {
 };
 
 const SERVER_CA = {
+  'the market has no range at all (ATR is zero): there is no volatility to measure a stop against, so there is no plan to make here.':
+    'el mercat no té cap recorregut (l\'ATR és zero): no hi ha volatilitat contra la qual mesurar un stop, així que aquí no hi ha cap pla a fer.',
   'IT READS THE FUTURE. The result is not reachable in real time.':
     'MIRA AL FUTUR. El resultat no és assolible en temps real.',
   'DOES NOT SURVIVE. It fails several independent tests.':

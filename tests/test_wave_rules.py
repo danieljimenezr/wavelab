@@ -761,6 +761,49 @@ class TestTheGatesDecideAtTheirOwnBoundary:
             f"Reasons: {r_over.reasons}"
         )
 
+    def test_a_stop_landing_exactly_on_the_size_cut_ceiling_is_not_cut(self):
+        """The third gate on `stop_atr`, and the one this class was missing.
+
+        `max_stop_atr` is not a refusal — it is where the SIZE starts being cut — so it was left
+        out of a class named for the gates that reject, and `test_a_far_stop_costs_size_and_only_
+        size` samples 100 / 900 / 2000 ATR, none of which lands on the limit. Loosening
+        `stop_atr > cfg.max_stop_atr` to `>=` therefore survived the whole suite.
+
+        What the loosened gate emits is self-contradicting on its face: at exactly the ceiling it
+        prints "stop at 3.0 ATR (>3.0): size cut to 100%" — a cut to full size, justified by a
+        comparison the numbers in the same sentence deny. Nothing in the suite read that string.
+
+        The threshold is derived the way the two tests above derive theirs: run the plan, read the
+        `stop_atr` the function computed, and hand the scenario back under a config whose ceiling
+        IS that float. Nothing is solved for and no constant is written down.
+        """
+        h, base = self._accepted_baseline()
+
+        at_ceiling = replace(PlanConfig(), max_stop_atr=base.stop_atr)
+        r = build_plan(h, self.PRICE, self.ATR, at_ceiling)
+        assert r.stop_atr == at_ceiling.max_stop_atr, (
+            f"fixture check: the second run has to reproduce the same {base.stop_atr!r} ATR that "
+            f"the ceiling was set to, and it measured {r.stop_atr!r}"
+        )
+        assert r.size_factor == 1.0, (
+            f"a stop of exactly {base.stop_atr!r} ATR was cut to {r.size_factor:.0%} under a "
+            f"max_stop_atr of exactly that same float: the size is cut AT the ceiling rather than "
+            f"beyond it, and the reason quotes '(>{at_ceiling.max_stop_atr})' about a stop that is "
+            f"not above it. Reasons: {r.reasons}"
+        )
+        assert not any("size cut" in x for x in r.reasons), (
+            f"the size came back whole and the card says it was cut anyway: {r.reasons}"
+        )
+
+        # The pincer, as above: without it this would also pass against the cut deleted outright.
+        just_under = replace(PlanConfig(), max_stop_atr=math.nextafter(base.stop_atr, 0.0))
+        r_under = build_plan(h, self.PRICE, self.ATR, just_under)
+        assert r_under.size_factor < 1.0 and any("size cut" in x for x in r_under.reasons), (
+            f"a stop of {base.stop_atr!r} ATR was left at full size under a ceiling of "
+            f"{just_under.max_stop_atr!r} — one ULP lower, and genuinely exceeded. The full size "
+            f"one ULP higher is therefore not the gate deciding. Reasons: {r_under.reasons}"
+        )
+
     def test_an_entry_zone_of_zero_width_is_refused_as_an_empty_zone(self):
         """`lo >= hi` is the only one of the three that has to refuse at equality: a zone whose two
         edges are the same price is not a narrow zone, it is no zone at all.
@@ -1111,6 +1154,14 @@ _PLANS: list[tuple] = [
     ("w4_long", (100.0, 200.0, 150.0, 300.0, 250.0), Direction.LONG, 235.0, 3.0),
     ("w4_short", (300.0, 200.0, 250.0, 100.0, 150.0), Direction.SHORT, 165.0, 3.0),
     ("w4_long_tight_zone", (100.0, 210.0, 150.0, 260.0, 215.0), Direction.LONG, 214.0, 3.0),
+    #: The mirror of the row above, reflected about 200. It is here because the long one was here
+    #: alone: the w4 truncation is written as an if/else, the LONG branch was carried into three
+    #: parametrised suites by `w4_long_tight_zone` and the SHORT branch by nothing — `w4_short`'s
+    #: zone never reaches P1, so it exercises the `else:` without constraining it. Measured: with
+    #: this row absent, every mutation of `hi = min(hi, P[1] * 0.9995)` survives the whole suite
+    #: (the nudge flipped, `min` turned into `max`, the truncation deleted outright), while each
+    #: mirror-image edit on the long side dies to between two and six tests.
+    ("w4_short_tight_zone", (300.0, 190.0, 250.0, 140.0, 185.0), Direction.SHORT, 186.0, 3.0),
 ]
 _PLAN_IDS = [c[0] for c in _PLANS]
 
@@ -1547,6 +1598,42 @@ class TestTheZoneFigureIsGuardedLikeTheHeadline:
             f"next to the least reachable trade"
         )
 
+    def test_a_zone_midpoint_sitting_exactly_on_the_stop_quotes_no_reward(self):
+        """The boundary of the same guard, and the reason it needs its own test.
+
+        `if risk_zone > 0` loosened to `>= 0` divides by zero when the zone midpoint lands exactly
+        on the stop. That mutant IS killed by the suite as it stands — by three ERRORs in
+        `tests/test_server_i18n.py`, whose fixture happens to build a plan in that state and takes
+        a `ZeroDivisionError` through an unrelated assertion. Red for the wrong reason: tidy that
+        fixture and this boundary has no coverage at all, and the crash is in the served path.
+
+        Exact in binary rather than solved for: the zone of the (70000, 80000, 74000) count is
+        72,140-75,000, so its midpoint is 73,570; the cushion at this ATR is 0.25 x 900 = 225, and
+        the percentage floor at a price of 77,000 is 77, so the cushion is exactly 225. Setting
+        the invalidation to 73,795 puts the stop on 73,570.0 to the last bit.
+        """
+        cfg = PlanConfig()
+        atr = 900.0
+        h = _hypothesis((70000.0, 80000.0, 74000.0))
+        base = build_plan(h, 75000.0, atr, cfg)
+        mid = base.plan.entry_mid
+
+        cushion = max(cfg.stop_buffer_atr * atr, 2 * cfg.tick_size, cfg.stop_buffer_pct * 77000.0)
+        r = build_plan(replace(h, invalidation_price=mid + cushion), 77000.0, atr, cfg)
+
+        assert r.plan.stop == mid, (
+            f"fixture check: the stop has to land exactly on the zone midpoint for this to be the "
+            f"boundary at all — stop {r.plan.stop!r} against midpoint {mid!r}"
+        )
+        assert r.rr_t2 > 0, (
+            f"the fill was refused as well, so this no longer isolates the zone figure: {r.reasons}"
+        )
+        assert r.rr_in_zone == 0.0, (
+            f"a limit resting at {mid:,.0f} would fill exactly ON its own stop — zero distance, "
+            f"zero risk, and no trade — and the card quotes {r.rr_in_zone}R for it. Dividing by "
+            "that zero is the same defect one step further on: it takes the served route down"
+        )
+
 
 class TestAnEntryPastItsOwnStopIsRefusedRatherThanSized:
     """★ The refusal that only became reachable when the arithmetic moved to the fill price.
@@ -1667,6 +1754,15 @@ class TestTheSizeIsCutAndTheStopIsNot:
             assert any("size cut" in x for x in r.reasons), (
                 f"the size was cut to {r.size_factor:.0%} and the card says nothing: {r.reasons}"
             )
+            # The reason has to name the ceiling it actually tripped. Substituting `min_stop_atr`
+            # into that f-string survived the whole suite, because `"size cut" in x` is happy with
+            # any number: the card then told the user the limit was 0.75 ATR when it is 3.0. A
+            # refusal with numbers is the argument this module is built on, so a wrong number in
+            # one is worse than no number.
+            assert any(f"(>{cfg.max_stop_atr})" in x for x in r.reasons), (
+                f"the size was cut at {r.stop_atr:.2f} ATR and the reason does not quote the "
+                f"ceiling it crossed ({cfg.max_stop_atr}): {r.reasons}"
+            )
         else:
             assert cfg.min_stop_atr <= r.stop_atr <= cfg.max_stop_atr, "fixture check"
             assert r.size_factor == 1.0, (
@@ -1712,6 +1808,74 @@ class TestTheSizeIsCutAndTheStopIsNot:
             f"{cushion} below the invalidation ({min(terms.values())} is the smallest floor). A "
             "cushion that collapses to the smallest floor puts the stop on the invalidation itself"
         )
+
+
+class TestAMarketWithNoRangeIsRefusedByName:
+    """★ Resolved, and this class is the record of which way it went.
+
+    It used to be a characterisation test asserting the opposite, because the shipped behaviour was
+    a plan. `stop_atr = risk / atr if atr else float("inf")` took the `inf` branch on a genuine
+    zero; `inf` is above `max_stop_atr`, so the size was cut by `3.0 / inf = 0.0`; it is not below
+    `min_stop_atr`, so the noise floor did not object; and `cost_r` does not involve the ATR, so
+    the fee gate did not either. The card came back `viable=True` with an entry zone, a stop, three
+    targets and an instruction to take 0% of a position.
+
+    A "yes" nobody can act on, from a tool whose argument is that its refusals come with
+    arithmetic. Both behaviours were defensible and neither was asserted, so the suite was green
+    either way; the pin existed so that whoever decided would land on a red test and have to say so
+    out loud. This is that saying-so: a market with no range is refused BY NAME, because every
+    number in the plan is measured in ATRs and with no ATR there is nothing to measure against.
+
+    Reachable: `WilderATR` returns a real `0.0` over a flat series, not `None` — measured, 40 flat
+    bars, `ready` True and `value` 0.0 — and `LiveEngine.decide` guards `det.atr is None`, not
+    `== 0.0`. What is still NOT demonstrated is a card carrying both at once, because hypotheses
+    need pivots and pivots need movement. `build_plan` is exported and takes the ATR it is handed,
+    which is the layer where this decides and the layer where it is refused.
+    """
+
+    def test_a_market_with_no_range_is_refused_and_not_sized_at_zero(self):
+        r = build_plan(_hypothesis((70000.0, 80000.0, 74000.0)), 75000.0, 0.0, PlanConfig())
+
+        assert not r.viable, (
+            f"with an ATR of zero the card came back viable, sized at {r.size_factor:.0%}. A plan "
+            f"at 0% of a position is a yes that cannot be acted on: {r.plan}"
+        )
+        assert "no range" in r.reasons[0], (
+            f"the refusal reads {r.reasons[0]!r}. A flat market was turned down for some other "
+            "reason, so the reader is given an argument about fees or structure for a market that "
+            "simply is not moving"
+        )
+        assert r.rr_t2 == 0 and r.stop_atr == 0, (
+            f"the refusal still carries {r.rr_t2:.2f}R at {r.stop_atr:.2f} ATR. There is no ratio "
+            "to quote where there is no volatility to quote it in"
+        )
+
+
+class TestAConfigThatRefusesEveryStopSaysSoAtOnce:
+    """A floor above its own ceiling refuses every stop that exists — too tight for the noise floor
+    and too wide for the size cut, simultaneously, at any distance.
+
+    Nothing crashed: `build_plan` simply turned everything down with a reason blaming the market.
+    An operator who mistyped the knob would read "the stop sits inside the noise floor" on setup
+    after setup and had no way to learn that the setting they changed made the question
+    unanswerable. It is refused at construction now, where the mistake actually is.
+    """
+
+    def test_a_floor_above_its_own_ceiling_is_refused_at_construction(self):
+        with pytest.raises(ValueError, match="min_stop_atr"):
+            PlanConfig(min_stop_atr=4.0, max_stop_atr=3.0)
+
+    def test_the_boundary_itself_is_allowed(self):
+        """Equal is answerable: exactly one stop distance satisfies both, and a caller who wants
+        that is not making a mistake."""
+        cfg = PlanConfig(min_stop_atr=3.0, max_stop_atr=3.0)
+        assert cfg.min_stop_atr == cfg.max_stop_atr == 3.0
+
+    @pytest.mark.parametrize("kw", [{"max_cost_r": 0.0}, {"tick_size": 0.0},
+                                    {"fee_bps_taker": -1.0}], ids=["cost", "tick", "fee"])
+    def test_the_other_impossible_settings_are_refused_too(self, kw):
+        with pytest.raises(ValueError):
+            PlanConfig(**kw)
 
 
 class TestTheTargetsAreProjectedFromTheVertexTheWaveStartsAt:
@@ -1776,6 +1940,34 @@ class TestTheTargetsAreProjectedFromTheVertexTheWaveStartsAt:
             "1's territory, and it has to be pushed clear of P1 = 210"
         )
         assert r.plan.entry_lo > h.invalidation_price > r.plan.stop
+
+    def test_a_wave_four_zone_is_truncated_against_the_end_of_wave_one_on_a_SHORT_too(self):
+        """The mirror of the test above, and it is a separate test because the source is an
+        if/else and the two branches were not equally guarded.
+
+        `lo = max(lo, P[1] * 1.0005)` on the long side and `hi = min(hi, P[1] * 0.9995)` on the
+        short. Every edit to the long line died to the suite; every edit to the short line — the
+        nudge flipped, `min` turned into `max`, the truncation removed — survived all 983 tests.
+        Measured on this fixture, whose vertices are the long fixture's reflected about 200:
+
+            shipped                  entry_hi = 189.905   rr_in_zone = 20.85
+            nudge flipped            entry_hi = 190.095   rr_in_zone = 21.30
+            truncation gone          entry_hi = 195.0     rr_in_zone = 45.71
+
+        The middle line is the defect in miniature: the count dies at 190 and the stop sits at
+        190.75, so a published entry at 190.095 is a short being invited to sell BELOW the price
+        at which its own count is already dead. The last line publishes a zone five points past
+        the invalidation and more than doubles the ratio quoted for it.
+        """
+        h = _hypothesis((300.0, 190.0, 250.0, 140.0, 185.0), Direction.SHORT)
+        assert h.invalidation_price == 190.0
+        r = build_plan(h, 186.0, 3.0, PlanConfig())
+        assert r.viable, r.reasons
+        assert r.plan.entry_hi == pytest.approx(189.905), (
+            f"the zone ends at {r.plan.entry_hi}: the raw 0.500 retracement is 195, inside wave "
+            "1's territory, and it has to be pushed clear of P1 = 190"
+        )
+        assert r.plan.entry_hi < h.invalidation_price < r.plan.stop
 
     def test_a_wave_four_zone_that_truncates_to_nothing_is_refused_with_its_reason(self):
         """When wave 4 has retraced so far that no legal entry is left above the invalidation, the

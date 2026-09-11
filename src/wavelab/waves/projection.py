@@ -38,6 +38,22 @@ class PlanConfig:
     expected_loss_r: float = 1.10
     exit_template_id: str = "std_2r_48b"
 
+    def __post_init__(self) -> None:
+        # A floor above its own ceiling refuses every stop that exists: too tight for the noise
+        # floor and too wide for the size cut, at the same time, for any distance. Nothing crashes
+        # — build_plan simply turns everything down, with a reason that blames the market. The
+        # operator reads "the stop sits inside the noise floor" on a setup after setup and has no
+        # way to learn that the knob they turned made it unanswerable.
+        if self.min_stop_atr > self.max_stop_atr:
+            raise ValueError(
+                f"min_stop_atr ({self.min_stop_atr}) is above max_stop_atr ({self.max_stop_atr}): "
+                "no stop distance can satisfy both, so every plan would be refused and the reason "
+                "given would be about the market rather than about this setting.")
+        if self.max_cost_r <= 0 or self.fee_bps_taker < 0 or self.tick_size <= 0:
+            raise ValueError(
+                f"max_cost_r ({self.max_cost_r}) and tick_size ({self.tick_size}) must be positive "
+                f"and fee_bps_taker ({self.fee_bps_taker}) cannot be negative.")
+
 
 @dataclass(frozen=True, slots=True)
 class PlanResult:
@@ -172,7 +188,19 @@ def build_plan(h: Hypothesis, price: float, atr: float, cfg: PlanConfig | None =
                           ((f"price ${entry:,.0f} is already past the stop ${stop:,.0f}: this "
                             "count is over, and buying here is a loss on the first tick."),))
 
-    stop_atr = risk / atr if atr else float("inf")
+    if atr <= 0:
+        # A market with no range. Every number below is measured in ATRs, so with no ATR there is
+        # no noise floor to clear and no size to cut: `risk / 0` took the `inf` branch, `inf` was
+        # above max_stop_atr, and the size came out as 3.0/inf = 0.0. The card then published a
+        # viable plan — entry zone, stop, three targets — instructing the reader to take 0% of a
+        # position. A "yes" nobody can act on, from a tool whose whole claim is that its refusals
+        # come with arithmetic. WilderATR returns a real 0.0 over a flat series, not None, so the
+        # route above does not catch this either.
+        return PlanResult(None, False, 0, 0, 0, 0, 0, 1.0,
+                          (("the market has no range at all (ATR is zero): there is no volatility "
+                            "to measure a stop against, so there is no plan to make here."),))
+
+    stop_atr = risk / atr
 
     # The arithmetic is computed BEFORE any rejection, and always travels in the result.
     # A "no" with no numbers is an opinion; with numbers it is an argument the user can push back

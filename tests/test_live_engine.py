@@ -30,6 +30,8 @@ from wavelab.core.types import Direction, MaturityLevel, PivotKind, Verdict
 from wavelab.engine import live as live_module
 from wavelab.engine.live import LiveEngine, Mode
 from wavelab.labeling.barriers import Outcome, resolve_triple_barrier
+from wavelab.waves.matcher import match_impulses
+from wavelab.waves.projection import build_plan
 
 from .conftest import SYMBOL, T0, make_bars
 
@@ -75,6 +77,42 @@ def replay_20d(bars_20d):
             closes[htf.open_time_ms] = htf.close
             cards[htf.open_time_ms] = e.decide(TRIGGER_TF, htf.close)
     return e, cards, closes
+
+
+@pytest.fixture(scope="module")
+def wire_20d(bars_20d):
+    """Every card of the 20 days, beside the `PlanResult` objects it was built from.
+
+    The backtest is the only consumer any test had, and it reads seven of the card's keys. So every
+    figure `decide()` publishes that `run_backtest` does not book — the entry zone, the third
+    target, `rr_in_zone`, `cost_r`'s fourth decimal, `size_factor`, `price` — was pinned by nothing
+    at all: ten separate faults in that dict changed between 408 and 1,588 published rows each and
+    the whole suite stayed green. `test_a_signal_books_the_trade_the_card_actually_offered`
+    compares the signal against the card, so anything the two get wrong TOGETHER is invisible to
+    it by construction.
+
+    This is the card against something outside the engine: `match_impulses` and `build_plan` called
+    directly, with the engine's own configs, on the same pivots at the same instant. Those two are
+    heavily tested in `test_wave_rules.py` against arithmetic written out by hand, so they are an
+    oracle rather than a second copy — the claim here is narrow and is exactly the one nothing held:
+    that the dict going out on the wire is that plan, at the precision the card prints.
+    """
+    e = LiveEngine(SYMBOL, list(TIMEFRAMES), 8192, TRIGGER_TF)
+    trigger = BY_NAME[TRIGGER_TF]
+    rows = []
+    for b in bars_20d:
+        for htf in e.on_bar_1m(b):
+            if htf.tf is not trigger:
+                continue
+            price = htf.close
+            card = e.decide(TRIGGER_TF, price)
+            det = e.state.detectors[TRIGGER_TF]
+            ring = e.state.rings[TRIGGER_TF]
+            pivs = det.store.as_of(ring.last_closed_ts_ms or 0)
+            hyps = match_impulses(pivs, e.matcher_cfg, directions=tuple(e.directions))
+            plans = [(h, build_plan(h, price, det.atr, e.plan_cfg)) for h in hyps]
+            rows.append((htf.open_time_ms, price, card, plans))
+    return rows
 
 
 class TestLiveResampling:
@@ -461,6 +499,163 @@ class TestTheDecisionCard:
         assert in_zone > 0, (
             "not one hypothesis was ever viable AND inside its entry zone over 20 days, so the "
             "cap above was never actually exercised: this test proves nothing as it stands"
+        )
+
+    def test_the_card_publishes_the_plan_that_was_actually_built(self, wire_20d):
+        """★ Every published figure against the plan it came from, at the precision it is printed.
+
+        The backtest reads seven of these keys and nothing reads the rest, so the rest were
+        unmeasured. Each of the following was applied to `decide()` one at a time and the suite
+        stayed green on all of them:
+
+            entry_lo and entry_hi swapped on the wire        all 808 viable rows
+            targets sliced to [:2] — T3 never drawn          all 808
+            targets reversed                                 all 808 (the backtest reads
+                                                             targets[1], the fixed point of
+                                                             reversing a 3-tuple)
+            rr_in_zone filled with rr_t2                     all 808
+            stop rounded to 1dp                              737
+            invalidation_price rounded to 1dp                769
+            cost_r rounded to 2dp                            799 (0.004 becomes 0.0)
+            size_factor rounded to 1dp                       408
+            score rounded to 2dp                             687 (it also shifts min_score)
+            the card's own price rounded to 1dp              442 cards
+
+        None of them is a plausible typo about nothing: `cost_r` is the fee gate's own number and
+        feeds `net_r` and `expectancy_r`; `score` decides what `min_score` filters; the entry zone
+        and the third target are lines `drawPlan` draws on the chart. What they have in common is
+        only that no test looked.
+
+        The rounding is asserted as EQUALITY against `round(...)` rather than with a tolerance,
+        because the precision is the claim: a card that prints a stop to the cent and computes on
+        one rounded to a dime is a card describing a different trade, however small the difference.
+        """
+        seen_viable = 0
+        for ts, price, card, plans in wire_20d:
+            if "price" not in card:
+                # The warm-up card: no detector, no ring or no ATR yet, so `decide()` returns its
+                # short refusal and never reaches the payload this test is about.
+                assert card["hypotheses"] == [] and card["verdict"] == Verdict.NO_TRADE.value
+                continue
+            assert card["price"] == round(price, 2), (
+                f"the card at {ts} prints a price of {card['price']} for a bar that closed at "
+                f"{price}"
+            )
+            rows = card["hypotheses"]
+            assert len(rows) == len(plans), (
+                f"the card at {ts} carries {len(rows)} rows and the matcher produced "
+                f"{len(plans)} counts on the same pivots"
+            )
+            for row, (h, r) in zip(rows, plans, strict=True):
+                assert row["id"] == h.id, f"row order diverged at {ts}"
+                assert row["viable"] is r.viable and row["in_zone"] is r.in_zone
+                assert row["score"] == round(h.score, 3), (
+                    f"{ts} {h.id}: score {row['score']} published for a count scoring {h.score!r}. "
+                    "This is the number `min_score` filters on"
+                )
+                assert row["invalidation_price"] == round(h.invalidation_price, 2), (
+                    f"{ts} {h.id}: the red line on the chart is drawn at "
+                    f"{row['invalidation_price']} for a count that dies at {h.invalidation_price!r}"
+                )
+                if not r.viable:
+                    continue
+                seen_viable += 1
+                published = (row["entry_lo"], row["entry_hi"], row["stop"], row["targets"],
+                             row["rr_t2"], row["rr_in_zone"], row["cost_r"], row["p_required"],
+                             row["stop_atr"], row["size_factor"])
+                built = (round(r.plan.entry_lo, 2), round(r.plan.entry_hi, 2),
+                         round(r.plan.stop, 2), [round(t, 2) for t in r.plan.targets],
+                         round(r.rr_t2, 2), round(r.rr_in_zone, 2), round(r.cost_r, 4),
+                         round(r.p_required, 4), round(r.stop_atr, 2), round(r.size_factor, 3))
+                assert published == built, (
+                    f"{ts} {h.id}: the card published\n  {published}\nfor a plan whose own "
+                    f"figures are\n  {built}\nThe card is not describing the trade the planner "
+                    "built, and nothing downstream reads enough of it to notice"
+                )
+                assert row["entry_lo"] <= row["entry_hi"], (
+                    f"{ts} {h.id}: entry zone published as {row['entry_lo']}-{row['entry_hi']}, "
+                    "which is inside out — `drawPlan` shades it from lo to hi"
+                )
+                assert len(row["targets"]) == 3, (
+                    f"{ts} {h.id}: {len(row['targets'])} targets on the wire. The card draws "
+                    "three, and the backtest books the second, which survives a great deal"
+                )
+
+        assert seen_viable >= 200, (
+            f"only {seen_viable} viable rows across 20 days: this comparison is not exercising the "
+            "payload"
+        )
+
+    def test_the_verdict_does_not_depend_on_anything_being_in_a_zone(self, replay_20d):
+        """★ The line the source comment says must not learn this, and nothing held it.
+
+        `verdict = Verdict.WATCH if out else Verdict.NO_TRADE`. It used to be a ternary whose two
+        branches were both WATCH — code shaped like a decision that decided nothing — and the
+        comment above it now says `best_in_zone` "does NOT move the verdict" and warns that the
+        line "should be rewritten [when maturity rises] rather than left looking as though it
+        already had".
+
+        Re-gating it on `best_in_zone` flips 311 of this fixture's 480 cards from WATCH to
+        NO_TRADE and the suite stays green. The two tests that look as though they would see it do
+        not: `test_the_verdict_never_goes_above_watch_while_the_maturity_is_prior` checks only the
+        CEILING, and `test_a_card_with_no_structure_has_nothing_to_trade` checks only the empty
+        case. The band between them — structure present, price outside every zone, 65% of all
+        cards — was unguarded in both directions.
+
+        That band is the whole point of the verdict as it stands: a count that is valid and waiting
+        for the price to come back to its zone is the thing the reader is being asked to WATCH. A
+        NO_TRADE there means the card goes dark on exactly the setups it exists to surface.
+        """
+        _, cards, _ = replay_20d
+        with_structure = [d for d in cards.values() if d["hypotheses"]]
+        out_of_zone = [d for d in with_structure
+                       if not any(h["viable"] and h["in_zone"] for h in d["hypotheses"])]
+        assert len(out_of_zone) >= 50 and len(with_structure) - len(out_of_zone) >= 20, (
+            f"{len(out_of_zone)} of {len(with_structure)} cards with structure had nothing in a "
+            "zone: both kinds have to appear or this test cannot tell the two gates apart"
+        )
+        for d in with_structure:
+            assert d["verdict"] == Verdict.WATCH.value, (
+                f"a card carrying {len(d['hypotheses'])} hypotheses came back "
+                f"{d['verdict']!r}. There is structure to watch; whether the price is inside one "
+                "of its entry zones is the REASON line's business and not the verdict's"
+            )
+        for d in cards.values():
+            if not d["hypotheses"]:
+                assert d["verdict"] == Verdict.NO_TRADE.value, (
+                    f"an empty card came back {d['verdict']!r} with nothing to watch"
+                )
+
+    def test_the_zone_reason_is_on_exactly_the_cards_with_nothing_in_a_zone(self, replay_20d):
+        """★ What `best_in_zone` actually decides, which is the line the reader acts on.
+
+        With the verdict flattened to WATCH, the one observable consequence of `best_in_zone` is
+        the sentence "there is structure, but the price is not inside any entry zone". Two faults
+        in it survived the suite: inverting the test puts that sentence on the 446 cards where it
+        is false and removes it from the ones where it is true, and computing `best_in_zone` from
+        `r.viable` instead of `r.in_zone` deletes it from 302 cards that should carry it.
+
+        Asserted as an "if and only if" because each direction alone is satisfied by a constant:
+        always printing it passes the one, never printing it passes the other.
+        """
+        _, cards, _ = replay_20d
+        marker = "not inside any entry zone"
+        both = {True: 0, False: 0}
+        for ts, d in cards.items():
+            in_a_zone = any(h["viable"] and h["in_zone"] for h in d["hypotheses"])
+            said = any(marker in r for r in d["reasons"])
+            expected = bool(d["hypotheses"]) and not in_a_zone
+            both[expected] += 1
+            assert said is expected, (
+                f"the card at {ts} carries {len(d['hypotheses'])} hypotheses, "
+                f"{'one of them' if in_a_zone else 'none of them'} with the price inside its entry "
+                f"zone, and the reason {'is' if said else 'is not'} on it: {d['reasons']}. That "
+                "sentence is the only thing being in a zone changes today, and it is what the "
+                "reader decides on"
+            )
+        assert both[True] >= 50 and both[False] >= 20, (
+            f"the reason was expected on {both[True]} cards and absent from {both[False]}: both "
+            "cases have to occur or one direction of this claim is untested"
         )
 
     def test_every_pivot_it_counts_is_an_extreme_of_the_bar_it_is_stamped_on(self, replay_20d):
@@ -1203,16 +1398,28 @@ class TestTheBacktest:
 
         Both groupings are asserted below. The bare-archetype one is the strictly stronger claim
         and it is the behaviour that ships.
+
+        AND THE DEBOUNCE HAS TWO SIDES. `apart >= COOLDOWN_BARS` is satisfied a fortiori by a
+        cooldown that is too TIGHT, so this test held only the direction that causes
+        pseudo-replication and was blind to the other one. Loosening the source comparison by a bar
+        (`< cooldown_bars` to `<= cooldown_bars`) deletes roughly half the signals on this fixture
+        — 29 of its 59 same-archetype gaps sit at exactly the cooldown — and it went unnoticed. A
+        backtest that silently discards 48% of its sample reports a smaller `n` around a number
+        nobody asked for, and says nothing. The closing assertion below is that the boundary is
+        INCLUSIVE: two signals exactly the cooldown apart are both taken.
         """
         tf_ms = BY_NAME[TRIGGER_TF].ms
+        gaps_by_label: dict[str, list[int]] = {}
         for key, label in ((lambda s: s.archetype, "archetype and direction"),
                            (lambda s: s.archetype.rsplit("_", 1)[0], "archetype alone")):
             last: dict[str, int] = {}
+            gaps = gaps_by_label.setdefault(label, [])
             for s in sorted(backtest_20d.signals, key=lambda s: s.ts_ms):
                 k = key(s)
                 previous = last.get(k)
                 if previous is not None:
                     apart = (s.ts_ms - previous) // tf_ms
+                    gaps.append(apart)
                     assert apart >= COOLDOWN_BARS, (
                         f"two {k!r} signals {apart} trigger bars apart with a cooldown of "
                         f"{COOLDOWN_BARS}, grouping by {label}: the same count is being counted "
@@ -1221,6 +1428,17 @@ class TestTheBacktest:
                 last[k] = s.ts_ms
             assert len(last) > 1, (
                 f"only one key under {label}; the debounce was barely exercised")
+            assert gaps, f"no two signals shared a key under {label}: nothing was debounced"
+
+        # The bare archetype is the key in force, so the boundary is asserted on that grouping.
+        gaps = gaps_by_label["archetype alone"]
+        assert min(gaps) == COOLDOWN_BARS, (
+            f"the closest two signals off the same archetype are {min(gaps)} trigger bars apart "
+            f"under a cooldown of {COOLDOWN_BARS}. The debounce is meant to reject a re-entry that "
+            f"is CLOSER than the cooldown, not one that is exactly it, so a minimum above "
+            f"{COOLDOWN_BARS} means the gate has tightened by a bar and is quietly throwing away "
+            f"signals: {sorted(gaps)[:8]}"
+        )
 
     def test_the_score_filter_actually_filters(self, bars_20d, backtest_20d):
         """`min_score` is the operator saying «only the counts that fit well».
@@ -1236,6 +1454,93 @@ class TestTheBacktest:
         assert not strict.signals, (
             f"a score floor no hypothesis can clear still let {len(strict.signals)} signals "
             "through: min_score is not being applied"
+        )
+
+    def test_the_score_floor_is_a_floor_and_not_the_first_score_refused(self, bars_20d,
+                                                                       backtest_20d):
+        """`min_score` at exactly an attainable score has to admit it.
+
+        The test above is the only other one of the filter and it runs at 1.01 — above anything a
+        weighted mean of guideline fits can reach — where `<` and `<=` agree, and no hypothesis on
+        this fixture scores exactly 0.0 either (the lowest is 0.048). So `h["score"] < min_score`
+        tightened to `<=` survived: an operator asking for "counts scoring 0.6 or better" would
+        get counts scoring strictly better than 0.6, and the run they compare against tomorrow
+        would be drawn from a different population than the one they named.
+
+        The floor is taken from the code rather than written down — the lowest score any signal
+        actually carries, read off a completed run — so the case sits exactly ON the boundary
+        whatever the scorer does next. At that floor nothing is excluded, so the cooldown sees the
+        same stream and the same signals come back.
+        """
+        floor = min(s.score for s in backtest_20d.signals)
+        assert floor > 0.0, "the floor has to be a score some signal genuinely carries"
+        at_floor = run_backtest(bars_20d, trigger_tf=TRIGGER_TF, timeframes=TIMEFRAMES,
+                                max_bars_hold=MAX_BARS_HOLD, cooldown_bars=COOLDOWN_BARS,
+                                min_score=floor)
+
+        kept = {(s.ts_ms, s.archetype) for s in at_floor.signals}
+        on_the_line = [s for s in backtest_20d.signals if s.score == floor]
+        assert on_the_line, "fixture check: some signal has to sit on the floor"
+        for s in on_the_line:
+            assert (s.ts_ms, s.archetype) in kept, (
+                f"the {s.archetype} at {s.ts_ms} scores {s.score}, exactly the min_score the run "
+                f"was given, and it was dropped. `min_score` is documented and read as a floor — "
+                f"'only the counts that fit at least this well' — and a gate that refuses AT its "
+                f"own floor silently narrows every filtered run by the whole band sitting on it"
+            )
+        assert len(at_floor.signals) == len(backtest_20d.signals), (
+            f"a floor set to the lowest score in the unfiltered run ({floor}) changed the run from "
+            f"{len(backtest_20d.signals)} signals to {len(at_floor.signals)}: nothing is below it, "
+            "so nothing should have moved"
+        )
+
+    def test_a_signal_on_the_last_bar_of_history_is_left_unresolved(self, bars_20d, backtest_20d):
+        """★ The guard at the end of the record, which no fixture had ever reached.
+
+        `if i is None or i + 1 >= len(H): continue`. Shift that `>=` to `>` and the condition can
+        never be true — `i` is at most `len(H) - 1` — so the guard is gone. A signal fired on the
+        final trigger bar is then resolved against EMPTY high/low/close arrays, and
+        `resolve_triple_barrier` obliges: `Outcome("vertical", 0.0, 0.0, 0.0, 0, False)`. A trade
+        that ran for zero bars and returned exactly nothing then counts in `n`, in `hit_rate` (as a
+        loss — a breakeven is not a win) and in `expectancy_r`, where it drags the mean toward
+        zero in proportion to how many of them there are.
+
+        It survives on the 20-day fixture only because no signal happens to land on its last bar.
+        That is a fact about the seed, not about the code, and in the use that matters most — a
+        backtest run to the present minute, where the newest signal is the one the operator is
+        looking at — it is the common case rather than the rare one.
+
+        So the fixture is built to land there: the same bars, cut off at the instant the trigger
+        bar carrying the last signal closes.
+        """
+        tf_ms = BY_NAME[TRIGGER_TF].ms
+        last_ts = max(s.ts_ms for s in backtest_20d.signals)
+        assert any(s.ts_ms == last_ts and s.outcome is not None for s in backtest_20d.signals), (
+            "precondition: with the later bars present this signal resolves normally, so whatever "
+            "the truncated run does below is the end-of-history guard and not the signal itself"
+        )
+
+        cut = [b for b in bars_20d if b.open_time_ms < last_ts + tf_ms]
+        r = run_backtest(cut, trigger_tf=TRIGGER_TF, timeframes=TIMEFRAMES,
+                         max_bars_hold=MAX_BARS_HOLD, cooldown_bars=COOLDOWN_BARS)
+
+        final = [s for s in r.signals if s.ts_ms == last_ts]
+        assert len(final) == 1 and r.signals[-1].ts_ms == last_ts, (
+            f"the truncated run has to end ON that signal for this to be the case it describes: "
+            f"{len(final)} signals at {last_ts}, last signal at {r.signals[-1].ts_ms}"
+        )
+        assert final[0].outcome is None, (
+            f"the signal on the very last trigger bar came back booked as "
+            f"{final[0].outcome}. There are no bars after it, so there is nothing it could have "
+            "done: this is a trade invented out of an empty array, and it is counted in n, in the "
+            "hit rate and in the expectancy like any other"
+        )
+        assert final[0].null_outcome is None, (
+            "and its control twin as well: a null arm resolved past the end of the record is the "
+            "same phantom on the side every edge is measured against"
+        )
+        assert r.stats()["n"] == sum(1 for s in r.signals if s.outcome is not None), (
+            "the report card counts a signal the resolution loop declined to resolve"
         )
 
     def test_the_same_seed_replays_the_same_backtest(self, bars_20d):

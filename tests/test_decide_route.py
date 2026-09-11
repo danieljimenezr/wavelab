@@ -219,8 +219,10 @@ def test_a_viable_row_carries_the_plan_the_chart_draws_its_lines_from(card):
         assert isinstance(h["invalidation_rule"], str) and h["invalidation_rule"], \
             "drawPlan calls .split(' ') on it to title the red line"
     assert any(h["in_zone"] for h in viable), (
-        "the seed must put the price inside an entry zone: without that, best_in_zone is False and "
-        "the WATCH ceiling has nothing to hold back")
+        "the seed must put the price inside an entry zone, or the fixture never reaches the state "
+        "`test_the_route_cannot_emit_an_actionable_card_at_prior_maturity` is about — the one case "
+        "where an unguarded implementation would say ACTIONABLE. (`best_in_zone` does not move "
+        "the verdict; it moves the reason line. See `LiveEngine.decide`.)")
 
 
 def test_a_timeframe_with_no_data_answers_not_ok_and_says_why(client):
